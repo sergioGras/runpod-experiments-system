@@ -6,6 +6,15 @@ import re
 from pathlib import Path
 
 
+def _matches_subset(actual, expected):
+    """Match nested provider shapes while allowing documented extra fields."""
+    if isinstance(expected, dict):
+        return isinstance(actual, dict) and all(
+            key in actual and _matches_subset(actual[key], value)
+            for key, value in expected.items())
+    return actual == expected
+
+
 def request_hash(request):
     raw = json.dumps(request, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
@@ -35,7 +44,9 @@ class ResourcePolicy:
             return "invalid_or_excess_hourly_rate"
         if pod.get("status") not in {"PROVISIONING", "STARTING", "RUNNING"}:
             return "provider_failure_or_unknown_state"
-        if pod.get("status") == "RUNNING" and any(pod.get(key) != value for key, value in self.expected_shape.items()):
+        if pod.get("status") == "RUNNING" and any(
+                key not in pod or not _matches_subset(pod[key], value)
+                for key, value in self.expected_shape.items()):
             return "unexpected_resource_shape"
         if self.no_persistent_mounts and pod.get("status") == "RUNNING":
             mounts = pod.get("mounts")

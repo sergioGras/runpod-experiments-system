@@ -78,3 +78,60 @@ def verify_cpu_quote(client, request, policy, storage_hourly_usd):
             current["request_sha256"] != policy.request_sha256):
         raise ValueError("Current CPU offer differs from the supervised policy")
     return current
+
+
+def gpu_resource_policy(request, offer, storage_hourly_usd):
+    """Bind a reviewed one-Pod GPU request to its current Secure catalog quote.
+
+    Regional stock is not consistently returned by the GPU catalog endpoint;
+    callers with a requested data center must independently validate current
+    regional availability before create and the supervisor verifies placement.
+    """
+    allowed = {"name", "gpu", "cloud", "dataCenterIds", "image", "disk", "ports", "startSsh", "startJupyter"}
+    if not isinstance(request, dict) or set(request) != allowed:
+        raise ValueError("GPU request has missing or unreviewed fields")
+    gpu, regions = request.get("gpu"), request.get("dataCenterIds")
+    if (not isinstance(gpu, dict) or set(gpu) - {"id", "count", "minRamPerGpu", "minVcpuCountPerGpu"} or
+            not isinstance(gpu.get("id"), str) or not gpu["id"] or
+            type(gpu.get("count")) is not int or not 1 <= gpu["count"] <= 64 or
+            not isinstance(regions, list) or len(regions) > 1 or
+            any(not isinstance(region, str) or not re.fullmatch(r"[A-Z]{2,4}-[A-Z0-9]+-\d+", region) for region in regions) or
+            request.get("cloud") != "SECURE" or request.get("ports") != ["22/tcp"] or
+            request.get("startSsh") is not True or request.get("startJupyter") is not False or
+            type(request.get("disk")) is not int or not 1 <= request["disk"] <= 1000 or
+            not isinstance(request.get("image"), str) or not re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", request["image"])):
+        raise ValueError("GPU request does not match the supported scope")
+    for key in ("minRamPerGpu", "minVcpuCountPerGpu"):
+        if key in gpu and (type(gpu[key]) is not int or not 1 <= gpu[key] <= 4096):
+            raise ValueError("GPU minimum resource request is invalid")
+    if (not isinstance(offer, dict) or offer.get("id") != gpu["id"] or offer.get("secure") is not True or
+            not isinstance(offer.get("price"), dict) or not isinstance(offer.get("maxCount"), dict)):
+        raise ValueError("Invalid provider GPU quote")
+    price, maximum = offer["price"].get("secure"), offer["maxCount"].get("secure")
+    if (isinstance(price, bool) or not isinstance(price, (int, float)) or not math.isfinite(price) or price <= 0 or
+            type(maximum) is not int or maximum < gpu["count"]):
+        raise ValueError("GPU quote lacks a valid Secure price or capacity")
+    try:
+        storage = Decimal(str(storage_hourly_usd))
+        if not storage.is_finite() or storage < 0:
+            raise ValueError("Invalid storage estimate")
+        total = Decimal(str(price)) * gpu["count"] + storage
+    except InvalidOperation as error:
+        raise ValueError("Invalid storage estimate") from error
+    shape = {"gpu": {key: gpu[key] for key in ("id", "count")}, "cloud": "SECURE",
+             "image": request["image"], "disk": request["disk"], "ports": ["22/tcp"]}
+    if regions:
+        shape["dataCenterId"] = regions[0]
+    return {"request_sha256": request_hash(request), "max_hourly_usd": float(total),
+            "no_persistent_mounts": True, "expected_shape": shape}
+
+
+def verify_gpu_quote(client, request, policy, storage_hourly_usd):
+    """Recheck a GPU rate and pinned resource shape before the create claim."""
+    gpu = request["gpu"]
+    current = gpu_resource_policy(request, client.gpu_offer(gpu["id"], gpu["count"]), storage_hourly_usd)
+    if (current["max_hourly_usd"] > policy.max_hourly_usd or
+            current["expected_shape"] != policy.expected_shape or not policy.no_persistent_mounts or
+            current["request_sha256"] != policy.request_sha256):
+        raise ValueError("Current GPU offer differs from the supervised policy")
+    return current

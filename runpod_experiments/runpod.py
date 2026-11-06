@@ -77,6 +77,18 @@ class RunPodClient:
             raise ProviderError("Invalid CPU catalog response")
         return result
 
+    def gpu_offer(self, gpu_id, gpu_count=1):
+        """Return the current GPU catalog quote for the requested GPU count."""
+        if (not isinstance(gpu_id, str) or not re.fullmatch(r"[A-Za-z0-9 _.-]{1,128}", gpu_id) or
+                type(gpu_count) is not int or not 1 <= gpu_count <= 64):
+            raise ValueError("Invalid GPU catalog request")
+        gpu_path = urllib.parse.quote(gpu_id, safe="")
+        query = urllib.parse.urlencode({"include": "AVAILABILITY", "product": "POD", "count": gpu_count})
+        result = self._get("/catalog/gpus/" + gpu_path + "?" + query)
+        if not isinstance(result, dict):
+            raise ProviderError("Invalid GPU catalog response")
+        return result
+
     def pods(self):
         result, cursor, seen = [], None, set()
         while True:
