@@ -7,6 +7,7 @@ from pathlib import Path
 
 from runpod_experiments.attempts import AttemptError
 from runpod_experiments.planning import runtime_from_remaining
+from runpod_experiments.resource_policy import ResourcePolicy
 
 
 def new_pod_name(prefix, label):
@@ -19,7 +20,7 @@ def new_pod_name(prefix, label):
 
 
 def create_attempt(client, ledger, registry, budget, attempt_id, project_id, request,
-                   supervisor, control_directory, deadline_epoch, hourly_estimate_usd,
+                   supervisor, control_directory, deadline_epoch, policy_path,
                    *, max_instances=1, outstanding_usd="0", clock=time.time):
     """Send at most one create after ownership, supervisor and budget checks.
 
@@ -38,7 +39,8 @@ def create_attempt(client, ledger, registry, budget, attempt_id, project_id, req
             not math.isfinite(deadline_epoch)):
         raise ValueError("Invalid deadline")
     now = clock()
-    envelope = runtime_from_remaining(budget.remaining(outstanding_usd), hourly_estimate_usd)
+    policy = ResourcePolicy.read(policy_path)
+    envelope = runtime_from_remaining(budget.remaining(outstanding_usd), policy.max_hourly_usd)
     if not now < deadline_epoch <= now + envelope["work_seconds"]:
         raise AttemptError("Deadline exceeds remaining estimated budget")
     state = json.loads((Path(control_directory) / "supervisor.json").read_text(encoding="utf-8"))
@@ -46,6 +48,7 @@ def create_attempt(client, ledger, registry, budget, attempt_id, project_id, req
     if (supervisor.poll() is not None or state.get("pid") != supervisor.pid or state.get("ready") is not True or
             state.get("stopping") or state.get("terminated") or state.get("attempt_id") != attempt_id or
             state.get("project_id") != project_id or state.get("deadline_epoch") != deadline_epoch or
+            state.get("policy_sha256") != policy.fingerprint or
             isinstance(heartbeat, bool) or not isinstance(heartbeat, (int, float)) or
             not math.isfinite(heartbeat) or not 0 <= now - heartbeat <= 30):
         raise AttemptError("Supervisor is not ready and current for this attempt")

@@ -9,6 +9,7 @@ from runpod_experiments.attempts import AttemptError, AttemptLedger, reconcile_c
 from runpod_experiments.ownership import delete_attempt
 from runpod_experiments.supervision import CleanupMonitor, run_supervisor
 from runpod_experiments.runpod import ProviderError
+from runpod_experiments.resource_policy import ResourcePolicy
 
 
 class AttemptTests(unittest.TestCase):
@@ -117,6 +118,8 @@ class AttemptTests(unittest.TestCase):
                 client = FakeClient()
                 attempt_id = "attempt-1"
                 project_id = "project-one"
+                policy = None
+                stopping = False
                 calls = []
                 def observe(self, stop=False):
                     self.calls.append(stop)
@@ -157,6 +160,22 @@ class AttemptTests(unittest.TestCase):
             ledger.claim_reconcilable_create("a", [])
             with self.assertRaises(AttemptError):
                 ledger.claim_reconcilable_create("b", [])
+
+    def test_price_or_shape_violation_triggers_exact_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = AttemptLedger(Path(directory) / "runs.sqlite")
+            ledger.reserve("a", "hybrid-inference", "hybrid-test-one", "hybrid-")
+            ledger.claim_create("a")
+            ledger.bind("a", "pod-1")
+            class Client:
+                deleted = False
+                def pods(self): return [{"id": "pod-1", "name": "hybrid-test-one", "status": "RUNNING"}]
+                def pod(self, pod_id): return {"id": pod_id, "name": "hybrid-test-one", "status": "RUNNING", "cost": 3, "cloud": "SECURE"}
+                def _delete_pod(self, pod_id): self.deleted = True
+            client = Client()
+            policy = ResourcePolicy({"max_hourly_usd": 1, "expected_shape": {"cloud": "SECURE"}}, "hash")
+            self.assertEqual(CleanupMonitor(client, ledger, "a", "hybrid-inference", policy).observe(), "delete_requested")
+            self.assertTrue(client.deleted)
 
 
 if __name__ == "__main__":

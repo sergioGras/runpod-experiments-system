@@ -32,7 +32,7 @@ class RegistryAndLaunchTests(unittest.TestCase):
             def popen(argv, **kwargs):
                 captured.update(argv=argv, kwargs=kwargs)
                 return "process"
-            result = launch(Path(directory) / "attempts.sqlite", "attempt-1", "project-one", directory, 12345, popen=popen)
+            result = launch(Path(directory) / "attempts.sqlite", "attempt-1", "project-one", directory, 12345, Path(directory) / "policy.json", popen=popen)
             self.assertEqual(result, "process")
             self.assertIn("runpod_experiments.supervisor_process", captured["argv"])
             self.assertTrue(captured["kwargs"]["close_fds"])
@@ -52,6 +52,8 @@ class RegistryAndLaunchTests(unittest.TestCase):
             ledger.reserve("attempt-1", "project-one", "one-example", "one-")
             ledger.claim_create("attempt-1")
             ledger.bind("attempt-1", "pod-1")
+            policy = root / "policy.json"
+            policy.write_text(json.dumps({"max_hourly_usd": 1.0, "expected_shape": {"cloud": "SECURE"}}))
             source = '''
 import sys
 sys.path.insert(0, sys.argv[1])
@@ -63,10 +65,10 @@ class Fake:
 entry.RunPodClient.from_config = lambda: Fake()
 original = entry.run_supervisor
 entry.run_supervisor = lambda *a, **kw: original(*a, interval=0.01, **kw)
-sys.argv = ["supervisor", "--ledger", sys.argv[2], "--attempt", "attempt-1", "--project", "project-one", "--directory", sys.argv[3], "--deadline", "9999999999"]
+sys.argv = ["supervisor", "--ledger", sys.argv[2], "--attempt", "attempt-1", "--project", "project-one", "--directory", sys.argv[3], "--deadline", "9999999999", "--policy", sys.argv[4]]
 entry.main()
 '''
-            subprocess.run([sys.executable, "-c", source, str(Path.cwd()), str(ledger_path), str(root / "control")],
+            subprocess.run([sys.executable, "-c", source, str(Path.cwd()), str(ledger_path), str(root / "control"), str(policy)],
                            check=True, timeout=30, capture_output=True)
             self.assertEqual(ledger.get("attempt-1")["state"], "terminated")
             self.assertTrue(json.loads((root / "control/supervisor.json").read_text())["terminated"])

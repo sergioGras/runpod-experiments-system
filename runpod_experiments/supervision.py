@@ -10,9 +10,10 @@ from runpod_experiments.runpod import ProviderError
 
 
 class CleanupMonitor:
-    def __init__(self, client, ledger, attempt_id, project_id):
+    def __init__(self, client, ledger, attempt_id, project_id, policy=None):
         self.client, self.ledger = client, ledger
         self.attempt_id, self.project_id = attempt_id, project_id
+        self.policy = policy
         self.absent_observations = 0
         self.stopping = False
 
@@ -62,6 +63,8 @@ class CleanupMonitor:
         self.absent_observations = 0
         if pod is not None and pod.get("status") == "TERMINATED":
             return "inventory_not_reconciled"
+        if self.policy is not None and self.policy.violation(pod):
+            self.stopping = True
         if self.stopping:
             delete_attempt(self.client, self.ledger, self.attempt_id, self.project_id)
             return "delete_requested"
@@ -87,7 +90,8 @@ def run_supervisor(monitor, directory, deadline_epoch, *, interval=10, error_lim
     errors, polls = 0, 0
     state = {"ready": False, "stopping": stop_path.exists(), "terminated": False,
              "pid": os.getpid(), "attempt_id": monitor.attempt_id, "project_id": monitor.project_id,
-             "deadline_epoch": deadline_epoch}
+             "deadline_epoch": deadline_epoch,
+             "policy_sha256": monitor.policy.fingerprint if monitor.policy else None}
     while max_polls is None or polls < max_polls:
         if clock() >= deadline_epoch or stop_path.exists():
             state["stopping"] = True
@@ -97,12 +101,14 @@ def run_supervisor(monitor, directory, deadline_epoch, *, interval=10, error_lim
             if not state["ready"]:
                 monitor.client.pods()
             outcome = monitor.observe(stop=state["stopping"])
+            state["stopping"] = state["stopping"] or monitor.stopping
             state["ready"] = True
             errors = 0
             state["outcome"] = outcome
             state["terminated"] = outcome == "terminated"
         except Exception as error:
             errors += 1
+            state["stopping"] = state["stopping"] or monitor.stopping
             state["last_error_type"] = type(error).__name__
             if errors >= error_limit:
                 state["stopping"] = True

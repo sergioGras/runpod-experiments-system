@@ -7,6 +7,7 @@ from runpod_experiments.attempts import AttemptError, AttemptLedger
 from runpod_experiments.budget import BudgetLedger
 from runpod_experiments.controller import create_attempt, new_pod_name
 from runpod_experiments.registry import ProjectRegistry
+from runpod_experiments.resource_policy import ResourcePolicy
 
 
 class ControllerTests(unittest.TestCase):
@@ -20,9 +21,11 @@ class ControllerTests(unittest.TestCase):
             budget = BudgetLedger(root / "budget.sqlite", "10")
             name = new_pod_name("one-", "test")
             ledger.reserve_registered("attempt-1", "project-one", name, registry)
+            policy = root / "policy.json"
+            policy.write_text(json.dumps({"max_hourly_usd": 1, "expected_shape": {"cloud": "SECURE"}}))
             state = {"pid": 123, "ready": True, "stopping": False, "terminated": False,
                      "attempt_id": "attempt-1", "project_id": "project-one", "deadline_epoch": 1500,
-                     "heartbeat_epoch": 1000}
+                     "heartbeat_epoch": 1000, "policy_sha256": ResourcePolicy.read(policy).fingerprint}
             (root / "supervisor.json").write_text(json.dumps(state))
             class Supervisor:
                 pid = 123
@@ -35,7 +38,7 @@ class ControllerTests(unittest.TestCase):
                     raise TimeoutError("ambiguous")
             client = Provider()
             args = (client, ledger, registry, budget, "attempt-1", "project-one", {"name": name},
-                    Supervisor(), root, 1500, "1")
+                    Supervisor(), root, 1500, policy)
             with self.assertRaises(TimeoutError):
                 create_attempt(*args, clock=lambda: 1000)
             self.assertEqual(ledger.get("attempt-1")["state"], "creating")
