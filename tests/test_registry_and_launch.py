@@ -34,7 +34,7 @@ class RegistryAndLaunchTests(unittest.TestCase):
                 return "process"
             result = launch(Path(directory) / "attempts.sqlite", "attempt-1", "project-one", directory, 12345, Path(directory) / "policy.json", popen=popen)
             self.assertEqual(result, "process")
-            self.assertIn("runpod_experiments.supervisor_process", captured["argv"])
+            self.assertTrue(any("runpod_experiments.supervisor_process" in arg for arg in captured["argv"]))
             self.assertTrue(captured["kwargs"]["close_fds"])
             self.assertNotIn("apikey", " ".join(captured["argv"]))
 
@@ -53,7 +53,7 @@ class RegistryAndLaunchTests(unittest.TestCase):
             ledger.claim_create("attempt-1")
             ledger.bind("attempt-1", "pod-1")
             policy = root / "policy.json"
-            policy.write_text(json.dumps({"max_hourly_usd": 1.0, "expected_shape": {"cloud": "SECURE"}}))
+            policy.write_text(json.dumps({"max_hourly_usd": 1.0, "expected_shape": {"cloud": "SECURE"}, "request_sha256": "0" * 64}))
             source = '''
 import sys
 sys.path.insert(0, sys.argv[1])

@@ -14,7 +14,9 @@ from runpod_experiments.supervision import CleanupMonitor, run_supervisor
 def launch(ledger_path, attempt_id, project_id, directory, deadline_epoch, policy_path, *, popen=subprocess.Popen):
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=True)
-    argv = [sys.executable, "-m", "runpod_experiments.supervisor_process", "--ledger", str(Path(ledger_path).resolve()),
+    package_parent = str(Path(__file__).resolve().parent.parent)
+    bootstrap = "import sys; sys.path.insert(0, sys.argv.pop(1)); from runpod_experiments.supervisor_process import main; main()"
+    argv = [sys.executable, "-c", bootstrap, package_parent, "--ledger", str(Path(ledger_path).resolve()),
             "--attempt", attempt_id, "--project", project_id, "--directory", str(directory), "--deadline", str(deadline_epoch),
             "--policy", str(Path(policy_path).resolve())]
     flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW) if os.name == "nt" else 0

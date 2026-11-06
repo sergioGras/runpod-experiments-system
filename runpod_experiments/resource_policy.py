@@ -2,17 +2,25 @@
 import hashlib
 import json
 import math
+import re
 from pathlib import Path
+
+
+def request_hash(request):
+    raw = json.dumps(request, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
 
 
 class ResourcePolicy:
     def __init__(self, data, fingerprint):
         rate = data.get("max_hourly_usd") if isinstance(data, dict) else None
         shape = data.get("expected_shape") if isinstance(data, dict) else None
+        request_digest = data.get("request_sha256") if isinstance(data, dict) else None
         if (isinstance(rate, bool) or not isinstance(rate, (int, float)) or not math.isfinite(rate) or rate <= 0 or
-                not isinstance(shape, dict) or not shape):
+                not isinstance(shape, dict) or not shape or not isinstance(request_digest, str) or
+                not re.fullmatch(r"[0-9a-f]{64}", request_digest)):
             raise ValueError("Invalid supervisor resource policy")
-        self.max_hourly_usd, self.expected_shape, self.fingerprint = rate, shape, fingerprint
+        self.max_hourly_usd, self.expected_shape, self.fingerprint, self.request_sha256 = rate, shape, fingerprint, request_digest
 
     @classmethod
     def read(cls, path):

@@ -173,7 +173,7 @@ class AttemptTests(unittest.TestCase):
                 def pod(self, pod_id): return {"id": pod_id, "name": "hybrid-test-one", "status": "RUNNING", "cost": 3, "cloud": "SECURE"}
                 def _delete_pod(self, pod_id): self.deleted = True
             client = Client()
-            policy = ResourcePolicy({"max_hourly_usd": 1, "expected_shape": {"cloud": "SECURE"}}, "hash")
+            policy = ResourcePolicy({"max_hourly_usd": 1, "expected_shape": {"cloud": "SECURE"}, "request_sha256": "0" * 64}, "hash")
             self.assertEqual(CleanupMonitor(client, ledger, "a", "hybrid-inference", policy).observe(), "delete_requested")
             self.assertTrue(client.deleted)
 

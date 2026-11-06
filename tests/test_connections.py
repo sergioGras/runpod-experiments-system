@@ -1,4 +1,5 @@
 import io
+import hashlib
 import json
 import subprocess
 import tempfile
@@ -10,6 +11,9 @@ from runpod_experiments.artifacts import ArtifactStore
 from runpod_experiments.collection import collect_once
 from runpod_experiments.runpod import ProviderError, RunPodClient
 from runpod_experiments.ssh import SSHFetcher
+from runpod_experiments.attempts import AttemptLedger, AttemptError
+from runpod_experiments.run_collection import collect_owned_once
+from runpod_experiments.upload import upload_bundle
 
 
 class ConnectionTests(unittest.TestCase):
@@ -58,6 +62,56 @@ class ConnectionTests(unittest.TestCase):
             self.assertIn("StrictHostKeyChecking=yes", calls[0])
             with self.assertRaises(ValueError):
                 fetch("../secret")
+
+    def test_collection_requires_the_bound_project_and_live_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ledger = AttemptLedger(root / "runs.sqlite")
+            ledger.reserve("a", "hybrid-inference", "hybrid-test", "hybrid-")
+            ledger.claim_create("a")
+            ledger.bind("a", "pod-1")
+            class Client:
+                name = "foreign"
+                def pod(self, pod_id):
+                    return {"id": pod_id, "name": self.name, "ssh": {"direct": {"host": "host", "port": 22, "username": "root"}}}
+            class Fetch:
+                def __init__(self, *args): pass
+                def __call__(self, name): return b"result"
+            client = Client()
+            store = ArtifactStore(root / "results")
+            with self.assertRaises(AttemptError):
+                collect_owned_once(client, ledger, "a", "hybrid-inference", store, ["result.json"], "key", "hosts", "/work", fetcher_type=Fetch)
+            client.name = "hybrid-test"
+            state, errors = collect_owned_once(client, ledger, "a", "hybrid-inference", store, ["result.json"], "key", "hosts", "/work", fetcher_type=Fetch)
+            self.assertFalse(errors)
+            self.assertIn("result.json", state)
+
+    def test_upload_checks_full_manifest_before_sending_any_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "key").touch()
+            (root / "hosts").touch()
+            (root / "one.py").write_bytes(b"source")
+            (root / "two.py").write_bytes(b"changed")
+            ledger = AttemptLedger(root / "runs.sqlite")
+            ledger.reserve("a", "hybrid-inference", "hybrid-test", "hybrid-")
+            ledger.claim_create("a")
+            ledger.bind("a", "pod-1")
+            class Client:
+                def pod(self, pod_id):
+                    return {"id": pod_id, "name": "hybrid-test", "ssh": {"direct": {"host": "host", "port": 22, "username": "root"}}}
+            calls = []
+            def runner(*args, **kwargs):
+                calls.append((args, kwargs))
+            manifest = {"one.py": hashlib.sha256(b"source").hexdigest(), "two.py": hashlib.sha256(b"old").hexdigest()}
+            with self.assertRaises(AttemptError):
+                upload_bundle(Client(), ledger, "a", "hyybrid-inference", root, manifest, root / "key", root / "hosts", "/work", runner=runner)
+            with self.assertRaises(ValueError):
+                upload_bundle(Client(), ledger, "a", "hybrid-inference", root, manifest, root / "key", root / "hosts", "/work", runner=runner)
+            self.assertFalse(calls)
+            manifest["two.py"] = hashlib.sha256(b"changed").hexdigest()
+            self.assertEqual(upload_bundle(Client(), ledger, "a", "hybrid-inference", root, manifest, root / "key", root / "hosts", "/work", runner=runner), 2)
+            self.assertEqual(len(calls), 2)
 
 
 if __name__ == "__main__":

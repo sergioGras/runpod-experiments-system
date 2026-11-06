@@ -7,7 +7,7 @@ from pathlib import Path
 
 from runpod_experiments.attempts import AttemptError
 from runpod_experiments.planning import runtime_from_remaining
-from runpod_experiments.resource_policy import ResourcePolicy
+from runpod_experiments.resource_policy import ResourcePolicy, request_hash
 
 
 def new_pod_name(prefix, label):
@@ -33,13 +33,15 @@ def create_attempt(client, ledger, registry, budget, attempt_id, project_id, req
     if (attempt["project_id"] != project_id or attempt["state"] != "reserved" or
             not registry.owns(project_id, name) or not isinstance(request, dict) or request.get("name") != name):
         raise AttemptError("Create request does not match registered reservation")
-    if type(max_instances) is not int or max_instances < 1:
-        raise ValueError("Invalid instance limit")
+    if type(max_instances) is not int or max_instances != 1:
+        raise ValueError("Concurrent instances are not yet supported by the budget guard")
     if (isinstance(deadline_epoch, bool) or not isinstance(deadline_epoch, (int, float)) or
             not math.isfinite(deadline_epoch)):
         raise ValueError("Invalid deadline")
     now = clock()
     policy = ResourcePolicy.read(policy_path)
+    if request_hash(request) != policy.request_sha256:
+        raise AttemptError("Create request differs from the supervised policy")
     envelope = runtime_from_remaining(budget.remaining(outstanding_usd), policy.max_hourly_usd)
     if not now < deadline_epoch <= now + envelope["work_seconds"]:
         raise AttemptError("Deadline exceeds remaining estimated budget")
