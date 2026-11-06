@@ -31,16 +31,25 @@ class RunPodClient:
         return cls(config.get("apikey"), **kwargs)
 
     def _get(self, path):
-        request = urllib.request.Request(API_URL + path, headers={"Authorization": "Bearer " + self._key})
+        return self._request("GET", path)
+
+    def _request(self, method, path):
+        request = urllib.request.Request(API_URL + path, method=method, headers={"Authorization": "Bearer " + self._key})
         try:
             with self._opener(request, timeout=self._timeout) as response:
-                return json.load(response)
+                raw = response.read()
+                return json.loads(raw) if raw else None
         except urllib.error.HTTPError as error:
             raise ProviderError("RunPod request failed", error.code) from None
         except (urllib.error.URLError, TimeoutError, OSError):
             raise ProviderError("RunPod connection failed") from None
         except (ValueError, UnicodeDecodeError):
             raise ProviderError("Invalid RunPod response") from None
+
+    def _delete_pod(self, pod_id):
+        if not isinstance(pod_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", pod_id):
+            raise ValueError("Invalid Pod ID")
+        return self._request("DELETE", "/pods/" + pod_id)
 
     def pod(self, pod_id):
         if not isinstance(pod_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", pod_id):
