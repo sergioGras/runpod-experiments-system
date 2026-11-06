@@ -15,7 +15,7 @@ def collect_owned_once(client, ledger, attempt_id, project_id, store, names, key
     if attempt["project_id"] != project_id or attempt["state"] != "active" or not attempt["pod_id"]:
         raise AttemptError("No active attempt in this project")
     pod = client.pod(attempt["pod_id"])
-    if pod.get("id") != attempt["pod_id"] or pod.get("name") != attempt["pod_name"]:
+    if pod.get("id") != attempt["pod_id"] or pod.get("name") != attempt["pod_name"] or pod.get("status") != "RUNNING":
         raise AttemptError("Pod identity mismatch during collection")
     ssh = pod.get("ssh")
     endpoint = ssh.get("direct") if isinstance(ssh, dict) else None
@@ -36,9 +36,15 @@ def collect_loop(client, ledger, attempt_id, project_id, store, names, key_file,
     previous, polls = {}, 0
     while max_polls is None or polls < max_polls:
         stopping = (directory / "collection.stop").exists()
+        terminal = False
         try:
-            previous, errors = collect_owned_once(client, ledger, attempt_id, project_id, store, names,
-                                                   key_file, known_hosts, remote_root, previous)
+            attempt = ledger.get(attempt_id)
+            terminal = attempt["project_id"] == project_id and attempt["state"] in {"terminated", "cancelled"}
+            if terminal:
+                errors = {}
+            else:
+                previous, errors = collect_owned_once(client, ledger, attempt_id, project_id, store, names,
+                                                       key_file, known_hosts, remote_root, previous)
         except Exception as error:
             errors = {"collection": type(error).__name__}
         polls += 1
@@ -52,6 +58,8 @@ def collect_loop(client, ledger, attempt_id, project_id, store, names, key_file,
         except OSError:
             # Keep attempting to save results if heartbeat storage fails.
             pass
-        if stopping or (max_polls is not None and polls >= max_polls):
+        if stopping or terminal or (max_polls is not None and polls >= max_polls):
             return state
+        if (directory / "collection.stop").exists():
+            continue
         sleep(interval)

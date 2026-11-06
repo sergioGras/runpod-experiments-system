@@ -3,6 +3,7 @@ import argparse
 import os
 import subprocess
 import sys
+import ctypes
 from pathlib import Path
 
 from runpod_experiments.attempts import AttemptLedger
@@ -40,7 +41,15 @@ def main():
         raise ValueError("Supervisor project does not match attempt")
     client = RunPodClient.from_config()
     monitor = CleanupMonitor(client, ledger, args.attempt, args.project, ResourcePolicy.read(args.policy))
-    run_supervisor(monitor, args.directory, args.deadline)
+    if os.name == "nt":
+        # Prevent automatic idle sleep while the independently supervised Pod exists.
+        if not ctypes.windll.kernel32.SetThreadExecutionState(0x80000001):
+            raise RuntimeError("Could not prevent automatic idle sleep")
+    try:
+        run_supervisor(monitor, args.directory, args.deadline)
+    finally:
+        if os.name == "nt":
+            ctypes.windll.kernel32.SetThreadExecutionState(0x80000000)
 
 
 if __name__ == "__main__":

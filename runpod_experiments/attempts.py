@@ -63,6 +63,14 @@ class AttemptLedger:
                 raise AttemptError("Create already claimed or attempt unavailable")
             db.execute("INSERT INTO events(attempt_id,event) VALUES (?, 'create_claimed')", (attempt_id,))
 
+    def cancel_uncreated(self, attempt_id):
+        """Atomically close a reservation only if no create was ever claimed."""
+        with closing(sqlite3.connect(self.path)) as db, db:
+            changed = db.execute("UPDATE attempts SET state='cancelled' WHERE attempt_id=? AND state='reserved' AND create_claimed=0", (attempt_id,)).rowcount
+            if changed != 1:
+                raise AttemptError("Attempt may already have a create in flight")
+            db.execute("INSERT INTO events(attempt_id,event) VALUES (?, 'cancelled_before_create')", (attempt_id,))
+
     def claim_reconcilable_create(self, attempt_id, inventory, max_instances=1):
         """Persist a claim after confirming a random attempt name is unused."""
         attempt = self.get(attempt_id)

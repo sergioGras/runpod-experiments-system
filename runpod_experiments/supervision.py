@@ -26,6 +26,15 @@ class CleanupMonitor:
             raise AttemptError("Wrong project")
         if attempt["state"] == "terminated":
             return "terminated"
+        if attempt["state"] == "cancelled" and not attempt["create_claimed"]:
+            return "not_created"
+        if attempt["state"] == "reserved" and self.stopping:
+            try:
+                self.ledger.cancel_uncreated(self.attempt_id)
+                return "not_created"
+            except AttemptError:
+                # A concurrent create claim won; inspect its new state.
+                attempt = self.ledger.get(self.attempt_id)
         if attempt["state"] == "creating" and attempt["reconcilable"]:
             candidate = reconcile_candidate(self.ledger, self.attempt_id, self.client.pods())
             if candidate is not None:
@@ -72,7 +81,7 @@ class CleanupMonitor:
 
 
 def run_supervisor(monitor, directory, deadline_epoch, *, interval=10, error_limit=3,
-                   clock=time.time, sleep=time.sleep, max_polls=None):
+                   clock=time.time, monotonic=time.monotonic, sleep=time.sleep, max_polls=None):
     """Persist heartbeats and keep attempting cleanup after a stop or errors.
 
     Caller must start and qualify this loop in a separate process before any
@@ -92,8 +101,10 @@ def run_supervisor(monitor, directory, deadline_epoch, *, interval=10, error_lim
              "pid": os.getpid(), "attempt_id": monitor.attempt_id, "project_id": monitor.project_id,
              "deadline_epoch": deadline_epoch,
              "policy_sha256": monitor.policy.fingerprint if monitor.policy else None}
+    initial_remaining = max(0, deadline_epoch - clock())
+    monotonic_start = monotonic()
     while max_polls is None or polls < max_polls:
-        if clock() >= deadline_epoch or stop_path.exists():
+        if clock() >= deadline_epoch or monotonic() - monotonic_start >= initial_remaining or stop_path.exists():
             state["stopping"] = True
         try:
             # An unresolved attempt still requires a working provider connection
@@ -106,6 +117,7 @@ def run_supervisor(monitor, directory, deadline_epoch, *, interval=10, error_lim
             errors = 0
             state["outcome"] = outcome
             state["terminated"] = outcome == "terminated"
+            state["not_created"] = outcome == "not_created"
         except Exception as error:
             errors += 1
             state["stopping"] = state["stopping"] or monitor.stopping
@@ -126,7 +138,7 @@ def run_supervisor(monitor, directory, deadline_epoch, *, interval=10, error_lim
         except OSError:
             # A local telemetry error must cause cleanup, not end monitoring.
             state["stopping"] = True
-        if state["terminated"]:
+        if state["terminated"] or state.get("not_created"):
             return state
         if max_polls is not None and polls >= max_polls:
             return state

@@ -42,14 +42,15 @@ class ControllerTests(unittest.TestCase):
             altered = list(args)
             altered[6] = {"name": name, "image": "unapproved"}
             with self.assertRaises(AttemptError):
-                create_attempt(*altered, clock=lambda: 1000)
+                create_attempt(*altered, quote_validator=lambda *_: None, clock=lambda: 1000)
             self.assertEqual(ledger.get("attempt-1")["state"], "reserved")
             with self.assertRaises(TimeoutError):
-                create_attempt(*args, clock=lambda: 1000)
+                create_attempt(*args, quote_validator=lambda *_: None, clock=lambda: 1000)
             self.assertEqual(ledger.get("attempt-1")["state"], "creating")
             self.assertEqual(ledger.get("attempt-1")["reconcilable"], 1)
+            self.assertLess(budget.remaining(), 10)
             with self.assertRaises(AttemptError):
-                create_attempt(*args, clock=lambda: 1000)
+                create_attempt(*args, quote_validator=lambda *_: None, clock=lambda: 1000)
             self.assertEqual(client.creates, 1)
 
 

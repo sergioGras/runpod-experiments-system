@@ -22,6 +22,8 @@ class ArtifactStore:
             raise ValueError("Invalid artifact name, attempt ID or bytes")
         digest = hashlib.sha256(data).hexdigest()
         target = self.directory / "objects" / digest
+        if target.exists() and hashlib.sha256(target.read_bytes()).hexdigest() != digest:
+            raise ValueError("Existing artifact object failed integrity verification")
         if not target.exists():
             fd, temp = tempfile.mkstemp(dir=target.parent, prefix=".collect-")
             try:

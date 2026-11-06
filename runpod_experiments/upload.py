@@ -17,7 +17,7 @@ def upload_bundle(client, ledger, attempt_id, project_id, source_root, manifest,
     if attempt["project_id"] != project_id or attempt["state"] != "active" or not attempt["pod_id"]:
         raise AttemptError("No active attempt in this project")
     pod = client.pod(attempt["pod_id"])
-    if pod.get("id") != attempt["pod_id"] or pod.get("name") != attempt["pod_name"]:
+    if pod.get("id") != attempt["pod_id"] or pod.get("name") != attempt["pod_name"] or pod.get("status") != "RUNNING":
         raise AttemptError("Pod identity mismatch before upload")
     endpoint = (pod.get("ssh") or {}).get("direct")
     if not isinstance(endpoint, dict):

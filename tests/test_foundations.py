@@ -24,6 +24,19 @@ class FoundationsTests(unittest.TestCase):
             ledger.record_charge("late-billing", "15")
             self.assertEqual(ledger.remaining(), Decimal("0"))
 
+    def test_exposure_remains_until_reconciled(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = BudgetLedger(Path(directory) / "round.sqlite", "2")
+            ledger.reserve_exposure("attempt-1", "1.5")
+            self.assertEqual(ledger.remaining(), Decimal("0.5"))
+            with self.assertRaises(ValueError):
+                ledger.reserve_exposure("attempt-2", "0.6")
+            ledger.settle("attempt-1", "charge-1", "0.75")
+            ledger.settle("attempt-1", "charge-1", "0.75")
+            self.assertEqual(ledger.remaining(), Decimal("1.25"))
+            with self.assertRaises(ValueError):
+                ledger.settle("attempt-2", "charge-1", "0.75")
+
     def test_artifacts_preserve_versions_across_attempts(self):
         with tempfile.TemporaryDirectory() as directory:
             store = ArtifactStore(directory)
@@ -35,6 +48,9 @@ class FoundationsTests(unittest.TestCase):
             self.assertEqual([entry["attempt_id"] for entry in entries], ["attempt-1", "attempt-2"])
             with self.assertRaises(ValueError):
                 store.collect("../secret", b"x", "attempt-1")
+            (Path(directory) / "objects" / first["sha256"]).write_bytes(b"corrupt")
+            with self.assertRaises(ValueError):
+                store.collect("results/partial.json", b"first", "attempt-3")
 
 
 if __name__ == "__main__":

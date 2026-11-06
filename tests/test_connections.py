@@ -10,10 +10,11 @@ from pathlib import Path
 from runpod_experiments.artifacts import ArtifactStore
 from runpod_experiments.collection import collect_once
 from runpod_experiments.runpod import ProviderError, RunPodClient
-from runpod_experiments.ssh import SSHFetcher
+from runpod_experiments.ssh import SSHFetcher, bootstrap_tofu
 from runpod_experiments.attempts import AttemptLedger, AttemptError
 from runpod_experiments.run_collection import collect_owned_once
 from runpod_experiments.upload import upload_bundle
+from runpod_experiments.remote_process import start_python
 
 
 class ConnectionTests(unittest.TestCase):
@@ -39,6 +40,18 @@ class ConnectionTests(unittest.TestCase):
         self.assertEqual(caught.exception.status, 403)
         self.assertNotIn("secret", str(caught.exception))
         self.assertNotIn("private-token", str(caught.exception))
+
+    def test_cpu_catalog_request_is_read_only_and_url_encoded(self):
+        calls = []
+        def opener(request, timeout):
+            calls.append(request)
+            return io.BytesIO(b'{"price":{"securePerVcpu":0.03}}')
+        offer = RunPodClient("test-key", opener=opener).cpu_offer("cpu3c", 4)
+        self.assertEqual(offer["price"]["securePerVcpu"], 0.03)
+        self.assertEqual(calls[0].get_method(), "GET")
+        self.assertIn("vcpuCount=4", calls[0].full_url)
+        with self.assertRaises(ValueError):
+            RunPodClient("test-key", opener=opener).cpu_offer("../pod", 4)
 
     def test_ssh_collection_retries_and_preserves_versions(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -73,7 +86,7 @@ class ConnectionTests(unittest.TestCase):
             class Client:
                 name = "foreign"
                 def pod(self, pod_id):
-                    return {"id": pod_id, "name": self.name, "ssh": {"direct": {"host": "host", "port": 22, "username": "root"}}}
+                    return {"id": pod_id, "name": self.name, "status": "RUNNING", "ssh": {"direct": {"host": "host", "port": 22, "username": "root"}}}
             class Fetch:
                 def __init__(self, *args): pass
                 def __call__(self, name): return b"result"
@@ -99,7 +112,7 @@ class ConnectionTests(unittest.TestCase):
             ledger.bind("a", "pod-1")
             class Client:
                 def pod(self, pod_id):
-                    return {"id": pod_id, "name": "hybrid-test", "ssh": {"direct": {"host": "host", "port": 22, "username": "root"}}}
+                    return {"id": pod_id, "name": "hybrid-test", "status": "RUNNING", "ssh": {"direct": {"host": "host", "port": 22, "username": "root"}}}
             calls = []
             def runner(*args, **kwargs):
                 calls.append((args, kwargs))
@@ -112,6 +125,50 @@ class ConnectionTests(unittest.TestCase):
             manifest["two.py"] = hashlib.sha256(b"changed").hexdigest()
             self.assertEqual(upload_bundle(Client(), ledger, "a", "hybrid-inference", root, manifest, root / "key", root / "hosts", "/work", runner=runner), 2)
             self.assertEqual(len(calls), 2)
+
+    def test_remote_execution_quotes_arguments_and_checks_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "key").touch()
+            (root / "hosts").touch()
+            ledger = AttemptLedger(root / "runs.sqlite")
+            ledger.reserve("a", "hybrid-inference", "hybrid-test", "hybrid-")
+            ledger.claim_create("a")
+            ledger.bind("a", "pod-1")
+            class Client:
+                def pod(self, pod_id):
+                    return {"id": pod_id, "name": "hybrid-test", "status": "RUNNING", "ssh": {"direct": {"host": "host", "port": 22, "username": "root"}}}
+            calls = []
+            def popen(argv, **kwargs):
+                calls.append(argv)
+                return "process"
+            self.assertEqual(start_python(Client(), ledger, "a", "hybrid-inference", root / "key", root / "hosts", "/work", "run.py", ["a; echo BAD"], 60, root / "log", popen=popen), "process")
+            self.assertIn("'a; echo BAD'", calls[0][-1])
+            with self.assertRaises(ValueError):
+                start_python(Client(), ledger, "a", "hybrid-inference", root / "key", root / "hosts", "/work", "../run.py", [], 60, root / "log", popen=popen)
+
+    def test_host_bootstrap_only_accepts_matching_running_pod(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "key").touch()
+            ledger = AttemptLedger(root / "runs.sqlite")
+            ledger.reserve("a", "hybrid-inference", "hybrid-test", "hybrid-")
+            ledger.claim_create("a")
+            ledger.bind("a", "pod-1")
+            class Client:
+                status = "EXITED"
+                def pod(self, pod_id):
+                    return {"id": pod_id, "name": "hybrid-test", "status": self.status,
+                            "ssh": {"direct": {"host": "host", "port": 22, "username": "root"}}}
+            client = Client()
+            calls = []
+            def runner(argv, **kwargs): calls.append(argv)
+            with self.assertRaises(AttemptError):
+                bootstrap_tofu(client, ledger, "a", "hybrid-inference", root / "key", root / "hosts", runner=runner)
+            client.status = "RUNNING"
+            bootstrap_tofu(client, ledger, "a", "hybrid-inference", root / "key", root / "hosts", runner=runner)
+            self.assertIn("StrictHostKeyChecking=accept-new", calls[0])
+            self.assertTrue((root / "hosts").exists())
 
 
 if __name__ == "__main__":

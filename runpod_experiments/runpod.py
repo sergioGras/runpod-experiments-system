@@ -66,6 +66,17 @@ class RunPodClient:
             raise ProviderError("Pod detail has an unexpected identity")
         return result
 
+    def cpu_offer(self, cpu_id, vcpu_count):
+        """Return the provider's current catalog record; callers validate prices."""
+        if (not isinstance(cpu_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", cpu_id) or
+                type(vcpu_count) is not int or not 1 <= vcpu_count <= 1024):
+            raise ValueError("Invalid CPU catalog request")
+        query = urllib.parse.urlencode({"include": "AVAILABILITY", "product": "POD", "vcpuCount": vcpu_count})
+        result = self._get("/catalog/cpus/" + cpu_id + "?" + query)
+        if not isinstance(result, dict):
+            raise ProviderError("Invalid CPU catalog response")
+        return result
+
     def pods(self):
         result, cursor, seen = [], None, set()
         while True:

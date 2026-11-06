@@ -4,6 +4,8 @@ import shlex
 import subprocess
 from pathlib import Path, PurePosixPath
 
+from runpod_experiments.attempts import AttemptError
+
 
 class SSHFetcher:
     def __init__(self, host, port, username, key_file, known_hosts, remote_root, *, max_bytes=10_000_000, timeout=30, runner=subprocess.run):
@@ -38,3 +40,32 @@ class SSHFetcher:
         if len(result.stdout) > self.max_bytes:
             raise ValueError("Artifact exceeds collection size limit")
         return result.stdout
+
+
+def bootstrap_tofu(client, ledger, attempt_id, project_id, key_file, known_hosts, *, runner=subprocess.run):
+    """Pin the first observed SSH host key for an exact active Pod.
+
+    This trust-on-first-use step cannot authenticate the first key against an
+    independent source. Keep the resulting file private and reuse it strictly.
+    """
+    attempt = ledger.get(attempt_id)
+    if attempt["project_id"] != project_id or attempt["state"] != "active" or not attempt["pod_id"]:
+        raise AttemptError("No active attempt in this project")
+    pod = client.pod(attempt["pod_id"])
+    if pod.get("id") != attempt["pod_id"] or pod.get("name") != attempt["pod_name"] or pod.get("status") != "RUNNING":
+        raise AttemptError("Pod identity mismatch before SSH bootstrap")
+    ssh = pod.get("ssh")
+    endpoint = ssh.get("direct") if isinstance(ssh, dict) else None
+    if not isinstance(endpoint, dict):
+        raise AttemptError("Direct SSH endpoint not available")
+    known_hosts = Path(known_hosts)
+    known_hosts.parent.mkdir(parents=True, exist_ok=True)
+    known_hosts.touch(exist_ok=True)
+    connection = SSHFetcher(endpoint.get("host"), endpoint.get("port"), endpoint.get("username"), key_file, known_hosts, "/")
+    argv = ["ssh", "-T", "-i", connection.key_file, "-p", str(connection.port), "-o", "BatchMode=yes",
+            "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=accept-new", "-o",
+            "UserKnownHostsFile=" + connection.known_hosts, connection.username + "@" + connection.host, "true"]
+    try:
+        runner(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=20, check=True)
+    except (subprocess.SubprocessError, OSError):
+        raise RuntimeError("SSH host bootstrap failed") from None

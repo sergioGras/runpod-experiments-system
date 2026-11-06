@@ -1,5 +1,9 @@
 """Derive a conservative local time envelope from the single round cap."""
 from decimal import Decimal, InvalidOperation, ROUND_FLOOR
+import math
+import re
+
+from runpod_experiments.resource_policy import request_hash
 
 
 def runtime_from_remaining(remaining_usd, hourly_usd, *, cleanup_seconds=120):
@@ -21,3 +25,56 @@ def runtime_from_remaining(remaining_usd, hourly_usd, *, cleanup_seconds=120):
     if total_seconds <= cleanup_seconds:
         raise ValueError("Remaining budget cannot cover the cleanup margin")
     return {"work_seconds": total_seconds - cleanup_seconds, "total_seconds": total_seconds}
+
+
+def cpu_resource_policy(request, offer, storage_hourly_usd):
+    """Build a policy from a freshly retrieved CPU quote and fixed request."""
+    allowed = {"name", "cpu", "cloud", "dataCenterIds", "image", "disk", "ports", "startSsh", "startJupyter"}
+    if not isinstance(request, dict) or set(request) != allowed:
+        raise ValueError("CPU request has missing or unreviewed fields")
+    cpu, regions = request.get("cpu"), request.get("dataCenterIds")
+    if (not isinstance(cpu, dict) or set(cpu) != {"id", "vcpuCount"} or
+            not isinstance(cpu.get("id"), str) or type(cpu.get("vcpuCount")) is not int or
+            cpu["vcpuCount"] < 2 or cpu["vcpuCount"] & (cpu["vcpuCount"] - 1) or
+            not isinstance(regions, list) or len(regions) > 1 or any(not isinstance(region, str) for region in regions) or
+            request.get("cloud") != "SECURE" or request.get("ports") != ["22/tcp"] or
+            request.get("startSsh") is not True or request.get("startJupyter") is not False or
+            type(request.get("disk")) is not int or request["disk"] <= 0 or
+            not isinstance(request.get("image"), str) or not re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", request["image"])):
+        raise ValueError("CPU request does not match the supported scope")
+    if (not isinstance(offer, dict) or offer.get("id") != cpu["id"] or
+            not isinstance(offer.get("price"), dict) or not isinstance(offer.get("vcpu"), dict)):
+        raise ValueError("Invalid provider quote")
+    price, memory = offer["price"].get("securePerVcpu"), offer.get("ramGbPerVcpu")
+    minimum, maximum = offer["vcpu"].get("min"), offer["vcpu"].get("max")
+    available = (any(isinstance(dc, dict) and dc.get("id") == regions[0] and dc.get("availability") in {"HIGH", "MEDIUM", "LOW"} for dc in offer.get("dataCenters", []) or [])
+                 if regions else offer.get("availability") in {"HIGH", "MEDIUM", "LOW"})
+    if (isinstance(price, bool) or not isinstance(price, (int, float)) or not math.isfinite(price) or price <= 0 or
+            type(memory) is not int or memory <= 0 or not available or
+            type(minimum) is not int or type(maximum) is not int or not minimum <= cpu["vcpuCount"] <= maximum or
+            not isinstance(offer.get("dataCenters") or [], list)):
+        raise ValueError("Quote lacks a current price, memory or available region")
+    try:
+        storage = Decimal(str(storage_hourly_usd))
+        if not storage.is_finite() or storage < 0:
+            raise ValueError("Invalid storage estimate")
+        total = Decimal(str(price)) * cpu["vcpuCount"] + storage
+    except InvalidOperation as error:
+        raise ValueError("Invalid storage estimate") from error
+    shape = {"cpu": {**cpu, "memory": memory * cpu["vcpuCount"]}, "cloud": "SECURE",
+             "image": request["image"], "disk": request["disk"], "ports": ["22/tcp"]}
+    if regions:
+        shape["dataCenterId"] = regions[0]
+    return {"request_sha256": request_hash(request), "max_hourly_usd": float(total), "no_persistent_mounts": True,
+            "expected_shape": shape}
+
+
+def verify_cpu_quote(client, request, policy, storage_hourly_usd):
+    """Recheck current CPU price, region and shape against the armed policy."""
+    cpu = request["cpu"]
+    current = cpu_resource_policy(request, client.cpu_offer(cpu["id"], cpu["vcpuCount"]), storage_hourly_usd)
+    if (current["max_hourly_usd"] > policy.max_hourly_usd or
+            current["expected_shape"] != policy.expected_shape or not policy.no_persistent_mounts or
+            current["request_sha256"] != policy.request_sha256):
+        raise ValueError("Current CPU offer differs from the supervised policy")
+    return current

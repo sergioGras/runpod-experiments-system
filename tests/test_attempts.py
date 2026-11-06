@@ -125,13 +125,31 @@ class AttemptTests(unittest.TestCase):
                     self.calls.append(stop)
                     return "terminated" if len(self.calls) == 2 else "active"
             monitor = FakeMonitor()
-            ticks = iter([100, 100, 110, 110])
+            ticks = iter([100, 100, 100, 110, 110])
             state = run_supervisor(monitor, directory, 105, interval=1,
                 clock=lambda: next(ticks), sleep=lambda _: None, max_polls=2)
             self.assertEqual(monitor.calls, [False, True])
             self.assertTrue(state["terminated"])
             self.assertTrue((Path(directory) / "stop.request").exists())
             self.assertTrue((Path(directory) / "supervisor.json").exists())
+
+    def test_supervisor_deadline_survives_wall_clock_moving_back(self):
+        with tempfile.TemporaryDirectory() as directory:
+            class FakeClient:
+                def pods(self): return []
+            class FakeMonitor:
+                client = FakeClient()
+                attempt_id, project_id, policy, stopping = "a", "hybrid-inference", None, False
+                calls = []
+                def observe(self, stop=False):
+                    self.calls.append(stop)
+                    return "terminated" if stop else "active"
+            ticks = iter([0, 0, 6])
+            monitor = FakeMonitor()
+            state = run_supervisor(monitor, directory, 105, interval=1, clock=lambda: 100,
+                monotonic=lambda: next(ticks), sleep=lambda _: None, max_polls=2)
+            self.assertTrue(state["terminated"])
+            self.assertEqual(monitor.calls, [False, True])
 
     def test_supervisor_reconciles_claimed_unique_create_after_controller_loss(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -161,6 +179,15 @@ class AttemptTests(unittest.TestCase):
             with self.assertRaises(AttemptError):
                 ledger.claim_reconcilable_create("b", [])
 
+    def test_cancel_before_create_prevents_late_claim(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = AttemptLedger(Path(directory) / "runs.sqlite")
+            ledger.reserve("a", "hybrid-inference", "hybrid-test-" + "a" * 32, "hybrid-")
+            ledger.cancel_uncreated("a")
+            with self.assertRaises(AttemptError):
+                ledger.claim_reconcilable_create("a", [])
+            self.assertEqual(CleanupMonitor(None, ledger, "a", "hybrid-inference").observe(stop=True), "not_created")
+
     def test_price_or_shape_violation_triggers_exact_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:
             ledger = AttemptLedger(Path(directory) / "runs.sqlite")
@@ -174,6 +201,8 @@ class AttemptTests(unittest.TestCase):
                 def _delete_pod(self, pod_id): self.deleted = True
             client = Client()
             policy = ResourcePolicy({"max_hourly_usd": 1, "expected_shape": {"cloud": "SECURE"}, "request_sha256": "0" * 64}, "hash")
+            self.assertIsNone(policy.violation({"status": "PROVISIONING", "cost": 0.5, "cloud": None}))
+            self.assertIsNotNone(policy.violation({"status": "EXITED", "cost": 0.5, "cloud": "SECURE"}))
             self.assertEqual(CleanupMonitor(client, ledger, "a", "hybrid-inference", policy).observe(), "delete_requested")
             self.assertTrue(client.deleted)
 
