@@ -4,7 +4,7 @@ import math
 import os
 import time
 from pathlib import Path
-from runpod_experiments.attempts import AttemptError
+from runpod_experiments.attempts import AttemptError, reconcile_candidate
 from runpod_experiments.ownership import delete_attempt
 from runpod_experiments.runpod import ProviderError
 
@@ -25,6 +25,14 @@ class CleanupMonitor:
             raise AttemptError("Wrong project")
         if attempt["state"] == "terminated":
             return "terminated"
+        if attempt["state"] == "creating" and attempt["reconcilable"]:
+            candidate = reconcile_candidate(self.ledger, self.attempt_id, self.client.pods())
+            if candidate is not None:
+                detail = self.client.pod(candidate)
+                if detail.get("id") != candidate or detail.get("name") != attempt["pod_name"]:
+                    raise AttemptError("Create candidate detail identity mismatch")
+                self.ledger.bind(self.attempt_id, candidate)
+                attempt = self.ledger.get(self.attempt_id)
         if attempt["state"] != "active" or not attempt["pod_id"]:
             return "unresolved"
         try:
@@ -77,7 +85,9 @@ def run_supervisor(monitor, directory, deadline_epoch, *, interval=10, error_lim
     directory.mkdir(parents=True, exist_ok=True)
     stop_path, state_path = directory / "stop.request", directory / "supervisor.json"
     errors, polls = 0, 0
-    state = {"ready": False, "stopping": stop_path.exists(), "terminated": False}
+    state = {"ready": False, "stopping": stop_path.exists(), "terminated": False,
+             "pid": os.getpid(), "attempt_id": monitor.attempt_id, "project_id": monitor.project_id,
+             "deadline_epoch": deadline_epoch}
     while max_polls is None or polls < max_polls:
         if clock() >= deadline_epoch or stop_path.exists():
             state["stopping"] = True

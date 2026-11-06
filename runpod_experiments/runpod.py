@@ -33,8 +33,10 @@ class RunPodClient:
     def _get(self, path):
         return self._request("GET", path)
 
-    def _request(self, method, path):
-        request = urllib.request.Request(API_URL + path, method=method, headers={"Authorization": "Bearer " + self._key})
+    def _request(self, method, path, body=None):
+        payload = None if body is None else json.dumps(body).encode("utf-8")
+        request = urllib.request.Request(API_URL + path, data=payload, method=method,
+            headers={"Authorization": "Bearer " + self._key, "Content-Type": "application/json"})
         try:
             with self._opener(request, timeout=self._timeout) as response:
                 raw = response.read()
@@ -50,6 +52,11 @@ class RunPodClient:
         if not isinstance(pod_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", pod_id):
             raise ValueError("Invalid Pod ID")
         return self._request("DELETE", "/pods/" + pod_id)
+
+    def _create_pod(self, request):
+        if not isinstance(request, dict):
+            raise ValueError("Invalid Pod request")
+        return self._request("POST", "/pods", request)
 
     def pod(self, pod_id):
         if not isinstance(pod_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", pod_id):

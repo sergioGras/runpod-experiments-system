@@ -1,6 +1,6 @@
 # RunPod experiments system
 
-Shared infrastructure for autonomous research experiments using RunPod. Current foundations provide local budget accounting, read-only provider access and incremental artifact collection. They do not provision resources.
+Shared infrastructure for autonomous research experiments using RunPod. Current foundations include local budget accounting, provider access, guarded lifecycle components and incremental artifact collection. No paid execution has been performed with this library.
 
 ## Principles
 
@@ -16,10 +16,12 @@ Shared infrastructure for autonomous research experiments using RunPod. Current 
 
 `runpod_experiments.runpod.RunPodClient` reads paginated Pod inventory and exact Pod details via REST v2. It can read local runpodctl configuration. `ownership.delete_attempt` requests deletion only after the stored project, exact Pod ID and live Pod name match. Credentials and raw inventory must remain private.
 
-`attempts.AttemptLedger` persists unique attempts and a one-time create claim, preserving ambiguous creates for reconciliation rather than issuing a second create automatically. `supervision.CleanupMonitor` guards deletion and requires three consecutive reconciled absence observations before recording termination. `run_supervisor` adds heartbeat and stop latching around that monitor. These are tested local components: no detached launcher, guarded create path, account-wide project namespace enforcement, or integrated paid controller exists yet. A claimed create without a bound provider ID remains unresolved and cannot be deleted by this monitor. These controls are accidental-mutation guards, not provider IAM.
+`attempts.AttemptLedger` persists unique attempts and a one-time create claim. `registry.ProjectRegistry` validates cooperating project prefixes. `controller.create_attempt` checks a live supervisor heartbeat, project namespace, remaining estimated budget and instance inventory before one create request; a unique name and durable claim allow the supervisor to reconcile an ambiguous response. `supervision.CleanupMonitor` guards deletion and requires three consecutive reconciled absence observations before recording termination. `run_supervisor` adds heartbeat and stop latching; `supervisor_process.launch` starts it in a separate process. `planning.runtime_from_remaining` derives a time envelope from the remaining aggregate cap and a current price estimate. These are locally tested components and accident-prevention guards, not provider IAM or an integrated paid controller. They require all cooperating local controllers to share the same ledger and namespace registry; they do not coordinate other hosts or uncooperative account users.
 
 `runpod_experiments.ssh.SSHFetcher` downloads bounded named files over direct SSH using an existing key and a verified known-hosts file. `runpod_experiments.collection` polls a caller-supplied fetcher, preserves changed snapshots and retries failed files on later polls. `ArtifactStore` saves content-addressed local copies and a manifest. Use a private local store and a reviewed allowlist of result names; the caller is responsible for verifying the endpoint belongs to the exact intended run. Producers should publish complete files by atomic rename when coherent snapshots are required. Proxy SSH and interrupted large-file resume are not yet supported.
 
 Run `python -m unittest discover -s tests` for local tests. No credentials, private results, weights, or run databases belong in Git.
 
-Before paid execution the system still needs a guarded create path, a registered project namespace, automatic or operator-resolved ambiguous-create reconciliation, a qualified independent supervisor and launcher, budget integration, operational collection supervision, and integration with each project's own approval policy. The SSH path and supervision loops have only been exercised with test doubles, not with a RunPod instance.
+`examples/remote_hello.py` is a deterministic synthetic workload that atomically checkpoints and verifies each completed step. It has not been uploaded or run on RunPod.
+
+Before paid execution the system still needs account-wide coordination, reliable price/shape and budget validation, qualification of the independent supervisor and launcher, operational collection supervision, and integration with each project's own approval policy. Caller-provided estimates are not verified provider quotes. The SSH path and lifecycle operations have only been exercised with test doubles, not with a RunPod instance.

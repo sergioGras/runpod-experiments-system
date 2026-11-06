@@ -19,7 +19,11 @@ class AttemptLedger:
             db.execute("""CREATE TABLE IF NOT EXISTS attempts (
                 attempt_id TEXT PRIMARY KEY, project_id TEXT NOT NULL,
                 pod_name TEXT NOT NULL UNIQUE, state TEXT NOT NULL,
-                pod_id TEXT UNIQUE, create_claimed INTEGER NOT NULL DEFAULT 0)""")
+                pod_id TEXT UNIQUE, create_claimed INTEGER NOT NULL DEFAULT 0,
+                reconcilable INTEGER NOT NULL DEFAULT 0)""")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(attempts)")}
+            if "reconcilable" not in columns:
+                db.execute("ALTER TABLE attempts ADD COLUMN reconcilable INTEGER NOT NULL DEFAULT 0")
             db.execute("""CREATE TABLE IF NOT EXISTS events (
                 sequence INTEGER PRIMARY KEY AUTOINCREMENT, attempt_id TEXT NOT NULL,
                 event TEXT NOT NULL, created_utc TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
@@ -32,9 +36,16 @@ class AttemptLedger:
                 not pod_name.startswith(prefix) or len(pod_name) <= len(prefix)):
             raise ValueError("Invalid project or attempt identity")
         with closing(sqlite3.connect(self.path)) as db, db:
-            db.execute("INSERT INTO attempts VALUES (?, ?, ?, 'reserved', NULL, 0)",
+            db.execute("INSERT INTO attempts(attempt_id,project_id,pod_name,state,pod_id,create_claimed) VALUES (?, ?, ?, 'reserved', NULL, 0)",
                        (attempt_id, project_id, pod_name))
             db.execute("INSERT INTO events(attempt_id,event) VALUES (?, 'reserved')", (attempt_id,))
+
+    def reserve_registered(self, attempt_id, project_id, pod_name, registry):
+        """Reserve a name from a validated shared registry."""
+        if not registry.owns(project_id, pod_name):
+            raise AttemptError("Pod name is outside the registered project namespace")
+        prefix = next(p for p in registry.projects[project_id] if pod_name.startswith(p))
+        self.reserve(attempt_id, project_id, pod_name, prefix)
 
     def get(self, attempt_id):
         with closing(sqlite3.connect(self.path)) as db:
@@ -51,6 +62,27 @@ class AttemptLedger:
             if changed != 1:
                 raise AttemptError("Create already claimed or attempt unavailable")
             db.execute("INSERT INTO events(attempt_id,event) VALUES (?, 'create_claimed')", (attempt_id,))
+
+    def claim_reconcilable_create(self, attempt_id, inventory, max_instances=1):
+        """Persist a claim after confirming a random attempt name is unused."""
+        attempt = self.get(attempt_id)
+        if not re.search(r"-[0-9a-f]{32}$", attempt["pod_name"]):
+            raise AttemptError("Reconciliation needs a unique random attempt name")
+        if not isinstance(inventory, list) or any(not isinstance(p, dict) for p in inventory):
+            raise AttemptError("Invalid provider inventory")
+        if any(p.get("name") == attempt["pod_name"] for p in inventory):
+            raise AttemptError("Attempt name already exists at provider")
+        if type(max_instances) is not int or max_instances < 1:
+            raise ValueError("Invalid instance limit")
+        with closing(sqlite3.connect(self.path)) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            active = db.execute("SELECT COUNT(*) FROM attempts WHERE project_id=? AND state IN ('creating','active')", (attempt["project_id"],)).fetchone()[0]
+            if active >= max_instances:
+                raise AttemptError("Project has too many active or unresolved attempts")
+            changed = db.execute("UPDATE attempts SET state='creating',create_claimed=1,reconcilable=1 WHERE attempt_id=? AND state='reserved' AND create_claimed=0", (attempt_id,)).rowcount
+            if changed != 1:
+                raise AttemptError("Create already claimed or attempt unavailable")
+            db.execute("INSERT INTO events(attempt_id,event) VALUES (?, 'create_claimed_after_inventory')", (attempt_id,))
 
     def bind(self, attempt_id, pod_id):
         if not _identity(pod_id, r"[A-Za-z0-9_-]{1,128}"):

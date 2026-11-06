@@ -115,6 +115,8 @@ class AttemptTests(unittest.TestCase):
                     return []
             class FakeMonitor:
                 client = FakeClient()
+                attempt_id = "attempt-1"
+                project_id = "project-one"
                 calls = []
                 def observe(self, stop=False):
                     self.calls.append(stop)
@@ -127,6 +129,34 @@ class AttemptTests(unittest.TestCase):
             self.assertTrue(state["terminated"])
             self.assertTrue((Path(directory) / "stop.request").exists())
             self.assertTrue((Path(directory) / "supervisor.json").exists())
+
+    def test_supervisor_reconciles_claimed_unique_create_after_controller_loss(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = AttemptLedger(Path(directory) / "runs.sqlite")
+            name = "hybrid-test-" + "a" * 32
+            ledger.reserve("attempt-1", "hybrid-inference", name, "hybrid-")
+            ledger.claim_reconcilable_create("attempt-1", [])
+            class FakeClient:
+                def pods(self):
+                    return [{"id": "pod-1", "name": name, "status": "RUNNING"}]
+                def pod(self, pod_id):
+                    return {"id": pod_id, "name": name, "status": "RUNNING"}
+                def _delete_pod(self, pod_id):
+                    self.deleted = pod_id
+            client = FakeClient()
+            monitor = CleanupMonitor(client, ledger, "attempt-1", "hybrid-inference")
+            self.assertEqual(monitor.observe(stop=True), "delete_requested")
+            self.assertEqual(ledger.get("attempt-1")["pod_id"], "pod-1")
+            self.assertEqual(client.deleted, "pod-1")
+
+    def test_instance_limit_counts_unresolved_creates_in_ledger(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = AttemptLedger(Path(directory) / "runs.sqlite")
+            ledger.reserve("a", "hybrid-inference", "hybrid-test-" + "a" * 32, "hybrid-")
+            ledger.reserve("b", "hybrid-inference", "hybrid-test-" + "b" * 32, "hybrid-")
+            ledger.claim_reconcilable_create("a", [])
+            with self.assertRaises(AttemptError):
+                ledger.claim_reconcilable_create("b", [])
 
 
 if __name__ == "__main__":
