@@ -55,13 +55,26 @@ def create_attempt(client, ledger, registry, budget, attempt_id, project_id, req
     supervisor_now = clock()
     state = json.loads((Path(control_directory) / "supervisor.json").read_text(encoding="utf-8"))
     heartbeat = state.get("heartbeat_epoch")
-    if (supervisor.poll() is not None or state.get("pid") != supervisor.pid or state.get("ready") is not True or
-            state.get("stopping") or state.get("terminated") or state.get("attempt_id") != attempt_id or
-            state.get("project_id") != project_id or state.get("deadline_epoch") != deadline_epoch or
-            state.get("policy_sha256") != policy.fingerprint or
-            isinstance(heartbeat, bool) or not isinstance(heartbeat, (int, float)) or
-            not math.isfinite(heartbeat) or not 0 <= supervisor_now - heartbeat <= 30):
-        raise AttemptError("Supervisor is not ready and current for this attempt")
+    failures = []
+    if supervisor.poll() is not None: failures.append("process_exited")
+    if state.get("pid") != supervisor.pid: failures.append("pid_mismatch")
+    if state.get("ready") is not True: failures.append("not_ready")
+    if state.get("stopping"): failures.append("stopping")
+    if state.get("terminated"): failures.append("terminated")
+    if state.get("attempt_id") != attempt_id: failures.append("attempt_mismatch")
+    if state.get("project_id") != project_id: failures.append("project_mismatch")
+    if state.get("deadline_epoch") != deadline_epoch: failures.append("deadline_mismatch")
+    if state.get("policy_sha256") != policy.fingerprint: failures.append("policy_mismatch")
+    if (isinstance(heartbeat, bool) or not isinstance(heartbeat, (int, float)) or
+            not math.isfinite(heartbeat)):
+        failures.append("invalid_heartbeat")
+        heartbeat_age = None
+    else:
+        heartbeat_age = supervisor_now - heartbeat
+        if heartbeat_age < 0: failures.append("heartbeat_from_future")
+        if heartbeat_age > 30: failures.append("heartbeat_stale")
+    if failures:
+        raise AttemptError("Supervisor readiness check failed: " + ",".join(failures))
     inventory = client.pods()
     active = [p for p in inventory if registry.owns(project_id, p.get("name")) and p.get("status") != "TERMINATED"]
     if len(active) >= max_instances:

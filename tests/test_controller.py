@@ -11,6 +11,35 @@ from runpod_experiments.resource_policy import ResourcePolicy, request_hash
 
 
 class ControllerTests(unittest.TestCase):
+    def test_stale_supervisor_error_names_failed_predicate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry_path = root / "projects.json"
+            registry_path.write_text(json.dumps({"schema_version": 1, "projects": {"project-one": {"pod_name_prefixes": ["one-"]}}}))
+            registry = ProjectRegistry(registry_path)
+            ledger = AttemptLedger(root / "runs.sqlite")
+            budget = BudgetLedger(root / "budget.sqlite", "10")
+            name = new_pod_name("one-", "test")
+            request = {"name": name, "cloud": "SECURE"}
+            policy = root / "policy.json"
+            policy.write_text(json.dumps({"max_hourly_usd": 1, "expected_shape": {"cloud": "SECURE"},
+                                          "request_sha256": request_hash(request)}))
+            ledger.reserve_registered("attempt-1", "project-one", name, registry)
+            (root / "supervisor.json").write_text(json.dumps({
+                "pid": 123, "ready": True, "stopping": False, "terminated": False,
+                "attempt_id": "attempt-1", "project_id": "project-one", "deadline_epoch": 1500,
+                "heartbeat_epoch": 900, "policy_sha256": ResourcePolicy.read(policy).fingerprint}))
+            class Supervisor:
+                pid = 123
+                def poll(self): return None
+            class Provider:
+                pass
+            ticks = iter((1000, 1001))
+            with self.assertRaisesRegex(AttemptError, "heartbeat_stale"):
+                create_attempt(Provider(), ledger, registry, budget, "attempt-1", "project-one",
+                    request, Supervisor(), root, 1500, policy, quote_validator=lambda *_: None,
+                    clock=lambda: next(ticks))
+
     def test_accepts_supervisor_heartbeat_written_during_quote_check(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
