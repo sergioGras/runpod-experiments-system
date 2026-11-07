@@ -11,6 +11,45 @@ from runpod_experiments.resource_policy import ResourcePolicy, request_hash
 
 
 class ControllerTests(unittest.TestCase):
+    def test_accepts_supervisor_heartbeat_written_during_quote_check(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry_path = root / "projects.json"
+            registry_path.write_text(json.dumps({"schema_version": 1, "projects": {"project-one": {"pod_name_prefixes": ["one-"]}}}))
+            registry = ProjectRegistry(registry_path)
+            ledger = AttemptLedger(root / "runs.sqlite")
+            budget = BudgetLedger(root / "budget.sqlite", "10")
+            name = new_pod_name("one-", "test")
+            request = {"name": name, "cloud": "SECURE"}
+            policy = root / "policy.json"
+            policy.write_text(json.dumps({"max_hourly_usd": 1, "expected_shape": {"cloud": "SECURE"},
+                                          "request_sha256": request_hash(request)}))
+            ledger.reserve_registered("attempt-1", "project-one", name, registry)
+            state = {"pid": 123, "ready": True, "stopping": False, "terminated": False,
+                     "attempt_id": "attempt-1", "project_id": "project-one", "deadline_epoch": 1500,
+                     "heartbeat_epoch": 1000, "policy_sha256": ResourcePolicy.read(policy).fingerprint}
+            state_path = root / "supervisor.json"
+            state_path.write_text(json.dumps(state))
+
+            class Supervisor:
+                pid = 123
+                def poll(self): return None
+
+            class Provider:
+                def pods(self): return []
+                def _create_pod(self, body): return {"id": "pod-1", "name": body["name"]}
+
+            ticks = iter((1000, 1002))
+            def quote_validator(*_):
+                state["heartbeat_epoch"] = 1001
+                state_path.write_text(json.dumps(state))
+
+            result = create_attempt(Provider(), ledger, registry, budget, "attempt-1", "project-one",
+                request, Supervisor(), root, 1500, policy, quote_validator=quote_validator,
+                clock=lambda: next(ticks))
+            self.assertEqual(result["id"], "pod-1")
+            self.assertEqual(ledger.get("attempt-1")["state"], "active")
+
     def test_create_timeout_is_claimed_once_and_reconcilable(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

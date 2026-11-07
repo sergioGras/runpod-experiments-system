@@ -49,6 +49,10 @@ def create_attempt(client, ledger, registry, budget, attempt_id, project_id, req
     envelope = runtime_from_remaining(budget.remaining(outstanding_usd), policy.max_hourly_usd)
     if not now < deadline_epoch <= now + envelope["work_seconds"]:
         raise AttemptError("Deadline exceeds remaining estimated budget")
+    # The quote request above can block while the independent supervisor keeps
+    # writing heartbeats. Read the clock again so a newer heartbeat is not
+    # rejected as if it came from the future relative to this older timestamp.
+    supervisor_now = clock()
     state = json.loads((Path(control_directory) / "supervisor.json").read_text(encoding="utf-8"))
     heartbeat = state.get("heartbeat_epoch")
     if (supervisor.poll() is not None or state.get("pid") != supervisor.pid or state.get("ready") is not True or
@@ -56,7 +60,7 @@ def create_attempt(client, ledger, registry, budget, attempt_id, project_id, req
             state.get("project_id") != project_id or state.get("deadline_epoch") != deadline_epoch or
             state.get("policy_sha256") != policy.fingerprint or
             isinstance(heartbeat, bool) or not isinstance(heartbeat, (int, float)) or
-            not math.isfinite(heartbeat) or not 0 <= now - heartbeat <= 30):
+            not math.isfinite(heartbeat) or not 0 <= supervisor_now - heartbeat <= 30):
         raise AttemptError("Supervisor is not ready and current for this attempt")
     inventory = client.pods()
     active = [p for p in inventory if registry.owns(project_id, p.get("name")) and p.get("status") != "TERMINATED"]
