@@ -16,8 +16,16 @@ def launch(ledger_path, attempt_id, project_id, directory, deadline_epoch, polic
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=True)
     package_parent = str(Path(__file__).resolve().parent.parent)
+    # On Windows, a venv's python.exe may be a launcher whose PID differs from
+    # the actual detached interpreter that writes supervisor.json. Launch the
+    # base interpreter directly so Popen.pid remains the identity checked by
+    # the create controller. The supervisor imports only stdlib plus this
+    # explicitly added shared package path.
+    interpreter = Path(getattr(sys, "_base_executable", sys.executable))
+    if not interpreter.is_file():
+        interpreter = Path(sys.executable)
     bootstrap = "import sys; sys.path.insert(0, sys.argv.pop(1)); from runpod_experiments.supervisor_process import main; main()"
-    argv = [sys.executable, "-c", bootstrap, package_parent, "--ledger", str(Path(ledger_path).resolve()),
+    argv = [str(interpreter), "-c", bootstrap, package_parent, "--ledger", str(Path(ledger_path).resolve()),
             "--attempt", attempt_id, "--project", project_id, "--directory", str(directory), "--deadline", str(deadline_epoch),
             "--policy", str(Path(policy_path).resolve())]
     flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW) if os.name == "nt" else 0

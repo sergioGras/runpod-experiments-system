@@ -35,6 +35,7 @@ class RegistryAndLaunchTests(unittest.TestCase):
                 return "process"
             result = launch(Path(directory) / "attempts.sqlite", "attempt-1", "project-one", directory, 12345, Path(directory) / "policy.json", popen=popen)
             self.assertEqual(result, "process")
+            self.assertEqual(captured["argv"][0], str(Path(getattr(sys, "_base_executable", sys.executable))))
             self.assertTrue(any("runpod_experiments.supervisor_process" in arg for arg in captured["argv"]))
             self.assertTrue(captured["kwargs"]["close_fds"])
             self.assertNotIn("apikey", " ".join(captured["argv"]))
