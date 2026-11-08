@@ -75,7 +75,8 @@ class ControllerTests(unittest.TestCase):
 
             result = create_attempt(Provider(), ledger, registry, budget, "attempt-1", "project-one",
                 request, Supervisor(), root, 1500, policy, quote_validator=quote_validator,
-                clock=lambda: next(ticks))
+                clock=lambda: next(ticks), cleanup_reserve_seconds=180)
+            self.assertEqual(str(budget.remaining()), "9.811111")
             self.assertEqual(result["id"], "pod-1")
             self.assertEqual(ledger.get("attempt-1")["state"], "active")
 
@@ -112,6 +113,9 @@ class ControllerTests(unittest.TestCase):
             with self.assertRaises(AttemptError):
                 create_attempt(*altered, quote_validator=lambda *_: None, clock=lambda: 1000)
             self.assertEqual(ledger.get("attempt-1")["state"], "reserved")
+            with self.assertRaises(ValueError):
+                create_attempt(*args, quote_validator=lambda *_: None, clock=lambda: 1000, cleanup_reserve_seconds=True)
+            self.assertEqual(client.creates, 0)
             with self.assertRaises(TimeoutError):
                 create_attempt(*args, quote_validator=lambda *_: None, clock=lambda: 1000)
             self.assertEqual(ledger.get("attempt-1")["state"], "creating")

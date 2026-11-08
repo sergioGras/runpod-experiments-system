@@ -22,7 +22,7 @@ def new_pod_name(prefix, label):
 
 def create_attempt(client, ledger, registry, budget, attempt_id, project_id, request,
                    supervisor, control_directory, deadline_epoch, policy_path,
-                   *, quote_validator, max_instances=1, outstanding_usd="0", clock=time.time):
+                   *, quote_validator, max_instances=1, outstanding_usd="0", clock=time.time, cleanup_reserve_seconds=120):
     """Send at most one create after ownership, supervisor and budget checks.
 
     The caller must separately enforce experiment approval, resource pricing,
@@ -34,6 +34,8 @@ def create_attempt(client, ledger, registry, budget, attempt_id, project_id, req
     if (attempt["project_id"] != project_id or attempt["state"] != "reserved" or
             not registry.owns(project_id, name) or not isinstance(request, dict) or request.get("name") != name):
         raise AttemptError("Create request does not match registered reservation")
+    if type(cleanup_reserve_seconds) is not int or cleanup_reserve_seconds <= 0:
+        raise ValueError("Cleanup reserve must be positive integer seconds")
     if type(max_instances) is not int or max_instances != 1:
         raise ValueError("Concurrent instances are not yet supported by the budget guard")
     if (isinstance(deadline_epoch, bool) or not isinstance(deadline_epoch, (int, float)) or
@@ -46,7 +48,7 @@ def create_attempt(client, ledger, registry, budget, attempt_id, project_id, req
     if not callable(quote_validator):
         raise ValueError("A current provider quote validator is required")
     quote_validator(client, request, policy)
-    envelope = runtime_from_remaining(budget.remaining(outstanding_usd), policy.max_hourly_usd)
+    envelope = runtime_from_remaining(budget.remaining(outstanding_usd), policy.max_hourly_usd, cleanup_seconds=cleanup_reserve_seconds)
     if not now < deadline_epoch <= now + envelope["work_seconds"]:
         raise AttemptError("Deadline exceeds remaining estimated budget")
     # The quote request above can block while the independent supervisor keeps
@@ -79,7 +81,7 @@ def create_attempt(client, ledger, registry, budget, attempt_id, project_id, req
     active = [p for p in inventory if registry.owns(project_id, p.get("name")) and p.get("status") != "TERMINATED"]
     if len(active) >= max_instances:
         raise AttemptError("Project instance limit reached")
-    exposure = ((Decimal(str(deadline_epoch - now)) + Decimal(120)) * Decimal(str(policy.max_hourly_usd)) / Decimal(3600)).quantize(Decimal("0.000001"), rounding=ROUND_CEILING)
+    exposure = ((Decimal(str(deadline_epoch - now)) + Decimal(cleanup_reserve_seconds)) * Decimal(str(policy.max_hourly_usd)) / Decimal(3600)).quantize(Decimal("0.000001"), rounding=ROUND_CEILING)
     budget.reserve_exposure(attempt_id, exposure, outstanding_usd)
     try:
         ledger.claim_reconcilable_create(attempt_id, inventory, max_instances=max_instances)

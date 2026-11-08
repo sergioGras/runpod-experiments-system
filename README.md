@@ -37,3 +37,5 @@ Before paid execution the system still needs account-wide coordination, qualific
 `telemetry.StageJournal` flushes/fsyncs stage starts, ends and exceptions with process peak RSS observations. A killed native call leaves its started stage available for collection. Windows uses PeakWorkingSetSize; Linux uses ru_maxrss converted to bytes. These are process peaks, not per-stage allocation deltas or whole-machine usage. Callers choose export-safe fields and private journal paths.
 
 Validation: 47 local tests passed, including real child-process stalled-input, full-output-queue shutdown, lifetime termination and retained partial-stage tests. No provider resource or credential is used by these new tests.
+
+`create_attempt(..., cleanup_reserve_seconds=120)` now accepts the caller's declared positive cleanup margin. Both the remaining-budget runtime check and pre-create exposure reservation use that value, so a 180-second cleanup plan reserves its full cost instead of silently assuming 120 seconds. The existing default is retained for callers that already use 120 seconds; tests cover a larger reservation and invalid boolean input.
