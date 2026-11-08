@@ -1,6 +1,6 @@
 # RunPod experiments system
 
-Shared infrastructure for autonomous research experiments using RunPod. Current foundations include local budget accounting, provider access, guarded lifecycle components and incremental artifact collection. No paid execution has been performed with this library.
+Shared infrastructure for autonomous research experiments using RunPod. Current foundations include local budget accounting, provider access, guarded lifecycle components and incremental artifact collection. Live qualification and spending authorization belong to each consuming project.
 
 ## Principles
 
@@ -26,4 +26,14 @@ Install the package into an isolated Python 3.11+ environment with `python -m pi
 
 `examples/remote_hello.py` is a deterministic synthetic workload that atomically checkpoints and verifies each completed step. `examples/remote_hello_runner.py` composes a candidate CPU request, supervisor, upload, execution, collection and cleanup. A fake-provider driver test passes; the runner has not been uploaded or run on RunPod. An approval reference is a record, not proof of owner approval. The SSH bootstrap uses trust on first use: it pins the first observed key without independently authenticating it. The project must explicitly review that boundary before disclosure.
 
-Before paid execution the system still needs account-wide coordination, qualification of the independent supervisor and collector, independent review of the runner and its trust boundary, and integration with each project's own approval policy. The CPU path rechecks a current catalog quote but storage and other cost estimates can differ from billing. The current controller supports one active instance per project and requires one shared ledger for cooperating controllers; it is not a cross-host lock. The SSH path and lifecycle operations have only been exercised with test doubles, not with a RunPod instance. The Windows supervisor requests prevention of automatic idle sleep; explicit sleep, power loss or process failure can still interrupt it.
+Before paid execution the system still needs account-wide coordination, qualification of the independent supervisor and collector, independent review of the runner and its trust boundary, and integration with each project's own approval policy. The CPU path rechecks a current catalog quote but storage and other cost estimates can differ from billing. The current controller supports one active instance per project and requires one shared ledger for cooperating controllers; it is not a cross-host lock. The package suite uses local subprocesses and provider test doubles; consuming projects maintain their own live qualification evidence. The Windows supervisor requests prevention of automatic idle sleep; explicit sleep, power loss or process failure can still interrupt it.
+
+## Finite interactive I/O and stage evidence
+
+`binary_process.BinaryProcess` provides finite-lifetime local binary subprocess pipes with bounded output queues and timed sends/receives. A stalled send terminates its process instead of waiting indefinitely for stdin to drain. Shutdown cancels queue backpressure so an unread full output queue cannot strand the reader thread. The lifetime timer kills the child even while native work blocks; this bounds that child process only, not arbitrary descendants or provider billing.
+
+`SSHInteractiveProcess` reuses those pipes, adds finite connection/keepalive settings, and launches the remote command with GNU timeout plus a five-second kill grace. The local SSH lifetime also remains bounded. These controls terminate a transport/workload process; callers must still reconcile the provider Pod through the independent lifecycle supervisor. Preparing client keys before opening SSH remains appropriate; keepalives do not prove or repair every remote idle policy.
+
+`telemetry.StageJournal` flushes/fsyncs stage starts, ends and exceptions with process peak RSS observations. A killed native call leaves its started stage available for collection. Windows uses PeakWorkingSetSize; Linux uses ru_maxrss converted to bytes. These are process peaks, not per-stage allocation deltas or whole-machine usage. Callers choose export-safe fields and private journal paths.
+
+Validation: 47 local tests passed, including real child-process stalled-input, full-output-queue shutdown, lifetime termination and retained partial-stage tests. No provider resource or credential is used by these new tests.

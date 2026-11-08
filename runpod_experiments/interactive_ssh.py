@@ -1,19 +1,16 @@
 """Bounded binary SSH session to one exact active project Pod."""
 from __future__ import annotations
 
-import math
-from queue import Empty, Full, Queue
 import shlex
 import subprocess
-import threading
-import time
 from pathlib import Path, PurePosixPath
 
+from runpod_experiments.binary_process import BinaryProcess
 from runpod_experiments.attempts import AttemptError
 from runpod_experiments.ssh import SSHFetcher
 
 
-class SSHInteractiveProcess:
+class SSHInteractiveProcess(BinaryProcess):
     """Long-lived raw stdin/stdout process with strict pinned SSH identity.
 
     The caller must keep the independent provider supervisor alive, bound its
@@ -47,9 +44,11 @@ class SSHInteractiveProcess:
                 type(queued_chunks) is not int or not 1 <= queued_chunks <= 1024):
             raise ValueError("Invalid interactive command or stream limits")
         command = "cd -- " + shlex.quote(remote_root) + " && exec "
-        command += shlex.join(["timeout", str(timeout_seconds), "python3", script, *arguments])
+        command += shlex.join(["timeout", "--kill-after=5", str(timeout_seconds), "python3", script, *arguments])
         argv = ["ssh", "-T", "-i", connection.key_file, "-p", str(connection.port),
-                "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=yes",
+                "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-o", "ConnectionAttempts=1",
+                "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=2",
+                "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=yes",
                 "-o", "UserKnownHostsFile=" + connection.known_hosts,
                 connection.username + "@" + connection.host, command]
         Path(log_path).parent.mkdir(parents=True, exist_ok=True)
@@ -65,86 +64,5 @@ class SSHInteractiveProcess:
             self.process.kill()
             self._stderr.close()
             raise RuntimeError("Interactive SSH pipes were not created")
-        self._queue = Queue(maxsize=queued_chunks)
-        self._chunk_bytes = output_chunk_bytes
-        self._buffer = bytearray()
-        self._reader_error = None
-        self._closed = threading.Event()
-        self._reader = threading.Thread(target=self._read_stdout, name="runpod-ssh-output", daemon=True)
-        self._reader.start()
-
-    def _read_stdout(self):
-        try:
-            stream = self.process.stdout
-            while True:
-                read = getattr(stream, "read1", stream.read)
-                chunk = read(self._chunk_bytes)
-                if not chunk:
-                    break
-                self._queue.put(chunk)
-        except BaseException as error:
-            self._reader_error = error
-        finally:
-            while not self._closed.is_set():
-                try:
-                    self._queue.put(None, timeout=0.1)
-                    break
-                except Full:
-                    continue
-
-    def send(self, data):
-        if not isinstance(data, bytes) or len(data) > 64_000_000:
-            raise TypeError("Interactive SSH accepts bytes only")
-        if self.process.poll() is not None:
-            raise BrokenPipeError("Interactive SSH process has exited")
-        try:
-            self.process.stdin.write(data)
-            self.process.stdin.flush()
-        except (OSError, ValueError):
-            raise BrokenPipeError("Interactive SSH input pipe failed") from None
-
-    def receive(self, size, timeout):
-        if (type(size) is not int or size < 0 or size > 64_000_000 or
-                isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or
-                not math.isfinite(timeout) or timeout <= 0):
-            raise ValueError("Invalid interactive read bound")
-        deadline = time.monotonic() + timeout
-        while len(self._buffer) < size:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError("Interactive SSH response timed out")
-            try:
-                chunk = self._queue.get(timeout=remaining)
-            except Empty:
-                raise TimeoutError("Interactive SSH response timed out") from None
-            if chunk is None:
-                if self._reader_error is not None:
-                    raise RuntimeError("Interactive SSH output reader failed") from None
-                raise EOFError("Interactive SSH closed before the requested bytes arrived")
-            self._buffer.extend(chunk)
-        result = bytes(self._buffer[:size])
-        del self._buffer[:size]
-        return result
-
-    def close_stdin(self):
-        if self.process.stdin and not self.process.stdin.closed:
-            self.process.stdin.close()
-
-    def wait(self, timeout=None):
-        return self.process.wait(timeout=timeout)
-
-    def terminate(self, timeout=5):
-        self._closed.set()
-        if self.process.poll() is None:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait(timeout=timeout)
-        self.close_stdin()
-        try:
-            self.process.stdout.close()
-        finally:
-            if not self._stderr.closed:
-                self._stderr.close()
+        super().__init__(self.process, stderr=self._stderr, lifetime_seconds=timeout_seconds,
+                         output_chunk_bytes=output_chunk_bytes, queued_chunks=queued_chunks)

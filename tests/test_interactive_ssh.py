@@ -77,7 +77,7 @@ class InteractiveSSHTests(unittest.TestCase):
             session.send(b"\x00\xffbinary")
             self.assertEqual(process.stdin.getvalue(), b"\x00\xffbinary")
             self.assertIn("StrictHostKeyChecking=yes", process.argv)
-            self.assertIn("timeout 600 python3 worker.py --server 'two words'", process.argv[-1])
+            self.assertIn("timeout --kill-after=5 600 python3 worker.py --server 'two words'", process.argv[-1])
             self.assertIs(process.kwargs["stdin"], -1)
             self.assertIs(process.kwargs["stdout"], -1)
             self.assertNotEqual(process.kwargs["stderr"], process.kwargs["stdout"])
