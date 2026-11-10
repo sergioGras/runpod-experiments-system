@@ -1,8 +1,9 @@
 # Implementation and consumer migration plan
 
-Status: M0 design and M1 are complete; M2 provider-boundary implementation is in
-progress on the isolated `design/unified-execution` worktree. Production
-migration has not begun. Read
+Status: M0 design and M1 are complete. M2 remains open pending verified per-Pod
+billing evidence. The initial M3 SQLite store slice passes its focused and full
+offline checks on the isolated `design/unified-execution` worktree; M3's full
+exit criteria remain open. Production migration has not begun. Read
 [architecture](architecture.md), [testing](testing-strategy.md) and
 [contribution rules](../CONTRIBUTING.md) together. The earlier
 [unification study](unification-roadmap.md) supplies the capability inventory.
@@ -41,8 +42,11 @@ migration has not begun. Read
 | M11 | Integrated acceptance, duplication retirement and release | M7, M8, M9, M10 | All consumer gates, release artifact checks and documented retirement complete |
 
 M0 completed as documentation in commit `3a13149`; M1 is complete in commit
-`b399a2a`. M2 is in progress; M3 through M11 remain planned. The order lets
-consumer experience improve the contracts before the parallel cutover.
+`b399a2a`. The M2 provider observation slice is committed, but M2 stays open
+until its billing evidence source is validated. M3's first local store tranche
+is implemented and validated; its remaining exit criteria and M4 through M11
+remain open. The order lets consumer experience improve the contracts before
+the parallel cutover.
 If serial migration exposes a missing common capability, implement it centrally
 with regression coverage before continuing that migration.
 
@@ -109,15 +113,64 @@ or resources were accessed.
 
 Implement a versioned SQLite store with immutable identity/provenance and event
 history. Transactionally link approval scope, slots, budget holds and create
-claims. Support parent and round ceilings, later charges and evidence-checked
-adjustments. Preserve history when scientific source is corrected under an
-unchanged approval scope. Keep an actual owner deadline distinct from an
-operational window that may be renewed under that approval.
+claims. Treat one approval scope as the immutable experiment-round ceiling;
+defer hierarchical parent/child budgets to M10's parallel admission work.
+Account for later charges and evidence-checked adjustments. Preserve history when
+scientific source is corrected under an unchanged approval scope. Keep an actual
+owner deadline distinct from an operational window that may be renewed under that
+approval.
 
 Do not migrate production databases automatically. First build read-only legacy
 inspectors and explicit import/bridge validation. Establish the canonical state
 root and host identity across multiple checkouts. A second controller host is a
 separate future capability, not a side effect of using the same package.
+
+### Current M3 slice (internal and unreleased)
+
+`runpod_experiments.execution_store.ExecutionStore` currently supplies a
+schema-v2 SQLite ledger for one project on one configured controller host. It
+canonicalizes the caller-supplied database path and immutably binds the store to
+the supplied project and host identities. Deployment configuration must still
+select the same state-root path across that project's checkouts and ensure the
+configured host identity matches the real controller. The store atomically
+stores immutable approval, plan and attempt documents; project/approval slot
+counts; selected-rate hourly exposure; aggregate per-approval billed and
+estimated totals; and a one-use create claim. It persists candidate Pod binding,
+stop/reconciliation/confirmed-absence transitions, append-only exact-Pod billing
+observations and superseding adjustments. Database triggers protect immutable
+attempt identity and audit/evidence rows. Event rows form a verifiable hash chain
+that detects accidental mutation or reordering of those event rows. Unknown,
+unversioned and incomplete databases fail closed without automatic migration.
+
+Admission estimates exposure by rounding up
+`ResourceProfile.hourly_micro_usd * (runtime_seconds + cleanup_reserve_seconds)`
+to the next microdollar. Callers must put the full known recurring hourly cost,
+including separately quoted storage, into that selected profile. A terminated
+attempt retains its estimate until the caller supplies reviewed billing evidence
+whose declared coverage includes the create-claim and termination timestamps.
+Later billing observations reopen the hold. The store cannot verify that an
+evidence digest or coverage claim is true, and no provider invoice importer is
+implemented; settlement remains pending caller-side validation. A confirmed
+create absence releases its hold only after the caller has independently
+reconciled exact scoped provider inventory. The local hash chain is not tamper-proof
+against a party that can rewrite the database, and it does not authenticate a
+caller-supplied billing or provider-reconciliation claim.
+
+The first store tests cover restart/reopen across reservation, claim, binding,
+stop and settlement; one-use claims and idempotent local retries; project and
+approval admission caps; fresh-database and last-budget process races; a forced
+process exit mid-reservation; scoped project/host identity; ambiguous
+create/stop reconciliation; immutable evidence rows; and billing adjustments.
+On Python 3.12.14, 15 focused store tests and all 97 library tests passed using
+`python -m unittest discover -s tests -p 'test_execution_store.py' -v` and
+`python -m unittest discover -s tests -v`. These runs used local temporary
+databases and fake/local fixtures; no RunPod credentials, account calls or
+resources were used. This is not yet a production engine or stable API.
+Remaining M3 work includes broader transaction crash-point coverage,
+deployment-wide state-root coordination and further accounting edge cases. M10
+owns hierarchical parent/child budget admission. M2 must still provide a
+validated billing evidence source. Consumers continue on their existing package
+pins until their separate migration gates pass.
 
 ## M4: supervision
 

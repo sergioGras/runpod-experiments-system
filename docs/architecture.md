@@ -128,10 +128,12 @@ from an empty list. Delete retries must revalidate the same exact identity.
 
 ## Admission, timing and autonomy
 
-Admission transactionally checks project slots, unresolved attempts, applicable
-parent/round caps and aggregate hourly exposure. Reserve setup, work and cleanup,
-including declared storage/other cost estimates. Provider billing delay or failure
-can defeat a strict monetary ceiling; record the remaining uncertainty.
+Admission transactionally checks project slots, unresolved attempts, one immutable
+approval/round ceiling and aggregate hourly exposure. Reserve setup, work and
+cleanup, including declared storage/other cost estimates. Hierarchical
+parent/child ceilings are part of the later bounded-parallel milestone. Provider
+billing delay or failure can defeat a strict monetary ceiling; record the
+remaining uncertainty.
 
 Initial deployment supports one controlling host per project, serial resource
 execution, then an explicitly tested two-resource profile. Independent projects
