@@ -1,6 +1,8 @@
 # Implementation and consumer migration plan
 
-Status: design prepared; production migration has not begun. Read
+Status: M0 design is complete and M1 contracts are implemented and validated on
+the isolated `design/unified-execution` worktree. Production migration has not
+begun. Read
 [architecture](architecture.md), [testing](testing-strategy.md) and
 [contribution rules](../CONTRIBUTING.md) together. The earlier
 [unification study](unification-roadmap.md) supplies the capability inventory.
@@ -38,8 +40,9 @@ Status: design prepared; production migration has not begun. Read
 | M10 | Bounded parallel admission and partition dispatcher migration | M3, M4, M6, M9 | Two-slot races, parent/child budgets and independent watchdogs pass |
 | M11 | Integrated acceptance, duplication retirement and release | M7, M8, M9, M10 | All consumer gates, release artifact checks and documented retirement complete |
 
-M0 is the current deliverable. M1 through M11 are planned, not completed. The
-order lets consumer experience improve the contracts before the parallel cutover.
+M0 completed as documentation in commit `3a13149`. M1 is in progress; M2 through
+M11 remain planned. The order lets consumer experience improve the contracts
+before the parallel cutover.
 If serial migration exposes a missing common capability, implement it centrally
 with regression coverage before continuing that migration.
 
@@ -55,6 +58,23 @@ core conformance tests. Test assembly must deny live-provider construction and
 credential discovery, including child processes. Define stage/event schemas and
 redacted operational evidence. Include a fourth synthetic project to ensure the
 engine does not embed the three current project names or special-case their IDs.
+
+M1 implementation currently adds frozen schema-v1 contract records and stage
+events, canonical UTF-8 JSON envelope helpers (sorted keys, compact form, one
+MiB maximum), duplicate-key/nonfinite rejection, typed failure categories, an
+opt-in test-mode provider guard, and synthetic fixtures. Approval scopes bind
+the hash of their project policy. `validate_attempt` checks attempt identity,
+retries, approved resource/region, time limits, expiry and source/config/package/
+policy digests. The focused contract suite passes 21 tests; the full existing
+library suite passes 68 tests. A Windows checkout initially failed the existing
+reviewed-source digest because Git converted the file to CRLF; `.gitattributes`
+now pins that file to LF (commit `54aedf4`) and the runner test passes.
+
+These are internal experimental Python APIs. Encoded documents use the exact
+`kind`, `payload`, `schema_version` envelope; decoding validates that envelope
+and returns raw payload data without reconstructing dataclasses. No engine,
+durable store, authorization verifier or stable public API exists yet. The
+test-mode environment flag is a development barrier, not a security boundary.
 
 ## M2: provider boundary
 
@@ -181,3 +201,10 @@ qualification additionally record approval/attempt/provider references privately
 actual versus pending costs and termination evidence. Mark the migration complete
 only when all three consumer entry points use the package and their generic
 operational duplication has been retired under these gates.
+
+M0 evidence: documentation review and provenance recorded in design commit
+`3a13149`; no source or consumer behavior changed. M1 validation: 21 focused
+contract tests and 68 full-suite tests pass; no provider access or paid resource
+was used. The source checkout fix is commit `54aedf4`; the M1 contracts and
+offline harness are in commit `b399a2a`. The main shared-package checkout remains
+pinned and unchanged.
