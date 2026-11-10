@@ -9,11 +9,15 @@ import urllib.request
 from pathlib import Path
 
 API_URL = "https://api.runpod.io/v2"
+MAX_INVENTORY_PAGES = 100
+MAX_INVENTORY_PODS = 10_000
+MAX_RESPONSE_BYTES = 8_388_608
 
 
 class ProviderError(RuntimeError):
-    def __init__(self, message, status=None):
+    def __init__(self, message, status=None, *, kind="provider"):
         self.status = status
+        self.kind = kind
         super().__init__(message)
 
 
@@ -44,14 +48,16 @@ class RunPodClient:
             headers={"Authorization": "Bearer " + self._key, "Content-Type": "application/json"})
         try:
             with self._opener(request, timeout=self._timeout) as response:
-                raw = response.read()
+                raw = response.read(MAX_RESPONSE_BYTES + 1)
+                if len(raw) > MAX_RESPONSE_BYTES:
+                    raise ProviderError("RunPod response exceeds the size limit", kind="invalid_response")
                 return json.loads(raw) if raw else None
         except urllib.error.HTTPError as error:
-            raise ProviderError("RunPod request failed", error.code) from None
+            raise ProviderError("RunPod request failed", error.code, kind="http") from None
         except (urllib.error.URLError, TimeoutError, OSError):
-            raise ProviderError("RunPod connection failed") from None
+            raise ProviderError("RunPod connection failed", kind="transport") from None
         except (ValueError, UnicodeDecodeError):
-            raise ProviderError("Invalid RunPod response") from None
+            raise ProviderError("Invalid RunPod response", kind="invalid_response") from None
 
     def _delete_pod(self, pod_id):
         if not isinstance(pod_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", pod_id):
@@ -68,7 +74,7 @@ class RunPodClient:
             raise ValueError("Invalid Pod ID")
         result = self._get("/pods/" + pod_id)
         if not isinstance(result, dict) or result.get("id") != pod_id:
-            raise ProviderError("Pod detail has an unexpected identity")
+            raise ProviderError("Pod detail has an unexpected identity", kind="invalid_response")
         return result
 
     def cpu_offer(self, cpu_id, vcpu_count):
@@ -79,7 +85,7 @@ class RunPodClient:
         query = urllib.parse.urlencode({"include": "AVAILABILITY", "product": "POD", "vcpuCount": vcpu_count})
         result = self._get("/catalog/cpus/" + cpu_id + "?" + query)
         if not isinstance(result, dict):
-            raise ProviderError("Invalid CPU catalog response")
+            raise ProviderError("Invalid CPU catalog response", kind="invalid_response")
         return result
 
     def gpu_offer(self, gpu_id, gpu_count=1):
@@ -91,16 +97,23 @@ class RunPodClient:
         query = urllib.parse.urlencode({"include": "AVAILABILITY", "product": "POD", "count": gpu_count})
         result = self._get("/catalog/gpus/" + gpu_path + "?" + query)
         if not isinstance(result, dict):
-            raise ProviderError("Invalid GPU catalog response")
+            raise ProviderError("Invalid GPU catalog response", kind="invalid_response")
         return result
 
-    def pods(self):
-        result, cursor, seen = [], None, set()
+    def pods(self, *, max_pages=MAX_INVENTORY_PAGES, max_pods=MAX_INVENTORY_PODS):
+        if type(max_pages) is not int or max_pages <= 0 or type(max_pods) is not int or max_pods <= 0:
+            raise ValueError("Invalid inventory bounds")
+        result, cursor, seen, page_count = [], None, set(), 0
         while True:
+            if page_count >= max_pages:
+                raise ProviderError("Pod inventory exceeds the page limit", kind="invalid_response")
+            page_count += 1
             query = "?" + urllib.parse.urlencode({"cursor": cursor}) if cursor else ""
             page = self._get("/pods" + query)
             if not isinstance(page, dict) or not isinstance(page.get("pods"), list) or any(not isinstance(x, dict) for x in page["pods"]):
                 raise ProviderError("Invalid Pod inventory")
+            if len(result) + len(page["pods"]) > max_pods:
+                raise ProviderError("Pod inventory exceeds the item limit", kind="invalid_response")
             result.extend(page["pods"])
             pagination = page.get("pagination", {})
             if not isinstance(pagination, dict) or type(pagination.get("hasNextPage", False)) is not bool:

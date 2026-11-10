@@ -4,10 +4,10 @@ Shared infrastructure for autonomous research experiments using RunPod. Current 
 
 The [cross-project unification roadmap](docs/unification-roadmap.md) proposes the common execution contracts and staged migration for the three consuming projects. It describes planned work, not currently supported capabilities.
 
-Development status: M0 design is recorded and M1 schema-v1 contract prototypes
-are implemented and tested on the isolated design branch. They are not part of
-the pinned 0.1.0 package and do not provide an execution engine or stable public
-API; the existing consumers continue using their current package pins.
+Development status: M0 and M1 are complete, with M2's normalized read-only
+provider boundary in progress on the isolated design branch. These changes are
+not part of the pinned 0.1.0 package; the existing consumers continue using their
+current package pins.
 
 Detailed design and development documents:
 

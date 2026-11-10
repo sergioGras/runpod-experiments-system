@@ -7,6 +7,8 @@ from pathlib import Path
 import tempfile
 from typing import Any
 
+from runpod_experiments.runpod import ProviderError
+
 
 TEST_MODE_ENV = "RUNPOD_EXPERIMENTS_TEST_MODE"
 
@@ -23,6 +25,15 @@ class FakeProvider:
     def list_account_pods(self) -> list[dict[str, Any]]:
         self.requests.append(("list_account_pods", None))
         return [dict(pod) for pod in self.inventory]
+
+    def pods(self) -> list[dict[str, Any]]:
+        return self.list_account_pods()
+
+    def pod(self, pod_id: str) -> dict[str, Any]:
+        matches = [pod for pod in self.inventory if pod.get("id") == pod_id]
+        if len(matches) != 1:
+            raise ProviderError("Fake Pod detail is missing or ambiguous", 404)
+        return dict(matches[0])
 
     def list_project_pods(self, prefixes: tuple[str, ...]) -> list[dict[str, Any]]:
         self.requests.append(("list_project_pods", tuple(prefixes)))

@@ -209,6 +209,83 @@ class ResourceProfile:
 
 
 @dataclass(frozen=True, slots=True)
+class QuoteObservation:
+    """Normalized provider quote; storage remains a separately identified estimate."""
+
+    kind: ResourceKind
+    resource_id: str
+    requested_units: int
+    max_configurable_units: int
+    compute_hourly_micro_usd: int
+    storage_hourly_micro_usd: int
+    catalog_available: bool
+    region_ids: tuple[str, ...]
+    observed_epoch: int
+    response_sha256: str
+    schema_version: int = SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, ResourceKind):
+            raise ContractError("kind must be a ResourceKind")
+        _text(self.resource_id, "resource_id")
+        _positive_int(self.requested_units, "requested_units")
+        if type(self.max_configurable_units) is not int or self.max_configurable_units < 0:
+            raise ContractError("max_configurable_units must be a nonnegative integer")
+        if type(self.catalog_available) is not bool:
+            raise ContractError("catalog_available must be a boolean")
+        if self.catalog_available and self.max_configurable_units < self.requested_units:
+            raise ContractError("available quote cannot be below the requested resource count")
+        _positive_int(self.compute_hourly_micro_usd, "compute_hourly_micro_usd")
+        if type(self.storage_hourly_micro_usd) is not int or self.storage_hourly_micro_usd < 0:
+            raise ContractError("storage_hourly_micro_usd must be a nonnegative integer")
+        _unique_text_tuple(self.region_ids, "region_ids", _IDENTIFIER, allow_empty=True)
+        _positive_int(self.observed_epoch, "observed_epoch")
+        _sha(self.response_sha256, "response_sha256")
+        if type(self.schema_version) is not int or self.schema_version != SCHEMA_VERSION:
+            raise ContractError("unsupported QuoteObservation schema version")
+
+    @property
+    def total_hourly_micro_usd(self) -> int:
+        return self.compute_hourly_micro_usd + self.storage_hourly_micro_usd
+
+
+@dataclass(frozen=True, slots=True)
+class BillingObservation:
+    """Immutable, exact-Pod billed amount observation from reviewed evidence."""
+
+    observation_id: str
+    project_id: str
+    attempt_id: str
+    provider_pod_id: str
+    amount_micro_usd: int
+    period_start_epoch: int
+    period_end_epoch: int
+    observed_epoch: int
+    evidence_sha256: str
+    supersedes_observation_id: str | None = None
+    schema_version: int = SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        _text(self.observation_id, "observation_id", _IDENTIFIER)
+        _text(self.project_id, "project_id", _PROJECT_ID)
+        _text(self.attempt_id, "attempt_id", _IDENTIFIER)
+        _text(self.provider_pod_id, "provider_pod_id", re.compile(r"[A-Za-z0-9_-]{1,128}\Z"))
+        if type(self.amount_micro_usd) is not int or self.amount_micro_usd < 0:
+            raise ContractError("amount_micro_usd must be a nonnegative integer")
+        for field in ("period_start_epoch", "period_end_epoch", "observed_epoch"):
+            _positive_int(getattr(self, field), field)
+        if self.period_end_epoch <= self.period_start_epoch:
+            raise ContractError("billing period must have positive duration")
+        _sha(self.evidence_sha256, "evidence_sha256")
+        if self.supersedes_observation_id is not None:
+            _text(self.supersedes_observation_id, "supersedes_observation_id", _IDENTIFIER)
+            if self.supersedes_observation_id == self.observation_id:
+                raise ContractError("billing observation cannot supersede itself")
+        if type(self.schema_version) is not int or self.schema_version != SCHEMA_VERSION:
+            raise ContractError("unsupported BillingObservation schema version")
+
+
+@dataclass(frozen=True, slots=True)
 class ManifestFile:
     path: str
     sha256: str

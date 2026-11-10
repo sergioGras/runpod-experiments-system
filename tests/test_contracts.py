@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from runpod_experiments.contracts import (
-    ApprovalScope, AttemptPlan, BillingStatus, CleanupStatus, ContractError,
+    ApprovalScope, AttemptPlan, BillingObservation, BillingStatus, CleanupStatus, ContractError,
     ExecutionOutcome, ExecutionPlan, FailureCategory, ManifestFile,
     OperationalStatus, ProjectPolicy, ResourceKind, ResourceProfile,
     RetryPolicy, SCHEMA_VERSION, ScientificVerdict, StageEvent, StageStatus, TransferDirection,
@@ -221,6 +221,25 @@ class ExecutionContractTests(unittest.TestCase):
                        1_900_000_003, "upload", StageStatus.FAILED,
                        FailureCategory.TRANSPORT_FAILURE,
                        "HTTP timeout with bearer secret")
+
+    def test_billing_observation_is_exact_scoped_and_append_only(self):
+        bill = BillingObservation("bill-001", "synthetic-nebula", "attempt-001",
+                                  "pod-001", 250_000, 1_900_000_000,
+                                  1_900_003_600, 1_900_003_700, ZERO)
+        adjusted = BillingObservation("bill-002", "synthetic-nebula", "attempt-001",
+                                      "pod-001", 275_000, 1_900_000_000,
+                                      1_900_003_600, 1_900_004_000, ONE,
+                                      supersedes_observation_id=bill.observation_id)
+        self.assertEqual(adjusted.supersedes_observation_id, bill.observation_id)
+        with self.assertRaises(ContractError):
+            BillingObservation("bill-003", "synthetic-nebula", "attempt-001",
+                               "pod-001", 250_000, 1_900_000_000,
+                               1_900_000_000, 1_900_003_700, ZERO)
+        with self.assertRaises(ContractError):
+            BillingObservation("bill-004", "synthetic-nebula", "attempt-001",
+                               "pod-001", 250_000, 1_900_000_000,
+                               1_900_003_600, 1_900_003_700, ZERO,
+                               supersedes_observation_id="bill-004")
 
 
 class CanonicalDocumentTests(unittest.TestCase):

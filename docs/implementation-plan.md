@@ -1,8 +1,8 @@
 # Implementation and consumer migration plan
 
-Status: M0 design is complete and M1 contracts are implemented and validated on
-the isolated `design/unified-execution` worktree. Production migration has not
-begun. Read
+Status: M0 design and M1 are complete; M2 provider-boundary implementation is in
+progress on the isolated `design/unified-execution` worktree. Production
+migration has not begun. Read
 [architecture](architecture.md), [testing](testing-strategy.md) and
 [contribution rules](../CONTRIBUTING.md) together. The earlier
 [unification study](unification-roadmap.md) supplies the capability inventory.
@@ -40,9 +40,9 @@ begun. Read
 | M10 | Bounded parallel admission and partition dispatcher migration | M3, M4, M6, M9 | Two-slot races, parent/child budgets and independent watchdogs pass |
 | M11 | Integrated acceptance, duplication retirement and release | M7, M8, M9, M10 | All consumer gates, release artifact checks and documented retirement complete |
 
-M0 completed as documentation in commit `3a13149`. M1 is in progress; M2 through
-M11 remain planned. The order lets consumer experience improve the contracts
-before the parallel cutover.
+M0 completed as documentation in commit `3a13149`; M1 is complete in commit
+`b399a2a`. M2 is in progress; M3 through M11 remain planned. The order lets
+consumer experience improve the contracts before the parallel cutover.
 If serial migration exposes a missing common capability, implement it centrally
 with regression coverage before continuing that migration.
 
@@ -87,6 +87,23 @@ only in private evidence storage when permitted. Add bounded sanitized error
 categories and exact-Pod billing records/adjustments. Verified rejection evidence
 must be separate from generic HTTP errors. Disable automatic create retries.
 Prevent public workload hooks from reaching raw mutation transport.
+
+M2's current branch work adds a read-only `ProviderAdapter` with account/project
+inventory, exact attempt detail checks and normalized CPU/GPU quote methods.
+Inventory rejects malformed or duplicate identities. Catalog pagination,
+item totals and response-body sizes are bounded. Provider errors are reduced to
+safe category/code values; generic HTTP
+errors never prove capacity rejection, and mutation errors remain ambiguous.
+`QuoteObservation` stores compute and storage estimates separately, with
+microdollar rounding upward and a hash of the source response. A validated
+`BillingObservation` record exists, but no provider invoice importer or settlement
+path is implemented. The existing client exposes catalog rates and Pod details;
+hourly rates are not represented as posted billed charges. M2 remains open until
+the exact per-Pod billing evidence source and its redaction/adjustment parser are
+validated. Existing controllers still use their current guarded low-level path;
+the new adapter does not change their runtime behavior. The adapter suite passes
+13 focused tests and the full offline suite passes 82 tests; no provider account
+or resources were accessed.
 
 ## M3: durable state and accounting
 
