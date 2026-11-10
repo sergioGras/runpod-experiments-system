@@ -2,6 +2,8 @@
 
 Shared infrastructure for autonomous research experiments using RunPod. Current foundations include local budget accounting, provider access, guarded lifecycle components and incremental artifact collection. Live qualification and spending authorization belong to each consuming project.
 
+The [cross-project unification roadmap](docs/unification-roadmap.md) proposes the common execution contracts and staged migration for the three consuming projects. It describes planned work, not currently supported capabilities.
+
 ## Principles
 
 * The owner sets one aggregate USD maximum per experiment round. It is a ceiling, not a spending target. Estimated cost and runtime are planning inputs, not additional owner-set caps.
