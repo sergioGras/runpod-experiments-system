@@ -1,5 +1,6 @@
 """Read-only RunPod REST transport. No resource mutation is exposed."""
 import json
+import os
 import re
 import tomllib
 import urllib.error
@@ -18,6 +19,8 @@ class ProviderError(RuntimeError):
 
 class RunPodClient:
     def __init__(self, api_key, *, opener=urllib.request.urlopen, timeout=20):
+        if os.environ.get("RUNPOD_EXPERIMENTS_TEST_MODE") == "1":
+            raise ProviderError("Provider access is disabled in test mode")
         if not isinstance(api_key, str) or not api_key.strip():
             raise ValueError("RunPod API credential missing")
         self._key = api_key
@@ -26,6 +29,8 @@ class RunPodClient:
 
     @classmethod
     def from_config(cls, path=None, **kwargs):
+        if os.environ.get("RUNPOD_EXPERIMENTS_TEST_MODE") == "1":
+            raise ProviderError("Provider access is disabled in test mode")
         path = Path(path) if path else Path.home() / ".runpod" / "config.toml"
         config = tomllib.loads(path.read_text(encoding="utf-8"))
         return cls(config.get("apikey"), **kwargs)
