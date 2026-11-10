@@ -5,6 +5,11 @@ the contracts below are not implemented APIs or authorization for provider use.
 The objective is one maintained RunPod execution package used by hybrid-inference,
 miap-protocol and partitioned-inference-experiments, so fixes can benefit all three.
 
+The detailed [architecture](architecture.md), [implementation plan](implementation-plan.md),
+[testing contract](testing-strategy.md) and [contribution rules](../CONTRIBUTING.md)
+turn this inventory into the proposed development contract. The original study
+below remains evidence for that design; no production migration is claimed.
+
 ## Findings from the current systems
 
 | Consumer | Current integration | Requirements the common package must cover |
