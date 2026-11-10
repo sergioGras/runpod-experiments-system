@@ -383,10 +383,8 @@ class ExecutionStoreTests(unittest.TestCase):
                            controller_host="TEST-HOST")
         self.assertEqual(caught.exception.code, "incomplete_store_schema")
 
-    def test_separate_processes_cannot_over_admit_last_budget(self):
+    def test_separate_processes_cannot_over_admit_last_budget_or_slot(self):
         now = self.now
-        constrained = plan_for(now, max_total=150_000, max_slots=2)
-        race_path = self.root / "race.sqlite"
         child = r"""
 import sys
 from pathlib import Path
@@ -395,38 +393,48 @@ from test_execution_store import plan_for, attempt_for, pod_name
 from runpod_experiments.execution_store import ExecutionStore
 from runpod_experiments.errors import ExecutionError
 now = int(sys.argv[2])
+max_total = int(sys.argv[3])
+max_slots = int(sys.argv[4])
 store = ExecutionStore(sys.argv[1], project_id='synthetic-nebula',
                        controller_host='TEST-HOST', clock=lambda: now)
-plan = plan_for(now, max_total=150000, max_slots=2)
-attempt = attempt_for(plan, sys.argv[3], int(sys.argv[4]), now)
+plan = plan_for(now, max_total=max_total, max_slots=max_slots)
+attempt = attempt_for(plan, sys.argv[5], int(sys.argv[6]), now)
 try:
-    store.reserve_attempt(plan, attempt, pod_name(int(sys.argv[4])))
+    store.reserve_attempt(plan, attempt, pod_name(int(sys.argv[6])))
 except ExecutionError as error:
     print('denied:' + error.code)
 else:
     print('reserved')
 """
-        children = []
-        for attempt_id, number in (("race-one", 1), ("race-two", 2)):
-            env = dict(os.environ)
-            env["RUNPOD_EXPERIMENTS_TEST_MODE"] = "1"
-            env["USERPROFILE"] = str(self.root)
-            env["HOME"] = str(self.root)
-            children.append(subprocess.Popen(
-                [sys.executable, "-c", child, str(race_path), str(now), attempt_id, str(number)],
-                cwd=Path(__file__).resolve().parents[1], env=env,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
-        results = []
-        for process in children:
-            stdout, stderr = process.communicate(timeout=20)
-            self.assertEqual(process.returncode, 0, stderr)
-            results.append(stdout.strip())
-        self.assertEqual(sum(value == "reserved" for value in results), 1, results)
-        self.assertEqual(sum(value.startswith("denied:") for value in results), 1, results)
-        state = ExecutionStore(str(race_path), project_id=constrained.project.project_id,
-                               controller_host="TEST-HOST", clock=lambda: now).accounting_snapshot(
-            constrained.project.project_id, constrained.approval.approval_id)
-        self.assertEqual(state.reserved_micro_usd, 105_000)
+        for case, max_total, max_slots, expected_denial in (
+                ("budget", 150_000, 2, "total_cap_exceeded"),
+                ("slot", 1_000_000, 1, "project_slots_exhausted")):
+            with self.subTest(case=case):
+                constrained = plan_for(now, max_total=max_total, max_slots=max_slots)
+                race_path = self.root / f"race-{case}.sqlite"
+                children = []
+                for attempt_id, number in ((f"{case}-one", 1), (f"{case}-two", 2)):
+                    env = dict(os.environ)
+                    env["RUNPOD_EXPERIMENTS_TEST_MODE"] = "1"
+                    env["USERPROFILE"] = str(self.root)
+                    env["HOME"] = str(self.root)
+                    children.append(subprocess.Popen(
+                        [sys.executable, "-c", child, str(race_path), str(now),
+                         str(max_total), str(max_slots), attempt_id, str(number)],
+                        cwd=Path(__file__).resolve().parents[1], env=env,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
+                results = []
+                for process in children:
+                    stdout, stderr = process.communicate(timeout=20)
+                    self.assertEqual(process.returncode, 0, stderr)
+                    results.append(stdout.strip())
+                self.assertEqual(sum(value == "reserved" for value in results), 1, results)
+                self.assertEqual(results.count(f"denied:{expected_denial}"), 1, results)
+                state = ExecutionStore(
+                    str(race_path), project_id=constrained.project.project_id,
+                    controller_host="TEST-HOST", clock=lambda: now).accounting_snapshot(
+                        constrained.project.project_id, constrained.approval.approval_id)
+                self.assertEqual(state.reserved_micro_usd, 105_000)
 
     def test_process_exit_mid_reservation_rolls_back_all_admission_rows(self):
         crash_path = self.root / "crash.sqlite"

@@ -158,8 +158,8 @@ caller-supplied billing or provider-reconciliation claim.
 
 The first store tests cover restart/reopen across reservation, claim, binding,
 stop and settlement; one-use claims and idempotent local retries; project and
-approval admission caps; fresh-database and last-budget process races; a forced
-process exit mid-reservation; scoped project/host identity; ambiguous
+approval admission caps; fresh-database plus last-budget and last-slot process
+races; a forced process exit mid-reservation; scoped project/host identity; ambiguous
 create/stop reconciliation; immutable evidence rows; and billing adjustments.
 On Python 3.12.14, 15 focused store tests and all 97 library tests passed using
 `python -m unittest discover -s tests -p 'test_execution_store.py' -v` and

@@ -157,6 +157,10 @@ class ExecutionStore:
                 db.commit()
                 return
             if tables or views:
+                # The schema may have committed between these separate reads
+                # while another process initialized this same fresh path.
+                if db.execute("PRAGMA user_version").fetchone()[0] == STORE_SCHEMA_VERSION:
+                    return self._initialize()
                 raise ExecutionError(FailureCategory.INTERNAL, "unversioned_store_not_empty")
 
             db.execute("PRAGMA journal_mode=WAL")
