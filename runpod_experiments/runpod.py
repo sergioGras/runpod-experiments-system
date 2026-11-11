@@ -1,10 +1,12 @@
 """Read-only RunPod REST transport. No resource mutation is exposed."""
 import json
+import math
 import re
 import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 API_URL = "https://api.runpod.io/v2"
@@ -106,3 +108,78 @@ class RunPodClient:
             if not isinstance(cursor, str) or not cursor or cursor in seen:
                 raise ProviderError("Invalid or repeated Pod cursor")
             seen.add(cursor)
+
+    def pod_billing(self, pod_id, *, bucket_size="hour", start_time=None, end_time=None):
+        """Read time-bucketed billing for exactly one Pod.
+
+        Billing records can be absent or change while provider posting is
+        delayed. This method only retrieves and validates an observation; it
+        does not settle a local budget reservation.
+        """
+        if not isinstance(pod_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", pod_id):
+            raise ValueError("Invalid Pod ID")
+        if not isinstance(bucket_size, str) or bucket_size not in {"hour", "day", "week", "month", "year"}:
+            raise ValueError("Invalid billing bucket size")
+        if (start_time is None) != (end_time is None):
+            raise ValueError("Billing start and end times must be provided together")
+        query = {"podId": pod_id, "bucketSize": bucket_size}
+        if start_time is not None:
+            parsed_bounds = []
+            for name, value in (("startTime", start_time), ("endTime", end_time)):
+                if not isinstance(value, str) or not value:
+                    raise ValueError("Billing times must be RFC 3339 strings")
+                try:
+                    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                except ValueError:
+                    raise ValueError("Billing times must be RFC 3339 strings") from None
+                if parsed.tzinfo is None or parsed.utcoffset() is None:
+                    raise ValueError("Billing times must include a timezone")
+                parsed_bounds.append(parsed)
+                query[name] = value
+            if parsed_bounds[1] <= parsed_bounds[0]:
+                raise ValueError("Billing end time must be after start time")
+        result = self._get("/billing/pods?" + urllib.parse.urlencode(query))
+        if (not isinstance(result, dict) or not isinstance(result.get("metadata"), dict)
+                or not isinstance(result.get("records"), list)):
+            raise ProviderError("Invalid Pod billing response")
+        metadata = result["metadata"]
+        resolved = metadata.get("query")
+        if not isinstance(resolved, dict) or resolved.get("podId") != pod_id:
+            raise ProviderError("Pod billing query has an unexpected identity")
+        if type(metadata.get("recordCount")) is not int or metadata["recordCount"] != len(result["records"]):
+            raise ProviderError("Pod billing response has an invalid record count")
+        amounts = ("gpuAmount", "cpuAmount", "diskAmount", "totalAmount")
+        totals = metadata.get("totals")
+        if not isinstance(totals, dict):
+            raise ProviderError("Pod billing response has invalid totals")
+        for amount in amounts:
+            value = totals.get(amount)
+            if not _valid_billing_amount(value):
+                raise ProviderError("Pod billing response has invalid totals")
+        for record in result["records"]:
+            if not isinstance(record, dict) or record.get("podId") != pod_id:
+                raise ProviderError("Pod billing record has an unexpected identity")
+            for field in ("startTime", "endTime"):
+                value = record.get(field)
+                if not isinstance(value, str) or not value:
+                    raise ProviderError("Pod billing record has invalid time bounds")
+                try:
+                    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                except ValueError:
+                    raise ProviderError("Pod billing record has invalid time bounds") from None
+                if parsed.tzinfo is None or parsed.utcoffset() is None:
+                    raise ProviderError("Pod billing record has invalid time bounds")
+            for amount in amounts:
+                value = record.get(amount)
+                if not _valid_billing_amount(value):
+                    raise ProviderError("Pod billing record has invalid amounts")
+        return result
+
+
+def _valid_billing_amount(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (OverflowError, ValueError):
+        return False
