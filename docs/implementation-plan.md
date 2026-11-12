@@ -243,6 +243,15 @@ failure both retain permitted evidence and independent cleanup.
 
 ## Consumer migrations
 
+Read-only source audit on 2026-11-12 found Hybrid scripts still import
+`runpod_experiments` by adding `../runpod-experiments-system` to `sys.path`; its
+revision file records the sibling checkout rather than an installed package.
+The searched MIAP and partitioned source trees do not yet reference this package
+or `StateStoreConfig`. This does not establish external environment variables,
+ACLs or deployed runtime settings. All three consumers still need explicit
+installed-version pins and project-specific state configuration during their
+separate migrations.
+
 Each consumer receives an installed immutable package pin, a small workload/policy
 adapter, conformance tests, an operator runbook, an upgrade record, updated agent
 instructions and a retirement inventory. No runtime dependency on a sibling
