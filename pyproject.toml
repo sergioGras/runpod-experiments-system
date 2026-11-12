@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "runpod-experiments-system"
-version = "0.1.0"
+version = "0.2.0.dev0"
 description = "Shared controls and result collection for RunPod research experiments"
 requires-python = ">=3.11"
 dependencies = []

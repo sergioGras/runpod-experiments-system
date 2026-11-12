@@ -16,7 +16,8 @@ from typing import Any, Iterator
 
 from runpod_experiments.contracts import (
     ApprovalScope, AttemptPlan, BillingObservation, ContractError, ExecutionPlan,
-    FailureCategory, PodProvisioningSpec, ProjectPolicy, ResourceKind, ResourceProfile,
+    FailureCategory, PodProvisioningSpec, ProjectPolicy, QuoteObservation,
+    ResourceKind, ResourceProfile,
     canonical_json_bytes, decode_document, encode_document, sha256_bytes,
     strict_json_loads, validate_attempt,
 )
@@ -27,7 +28,7 @@ from runpod_experiments.create_spec import (
 from runpod_experiments.resource_policy import request_hash
 
 
-STORE_SCHEMA_VERSION = 3
+STORE_SCHEMA_VERSION = 4
 SQLITE_MAX_INTEGER = 9_223_372_036_854_775_807
 _POD_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 _POD_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,127}\Z")
@@ -35,6 +36,29 @@ _PROJECT_ID = re.compile(r"[a-z][a-z0-9-]{2,63}\Z")
 _HOST_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,252}\Z")
 _ACTIVE_SQL = "('reserved','create_claimed','reconciliation_required','active','stopping')"
 _ZERO_HASH = "0" * 64
+_QUOTE_FIELDS = {
+    "kind", "resource_id", "requested_units", "max_configurable_units",
+    "compute_hourly_micro_usd", "storage_hourly_micro_usd", "catalog_available",
+    "region_ids", "observed_epoch", "response_sha256", "memory_gb", "minimum_cuda",
+    "schema_version",
+}
+
+
+def _quote_from_payload(value: Any) -> QuoteObservation:
+    if not isinstance(value, dict) or set(value) != _QUOTE_FIELDS:
+        raise ContractError("stored quote observation is malformed")
+    return QuoteObservation(
+        kind=ResourceKind(value["kind"]), resource_id=value["resource_id"],
+        requested_units=value["requested_units"],
+        max_configurable_units=value["max_configurable_units"],
+        compute_hourly_micro_usd=value["compute_hourly_micro_usd"],
+        storage_hourly_micro_usd=value["storage_hourly_micro_usd"],
+        catalog_available=value["catalog_available"],
+        region_ids=tuple(value["region_ids"]), observed_epoch=value["observed_epoch"],
+        response_sha256=value["response_sha256"], memory_gb=value["memory_gb"],
+        minimum_cuda=value["minimum_cuda"],
+        schema_version=value["schema_version"],
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -482,18 +506,54 @@ class ExecutionStore:
                                 "hourly_micro_usd": rate})
         return exposure
 
-    def claim_create(self, attempt_id: str) -> None:
-        """Consume the sole create claim before the caller sends one request."""
+    def claim_create(self, attempt_id: str, *, max_preflight_age_seconds: int = 60) -> None:
+        """Consume one fresh, hash-bound preflight before one provider create."""
+        if type(max_preflight_age_seconds) is not int or not 1 <= max_preflight_age_seconds <= 3600:
+            raise ValueError("max_preflight_age_seconds must be between 1 and 3600")
+        self.verify_attempt_lifecycle_projection(attempt_id)
         now = self._now()
         with self._transaction() as db:
             row = db.execute("""SELECT a.state,a.create_claimed,a.deadline_epoch,
-                s.expires_epoch FROM execution_attempts a JOIN execution_approvals s
+                a.project_id,a.attempt_sha256,a.attempt_document,s.expires_epoch
+                FROM execution_attempts a JOIN execution_approvals s
                 ON s.project_id=a.project_id AND s.approval_id=a.approval_id
                 WHERE a.attempt_id=?""", (attempt_id,)).fetchone()
             if row is None or row["state"] != "reserved" or row["create_claimed"] != 0:
                 raise ExecutionError(FailureCategory.AMBIGUOUS_OPERATION, "create_claim_unavailable")
             if now >= row["deadline_epoch"] or now >= row["expires_epoch"]:
                 raise ExecutionError(FailureCategory.CONFIGURATION, "attempt_expired_before_create")
+            preflight = db.execute("""SELECT created_epoch,payload FROM execution_events
+                WHERE entity_type='attempt' AND entity_id=? AND event_type='create_preflight_checked'
+                ORDER BY sequence DESC LIMIT 1""", (attempt_id,)).fetchone()
+            if preflight is None:
+                raise ExecutionError(FailureCategory.CONFIGURATION, "create_preflight_missing")
+            try:
+                payload = strict_json_loads(bytes(preflight["payload"]))
+                attempt_payload = decode_document(bytes(row["attempt_document"]),
+                                                  expected_kind="attempt_plan")
+                quote_document = payload.get("quote_document") if isinstance(payload, dict) else None
+                quote = _quote_from_payload(decode_document(
+                    canonical_json_bytes(quote_document), expected_kind="quote_observation"))
+                quote_digest = sha256_bytes(encode_document("quote_observation", quote))
+            except (ContractError, TypeError, ValueError, AttributeError):
+                raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                     "create_preflight_malformed") from None
+            created_epoch = preflight["created_epoch"]
+            if (not isinstance(payload, dict) or payload.get("attempt_sha256") != row["attempt_sha256"] or
+                    payload.get("supervisor_attempt_sha256") != row["attempt_sha256"] or
+                    payload.get("request_sha256") != attempt_payload.get("request_sha256") or
+                    payload.get("quote_sha256") != quote_digest or
+                    type(created_epoch) is not int or created_epoch > now or
+                    now - created_epoch > max_preflight_age_seconds or
+                    quote.observed_epoch > now or now - quote.observed_epoch > max_preflight_age_seconds):
+                raise ExecutionError(FailureCategory.CONFIGURATION, "create_preflight_stale")
+            other_claimed = db.execute("""SELECT 1 FROM execution_attempts
+                WHERE project_id=? AND attempt_id<>? AND state IN
+                  ('create_claimed','reconciliation_required','active','stopping') LIMIT 1""",
+                (row["project_id"], attempt_id)).fetchone()
+            if other_claimed is not None:
+                raise ExecutionError(FailureCategory.CONFIGURATION,
+                                     "project_create_already_in_flight")
             db.execute("""UPDATE execution_attempts SET state='create_claimed',create_claimed=1,
                 create_claimed_epoch=? WHERE attempt_id=?""", (now, attempt_id))
             self._append_event(db, "attempt", attempt_id, "create_claimed", now, {})
@@ -917,6 +977,94 @@ class ExecutionStore:
             raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
                                  "attempt_request_mismatch") from None
 
+    def selected_quote_for_attempt(self, attempt_id: str) -> QuoteObservation:
+        """Reconstruct the immutable quote used to reserve this attempt."""
+        self.verify_attempt_lifecycle_projection(attempt_id)
+        with closing(self._connect()) as db:
+            row = db.execute("""SELECT attempt_sha256,attempt_document
+                FROM execution_attempts WHERE attempt_id=? AND project_id=?""",
+                (attempt_id, self.project_id)).fetchone()
+        if row is None:
+            raise ExecutionError(FailureCategory.CONFIGURATION, "unknown_attempt")
+        try:
+            raw = bytes(row["attempt_document"])
+            if sha256_bytes(raw) != row["attempt_sha256"]:
+                raise ContractError("stored attempt does not match its digest")
+            attempt = decode_document(raw, expected_kind="attempt_plan")
+            quote = _quote_from_payload(attempt.get("selected_quote"))
+            encoded = encode_document("quote_observation", quote)
+            if sha256_bytes(encoded) != attempt.get("quote_sha256"):
+                raise ContractError("stored quote does not match its digest")
+            profile, region = self.selected_resource_for_attempt(attempt_id)
+            units = profile.cpu_count if profile.kind is ResourceKind.CPU else profile.gpu_count
+            required_memory = profile.memory_gb if profile.kind is ResourceKind.CPU else profile.gpu_memory_gb
+            if (quote.kind is not profile.kind or quote.resource_id != profile.resource_id or
+                    quote.requested_units != units or quote.total_hourly_micro_usd != profile.hourly_micro_usd or
+                    not quote.catalog_available or quote.memory_gb < required_memory or
+                    quote.minimum_cuda != profile.minimum_cuda or
+                    region not in quote.region_ids or quote.observed_epoch > attempt["created_epoch"]):
+                raise ContractError("stored quote differs from the selected resource")
+            return quote
+        except (ContractError, KeyError, TypeError, ValueError):
+            raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                 "attempt_quote_mismatch") from None
+
+    def record_create_preflight_checked(
+        self,
+        attempt_id: str,
+        quote: QuoteObservation,
+        ssh_key_fingerprint: str,
+        supervisor_attempt_sha256: str,
+    ) -> None:
+        """Durably record safe preflight evidence before consuming the create claim."""
+        if not isinstance(quote, QuoteObservation):
+            raise ContractError("quote must be a QuoteObservation")
+        if (not isinstance(ssh_key_fingerprint, str) or
+                re.fullmatch(r"[0-9a-f]{64}", ssh_key_fingerprint) is None):
+            raise ContractError("SSH key fingerprint is malformed")
+        if (not isinstance(supervisor_attempt_sha256, str) or
+                re.fullmatch(r"[0-9a-f]{64}", supervisor_attempt_sha256) is None):
+            raise ContractError("supervisor attempt digest is malformed")
+        attempt = self.get_attempt(attempt_id)
+        if attempt["state"] != "reserved" or attempt["create_claimed"]:
+            raise ExecutionError(FailureCategory.AMBIGUOUS_OPERATION, "create_claim_unavailable")
+        profile, region = self.selected_resource_for_attempt(attempt_id)
+        units = profile.cpu_count if profile.kind is ResourceKind.CPU else profile.gpu_count
+        required_memory = profile.memory_gb if profile.kind is ResourceKind.CPU else profile.gpu_memory_gb
+        if (quote.kind is not profile.kind or quote.resource_id != profile.resource_id or
+                quote.requested_units != units or quote.total_hourly_micro_usd != profile.hourly_micro_usd or
+                not quote.catalog_available or quote.memory_gb < required_memory or
+                quote.minimum_cuda != profile.minimum_cuda or
+                region not in quote.region_ids):
+            raise ExecutionError(FailureCategory.RESOURCE_MISMATCH, "preflight_quote_mismatch")
+        request = self.create_request_for_attempt(attempt_id)
+        request_sha256 = request_hash(request)
+        if supervisor_attempt_sha256 != attempt["attempt_sha256"]:
+            raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                 "supervisor_attempt_mismatch")
+        now = self._now()
+        if quote.observed_epoch > now:
+            raise ExecutionError(FailureCategory.RESOURCE_MISMATCH, "preflight_quote_from_future")
+        quote_document = encode_document("quote_observation", quote)
+        payload = {
+            "attempt_sha256": attempt["attempt_sha256"],
+            "quote_document": strict_json_loads(quote_document),
+            "quote_sha256": sha256_bytes(quote_document),
+            "request_sha256": request_sha256,
+            "selected_region": region,
+            "ssh_key_fingerprint": ssh_key_fingerprint,
+            "supervisor_attempt_sha256": supervisor_attempt_sha256,
+        }
+        with self._transaction() as db:
+            row = db.execute("""SELECT state,create_claimed,attempt_sha256
+                FROM execution_attempts WHERE attempt_id=? AND project_id=?""",
+                (attempt_id, self.project_id)).fetchone()
+            if (row is None or row["state"] != "reserved" or row["create_claimed"] or
+                    row["attempt_sha256"] != attempt["attempt_sha256"]):
+                raise ExecutionError(FailureCategory.AMBIGUOUS_OPERATION,
+                                     "create_claim_unavailable")
+            self._append_event(db, "attempt", attempt_id, "create_preflight_checked", now, payload)
+
     def project_policy_for_attempt(self, attempt_id: str) -> ProjectPolicy:
         """Reconstruct the approved project policy bound to one stored attempt."""
         self.verify_attempt_lifecycle_projection(attempt_id)
@@ -996,6 +1144,12 @@ class ExecutionStore:
         attempt_events = [event for event in event_rows
                           if event["entity_type"] == "attempt" and
                           event["entity_id"] == attempt_id]
+        try:
+            attempt_payload = decode_document(bytes(row["attempt_document"]),
+                                              expected_kind="attempt_plan")
+        except ContractError:
+            raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                 "attempt_projection_mismatch") from None
         expected_state = None
         expected_claimed = 0
         expected_claimed_epoch = None
@@ -1027,6 +1181,43 @@ class ExecutionStore:
                         payload.get("hourly_micro_usd") != row["hourly_micro_usd"]):
                     mismatch()
                 expected_state = "reserved"
+            elif event_type == "create_preflight_checked":
+                if expected_state != "reserved" or expected_claimed:
+                    mismatch()
+                required = {
+                    "attempt_sha256", "quote_document", "quote_sha256", "request_sha256",
+                    "selected_region", "ssh_key_fingerprint", "supervisor_attempt_sha256",
+                }
+                try:
+                    quote_envelope = payload.get("quote_document")
+                    quote = _quote_from_payload(decode_document(
+                        canonical_json_bytes(quote_envelope), expected_kind="quote_observation"))
+                    quote_digest = sha256_bytes(encode_document("quote_observation", quote))
+                    selected = attempt_payload.get("selected_resource")
+                    kind = ResourceKind(selected.get("kind")) if isinstance(selected, dict) else None
+                    units = (selected.get("cpu_count") if kind is ResourceKind.CPU else
+                             selected.get("gpu_count")) if isinstance(selected, dict) else None
+                    memory = (selected.get("memory_gb") if kind is ResourceKind.CPU else
+                              selected.get("gpu_memory_gb")) if isinstance(selected, dict) else None
+                    region = attempt_payload.get("selected_region")
+                except (ContractError, TypeError, ValueError, AttributeError):
+                    mismatch()
+                if (set(payload) != required or payload.get("attempt_sha256") != row["attempt_sha256"] or
+                        payload.get("supervisor_attempt_sha256") != row["attempt_sha256"] or
+                        payload.get("request_sha256") != attempt_payload.get("request_sha256") or
+                        payload.get("selected_region") != region or
+                        not isinstance(payload.get("ssh_key_fingerprint"), str) or
+                        re.fullmatch(r"[0-9a-f]{64}", payload["ssh_key_fingerprint"]) is None or
+                        payload.get("quote_sha256") != quote_digest or
+                        quote.kind is not kind or quote.resource_id != selected.get("resource_id") or
+                        quote.requested_units != units or not quote.catalog_available or
+                        quote.total_hourly_micro_usd != selected.get("hourly_micro_usd") or
+                        type(memory) is not int or quote.memory_gb < memory or
+                        quote.minimum_cuda != selected.get("minimum_cuda") or
+                        not isinstance(region, str) or region not in quote.region_ids or
+                        type(event["created_epoch"]) is not int or
+                        quote.observed_epoch > event["created_epoch"]):
+                    mismatch()
             elif event_type == "create_claimed":
                 if expected_state != "reserved" or expected_claimed:
                     mismatch()

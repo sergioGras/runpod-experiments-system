@@ -5,15 +5,17 @@ Shared infrastructure for autonomous research experiments using RunPod. Current 
 The [cross-project unification roadmap](docs/unification-roadmap.md) proposes the common execution contracts and staged migration for the three consuming projects. It describes planned work, not currently supported capabilities.
 
 Development status: M0 and M1 are complete. M2's read-only provider adapter now
-includes a synthetic-tested parser for the documented REST v2 exact-Pod billing
-shape. M2 remains open pending account-level qualification of bucket boundaries
-and delayed or adjusted rows. The isolated design branch contains an internal
-SQLite admission/accounting store, an additive store-backed cleanup supervisor
-and a hash-bound CPU/GPU Pod create-request contract with offline and
-installed-artifact evidence. The create controller and provider qualification
-remain open. M3 and M4 remain open; no consumer migration has begun. These
-changes are not part of the pinned 0.1.0 package; existing consumers and their
-current package pins remain unchanged.
+includes synthetic-tested parsers for the documented REST v2 billing and
+resource-quote shapes. M2 remains open pending account-level qualification of
+billing behavior. The isolated design branch contains an internal SQLite
+admission/accounting store, a store-backed cleanup supervisor, and a
+store-backed one-shot create controller with offline test evidence. It binds a
+fresh quote, selected region, registered SSH-key fingerprint, project inventory,
+and independent supervisor state to a durable one-use create claim. The create
+path has not been qualified against a RunPod account or connected to an execution
+engine. M3 and M4 remain open; no consumer migration has begun. These changes
+are not part of the pinned 0.1.0 package; existing consumers and their current
+package pins remain unchanged.
 
 Detailed design and development documents:
 
@@ -36,7 +38,7 @@ These documents define the target design. Current package capabilities are descr
 
 `runpod_experiments.budget.BudgetLedger` persists a cap, idempotent charges and estimated attempt exposures in SQLite using integer microdollars. The create path reserves exposure before provisioning and retains it after an ambiguous response until charges are reconciled. Delayed or unknown costs beyond that estimate must also be accounted for. This is accounting, not a provider billing limit.
 
-`runpod_experiments.runpod.RunPodClient` reads paginated Pod inventory, exact Pod details, CPU/GPU catalog records and exact-Pod billing via REST v2. `pod_billing` sends the Pod ID and a bounded billing interval; `ProviderAdapter.observe_pod_billing` validates the response query metadata and explicit record period, then maps `totalAmount`, `podId`, `startTime` and `endTime` into immutable `BillingObservation` records. It rounds amounts upward to microdollars and hashes the complete response without retaining raw rows. Missing or changing billing rows do not prove zero final cost and must not release a local exposure reservation. This reader has synthetic tests only; account-specific billing behavior has not been qualified. The GPU quote call returns the API's Secure rate and capacity, while regional availability may require a separate catalog view. `ownership.delete_attempt` requests deletion only after the stored project, exact Pod ID and live Pod name match. Credentials and raw inventory must remain private.
+`runpod_experiments.runpod.RunPodClient` reads paginated Pod inventory, exact Pod details, CPU/GPU catalog records and exact-Pod billing via REST v2. `pod_billing` sends the Pod ID and a bounded billing interval; `ProviderAdapter.observe_pod_billing` validates the response query metadata and explicit record period, then maps `totalAmount`, `podId`, `startTime` and `endTime` into immutable `BillingObservation` records. It rounds amounts upward to microdollars and hashes the complete response without retaining raw rows. Missing or changing billing rows do not prove zero final cost and must not release a local exposure reservation. Billing and quote shapes have synthetic tests only; account-specific behavior has not been qualified. Normalized CPU/GPU quotes include conservative host-RAM or VRAM-per-card evidence, and GPU catalog lookup can request a CUDA floor; regional availability remains an explicit quote field. `ownership.delete_attempt` requests deletion only after the stored project, exact Pod ID and live Pod name match. Credentials and raw inventory must remain private.
 
 `attempts.AttemptLedger` persists unique attempts and a one-time create claim. `registry.ProjectRegistry` validates cooperating project prefixes. `controller.create_attempt` checks a live supervisor heartbeat, project namespace, remaining estimated budget and instance inventory before one create request; a unique name and durable claim allow the supervisor to reconcile an ambiguous response. CPU and GPU planning helpers bind the exact request to the current Secure catalog rate and capacity, and the supervisor compares nested provider shape fields while allowing extra reported metadata. GPU regional availability still needs a separate current check and the supervisor verifies the actual scheduled data center. `supervision.CleanupMonitor` monitors the pinned resource shape and hourly ceiling, guards deletion, and requires three consecutive reconciled absence observations before recording termination. `run_supervisor` adds heartbeat and stop latching; `supervisor_process.launch` starts it in a separate process. A hashed policy file binds the supervisor to the shape and hourly ceiling checked at create. `planning.runtime_from_remaining` derives a time envelope from the remaining aggregate cap and a current price estimate. These are locally tested components and accident-prevention guards, not provider IAM or an integrated paid controller. They require all cooperating local controllers to share the same ledger and namespace registry; they do not coordinate other hosts or uncooperative account users.
 
@@ -51,6 +53,21 @@ detail. It is not connected to a create engine or any consumer. Provider-detail
 shape checks have synthetic evidence only;
 account-level and live-host qualification remain open. Never run both supervisor
 paths against one attempt.
+
+`runpod_experiments.store_create.StoreCreateController` adds the matching
+store-backed, one-shot create boundary. Before claiming, it verifies a ready
+separate supervisor process and fresh heartbeat, checks account inventory for
+name/project conflicts, confirms the selected public-key fingerprint is
+registered, refreshes the CPU/GPU quote and selected-region availability, and
+persists hash-bound preflight evidence. It then consumes one durable create
+claim, rechecks the supervisor, and sends at most one create request. An
+ambiguous response retains the exposure and requires reconciliation; this
+controller never retries create or deletes an unknown resource. Fake-provider
+tests cover the CPU/GPU request paths, stale/mismatched preflight, inventory and
+SSH-key guards, supervisor changes, malformed responses, and ambiguous timeout.
+This is an internal component, not a complete serial engine, live qualification,
+or consumer integration. The quote/catalog and SSH-key API paths still need
+account-level compatibility checks before use with a real account.
 
 `runpod_experiments.ssh.SSHFetcher` downloads bounded named files over direct SSH using an existing key and a pinned known-hosts file. `collection_process` can run independently of the foreground controller; it rechecks the recorded provider ID/name and direct endpoint on every poll, preserves changed snapshots, and retries failed files. `ArtifactStore` saves content-addressed local copies and a manifest. `upload.upload_bundle` checks an entire reviewed hash-pinned manifest before sending any file to the exact recorded Pod. Use a private local store and reviewed allowlists; callers must still approve disclosure and review the SSH host-key trust. Producers should publish complete files by atomic rename when coherent snapshots are required. Proxy SSH and interrupted large-file resume are not yet supported.
 

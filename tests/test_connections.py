@@ -1,7 +1,9 @@
+import base64
 import io
 import hashlib
 import json
 import subprocess
+import struct
 import tempfile
 import unittest
 import urllib.parse
@@ -11,7 +13,7 @@ from pathlib import Path
 from runpod_experiments.artifacts import ArtifactStore
 from runpod_experiments.collection import collect_once
 from runpod_experiments.runpod import ProviderError, RunPodClient
-from runpod_experiments.ssh import SSHFetcher, bootstrap_tofu
+from runpod_experiments.ssh import SSHFetcher, bootstrap_tofu, ssh_public_key_fingerprint
 from runpod_experiments.attempts import AttemptLedger, AttemptError
 from runpod_experiments.run_collection import collect_owned_once
 from runpod_experiments.upload import upload_bundle
@@ -118,6 +120,26 @@ class ConnectionTests(unittest.TestCase):
         self.assertEqual(caught.exception.status, 403)
         self.assertNotIn("secret", str(caught.exception))
         self.assertNotIn("private-token", str(caught.exception))
+
+    def test_ssh_key_lookup_returns_only_hashes_of_registered_public_keys(self):
+        key_blob = struct.pack(">I", len(b"ssh-ed25519")) + b"ssh-ed25519" + bytes(range(32))
+        key_line = "ssh-ed25519 " + base64.b64encode(key_blob).decode("ascii") + " fixture-key"
+        calls = []
+
+        def opener(request, timeout):
+            calls.append(request)
+            return io.BytesIO(json.dumps({"keys": [key_line]}).encode())
+
+        client = RunPodClient("test-key", opener=opener)
+        fingerprints = client.ssh_key_fingerprints()
+        self.assertEqual(fingerprints, frozenset({ssh_public_key_fingerprint(key_line)}))
+        self.assertEqual(calls[0].get_method(), "GET")
+        self.assertEqual(urllib.parse.urlsplit(calls[0].full_url).path, "/v2/account/ssh-keys")
+        self.assertNotIn(key_line, repr(fingerprints))
+
+        client._opener = lambda *_args, **_kwargs: io.BytesIO(b'{"keys":["malformed"]}')
+        with self.assertRaises(ProviderError):
+            client.ssh_key_fingerprints()
 
     def test_cpu_catalog_request_is_read_only_and_url_encoded(self):
         calls = []

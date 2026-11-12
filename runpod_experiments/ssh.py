@@ -1,10 +1,34 @@
 """Bounded direct-SSH result download with explicit host-key verification."""
+import base64
+import hashlib
 import re
 import shlex
 import subprocess
 from pathlib import Path, PurePosixPath
 
 from runpod_experiments.attempts import AttemptError
+
+
+def ssh_public_key_fingerprint(public_key_line):
+    """Return a SHA-256 fingerprint without retaining or logging public-key text."""
+    if not isinstance(public_key_line, str) or not public_key_line or len(public_key_line) > 16_384:
+        raise ValueError("Invalid SSH public key")
+    fields = public_key_line.strip().split()
+    if (len(fields) < 2 or re.fullmatch(r"[A-Za-z0-9@._+-]{1,128}", fields[0]) is None or
+            re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", fields[1]) is None):
+        raise ValueError("Invalid SSH public key")
+    try:
+        key_blob = base64.b64decode(fields[1], validate=True)
+        if len(key_blob) > 16_384 or len(key_blob) < 4:
+            raise ValueError("Invalid SSH public key")
+        type_length = int.from_bytes(key_blob[:4], "big")
+        embedded_type = key_blob[4:4 + type_length].decode("ascii")
+    except (ValueError, UnicodeDecodeError):
+        raise ValueError("Invalid SSH public key") from None
+    if (type_length <= 0 or 4 + type_length > len(key_blob) or
+            embedded_type != fields[0]):
+        raise ValueError("Invalid SSH public key")
+    return hashlib.sha256(key_blob).hexdigest()
 
 
 class SSHFetcher:

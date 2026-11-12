@@ -31,7 +31,8 @@ class ReadOnlyProvider(Protocol):
 
     def cpu_offer(self, cpu_id: str, vcpu_count: int) -> dict: ...
 
-    def gpu_offer(self, gpu_id: str, gpu_count: int = 1) -> dict: ...
+    def gpu_offer(self, gpu_id: str, gpu_count: int = 1, *,
+                  min_cuda_version: str | None = None) -> dict: ...
 
     def pod_billing(self, pod_id: str, *, bucket_size: str = "hour",
                     start_time: str | None = None,
@@ -151,14 +152,18 @@ class ProviderAdapter:
             observed_epoch=observed_epoch, storage_hourly_usd=storage_hourly_usd)
 
     def quote_gpu(self, resource_id: str, gpu_count: int = 1, *, observed_epoch: int,
-                  storage_hourly_usd: str | int | float = "0") -> QuoteObservation:
+                  storage_hourly_usd: str | int | float = "0",
+                  minimum_cuda: str | None = None) -> QuoteObservation:
         try:
-            offer = self._provider.gpu_offer(resource_id, gpu_count)
+            offer = (self._provider.gpu_offer(resource_id, gpu_count) if minimum_cuda is None else
+                     self._provider.gpu_offer(resource_id, gpu_count,
+                                              min_cuda_version=minimum_cuda))
         except ProviderError as error:
             raise normalize_provider_error(error, ProviderOperation.READ) from None
         return normalize_gpu_quote(
             offer, resource_id=resource_id, gpu_count=gpu_count,
-            observed_epoch=observed_epoch, storage_hourly_usd=storage_hourly_usd)
+            observed_epoch=observed_epoch, storage_hourly_usd=storage_hourly_usd,
+            minimum_cuda=minimum_cuda)
 
     def observe_pod_billing(
         self,

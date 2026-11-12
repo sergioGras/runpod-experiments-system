@@ -15,7 +15,7 @@ import re
 from typing import Any
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MAX_DOCUMENT_BYTES = 1_048_576
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _COMMIT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
@@ -175,7 +175,7 @@ class ApprovalScope:
 
 @dataclass(frozen=True, slots=True)
 class ResourceProfile:
-    """Selected Pod shape; GPU memory is VRAM, `memory_gb` is host system RAM."""
+    """Selected Pod shape; GPU memory is VRAM per card, `memory_gb` is host RAM."""
 
     kind: ResourceKind
     resource_id: str
@@ -212,7 +212,10 @@ class ResourceProfile:
 
 @dataclass(frozen=True, slots=True)
 class QuoteObservation:
-    """Normalized provider quote; storage remains a separately identified estimate."""
+    """Normalized provider quote and memory evidence; storage remains separate.
+
+    `memory_gb` is host RAM for CPU offers and VRAM per card for GPU offers.
+    """
 
     kind: ResourceKind
     resource_id: str
@@ -224,6 +227,8 @@ class QuoteObservation:
     region_ids: tuple[str, ...]
     observed_epoch: int
     response_sha256: str
+    memory_gb: int
+    minimum_cuda: str | None = None
     schema_version: int = SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -237,12 +242,20 @@ class QuoteObservation:
             raise ContractError("catalog_available must be a boolean")
         if self.catalog_available and self.max_configurable_units < self.requested_units:
             raise ContractError("available quote cannot be below the requested resource count")
+        _positive_int(self.memory_gb, "memory_gb")
         _positive_int(self.compute_hourly_micro_usd, "compute_hourly_micro_usd")
         if type(self.storage_hourly_micro_usd) is not int or self.storage_hourly_micro_usd < 0:
             raise ContractError("storage_hourly_micro_usd must be a nonnegative integer")
         _unique_text_tuple(self.region_ids, "region_ids", _IDENTIFIER, allow_empty=True)
         _positive_int(self.observed_epoch, "observed_epoch")
         _sha(self.response_sha256, "response_sha256")
+        if self.kind is ResourceKind.CPU:
+            if self.minimum_cuda is not None:
+                raise ContractError("CPU quote cannot include a CUDA floor")
+        elif (self.minimum_cuda is not None and
+              (not isinstance(self.minimum_cuda, str) or
+               re.fullmatch(r"[0-9]+\.[0-9]+", self.minimum_cuda) is None)):
+            raise ContractError("GPU quote CUDA floor is malformed")
         if type(self.schema_version) is not int or self.schema_version != SCHEMA_VERSION:
             raise ContractError("unsupported QuoteObservation schema version")
 
@@ -509,6 +522,9 @@ def validate_attempt(plan: ExecutionPlan, attempt: AttemptPlan) -> None:
     if (sha256_bytes(encode_document("quote_observation", quote)) != attempt.quote_sha256 or
             quote.kind is not selected.kind or quote.resource_id != selected.resource_id or
             quote.requested_units != units or not quote.catalog_available or
+            quote.memory_gb < (selected.memory_gb if selected.kind is ResourceKind.CPU
+                               else selected.gpu_memory_gb) or
+            quote.minimum_cuda != selected.minimum_cuda or
             quote.observed_epoch > attempt.created_epoch or
             quote.total_hourly_micro_usd != selected.hourly_micro_usd or
             attempt.selected_region not in quote.region_ids):

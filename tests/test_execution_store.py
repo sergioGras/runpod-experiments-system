@@ -59,7 +59,8 @@ def attempt_for(plan: ExecutionPlan, attempt_id: str, number: int, now: int) -> 
     resource = plan.resource_options[0]
     quote = QuoteObservation(
         resource.kind, resource.resource_id, resource.cpu_count, resource.cpu_count,
-        resource.hourly_micro_usd, 0, True, resource.region_ids, now - 1, ONE)
+        resource.hourly_micro_usd, 0, True, resource.region_ids, now - 1, ONE,
+        resource.memory_gb)
     return AttemptPlan(
         attempt_id, plan.job_id, plan.approval.approval_id, number,
         pod_create_request_sha256(plan.provisioning, resource,
@@ -73,6 +74,13 @@ def attempt_for(plan: ExecutionPlan, attempt_id: str, number: int, now: int) -> 
 
 def pod_name(number: int) -> str:
     return f"nebula-run-{number}"
+
+
+def prepare_test_preflight(store: ExecutionStore, attempt_id: str) -> None:
+    attempt = store.get_attempt(attempt_id)
+    quote = store.selected_quote_for_attempt(attempt_id)
+    store.record_create_preflight_checked(
+        attempt_id, quote, ZERO, attempt["attempt_sha256"])
 
 
 class ExecutionStoreTests(unittest.TestCase):
@@ -92,8 +100,12 @@ class ExecutionStoreTests(unittest.TestCase):
         exposure = self.store.reserve_attempt(plan, attempt, pod_name(number))
         return attempt, exposure
 
+    def claim_after_preflight(self, attempt_id):
+        prepare_test_preflight(self.store, attempt_id)
+        self.store.claim_create(attempt_id)
+
     def activate_and_terminate(self, attempt, number=1):
-        self.store.claim_create(attempt.attempt_id)
+        self.claim_after_preflight(attempt.attempt_id)
         self.store.bind_pod(attempt.attempt_id, f"pod-{number}", pod_name(number))
         self.store.request_stop(attempt.attempt_id)
         self.store.confirm_termination(attempt.attempt_id, f"pod-{number}", ONE)
@@ -120,7 +132,7 @@ class ExecutionStoreTests(unittest.TestCase):
     def test_create_claim_and_lifecycle_transitions_preserve_identity(self):
         attempt, _ = self.reserve()
         self.assertTrue(self.store.verify_attempt_lifecycle_projection(attempt.attempt_id))
-        self.store.claim_create(attempt.attempt_id)
+        self.claim_after_preflight(attempt.attempt_id)
         self.assertTrue(self.store.verify_attempt_lifecycle_projection(attempt.attempt_id))
         reopened = ExecutionStore(str(self.path), project_id=self.plan.project.project_id,
                                   controller_host="TEST-HOST", clock=lambda: self.now)
@@ -177,6 +189,28 @@ class ExecutionStoreTests(unittest.TestCase):
         self.assertEqual(request["image"], self.plan.provisioning.image_ref)
         self.assertEqual(request["dataCenterIds"], ["EU-TEST-1"])
         self.assertEqual(request["cpu"], {"id": "cpu-small", "vcpuCount": 4})
+        self.assertEqual(reopened.selected_quote_for_attempt(attempt.attempt_id),
+                         attempt.selected_quote)
+
+    def test_create_claim_requires_a_fresh_hash_bound_preflight(self):
+        attempt, _ = self.reserve()
+        with self.assertRaises(ExecutionError) as caught:
+            self.store.claim_create(attempt.attempt_id)
+        self.assertEqual(caught.exception.code, "create_preflight_missing")
+        prepare_test_preflight(self.store, attempt.attempt_id)
+        self.assertTrue(self.store.verify_attempt_lifecycle_projection(attempt.attempt_id))
+        preflight = self.store.events()[-1]["payload"]
+        self.assertNotIn("fixture-key", repr(preflight))
+        self.store.claim_create(attempt.attempt_id)
+
+    def test_create_claim_rejects_a_stale_preflight_without_consuming_claim(self):
+        attempt, _ = self.reserve()
+        prepare_test_preflight(self.store, attempt.attempt_id)
+        self.now += 61
+        with self.assertRaises(ExecutionError) as caught:
+            self.store.claim_create(attempt.attempt_id)
+        self.assertEqual(caught.exception.code, "create_preflight_stale")
+        self.assertEqual(self.store.get_attempt(attempt.attempt_id)["state"], "reserved")
 
     def test_reservation_rejects_a_create_request_digest_mismatch(self):
         attempt = attempt_for(self.plan, "attempt-mismatch", 1, self.now)
@@ -209,7 +243,7 @@ class ExecutionStoreTests(unittest.TestCase):
         attempt, _ = self.reserve()
         self.assertEqual(self.store.project_policy_for_attempt(attempt.attempt_id),
                          self.plan.project)
-        self.store.claim_create(attempt.attempt_id)
+        self.claim_after_preflight(attempt.attempt_id)
         self.store.bind_pod(attempt.attempt_id, "pod-1", pod_name(1))
 
         class Provider:
@@ -283,7 +317,7 @@ class ExecutionStoreTests(unittest.TestCase):
                 self.delete_calls.append(pod_id)
 
         attempt, _ = self.reserve()
-        self.store.claim_create(attempt.attempt_id)
+        self.claim_after_preflight(attempt.attempt_id)
         provider = Provider()
         live = {
             "id": "pod-1", "name": pod_name(1), "status": "RUNNING", "cost": 0.3,
@@ -327,7 +361,7 @@ class ExecutionStoreTests(unittest.TestCase):
                 self.delete_calls.append(pod_id)
 
         attempt, _ = self.reserve()
-        self.store.claim_create(attempt.attempt_id)
+        self.claim_after_preflight(attempt.attempt_id)
         live = {
             "id": "pod-1", "name": pod_name(1), "status": "RUNNING", "cost": 0.3,
             "cloud": "SECURE", "image": "runpod/base@" + self.plan.resource_options[0].image_digest,
@@ -406,7 +440,7 @@ class ExecutionStoreTests(unittest.TestCase):
                 raise AssertionError("an unbound create must never be deleted")
 
         attempt, exposure = self.reserve()
-        self.store.claim_create(attempt.attempt_id)
+        self.claim_after_preflight(attempt.attempt_id)
         monitor = StoreCleanupMonitor(
             Provider(), self.store, attempt.attempt_id,
             self.plan.project.project_id, clock=lambda: self.now)
@@ -594,7 +628,7 @@ child = launch_execution_store(StateStoreConfig(state_root, "TEST-HOST"), attemp
 
     def test_ambiguous_create_absence_releases_hold_only_after_explicit_reconciliation(self):
         attempt, _ = self.reserve()
-        self.store.claim_create(attempt.attempt_id)
+        self.claim_after_preflight(attempt.attempt_id)
         with self.assertRaises(ExecutionError):
             self.store.confirm_absence(attempt.attempt_id, ONE)
         self.store.require_reconciliation(attempt.attempt_id, "create_timeout")
@@ -611,7 +645,7 @@ child = launch_execution_store(StateStoreConfig(state_root, "TEST-HOST"), attemp
 
     def test_ambiguous_stop_can_reconcile_present_then_confirm_absence(self):
         another, exposure = self.reserve()
-        self.store.claim_create(another.attempt_id)
+        self.claim_after_preflight(another.attempt_id)
         self.store.bind_pod(another.attempt_id, "pod-1", pod_name(1))
         self.store.request_stop(another.attempt_id)
         self.store.require_reconciliation(another.attempt_id, "delete_timeout")
@@ -1047,6 +1081,7 @@ os._exit(25)
                 if action == "billing":
                     attempt = attempt_for(self.plan, attempt_id, 1, self.now)
                     store.reserve_attempt(self.plan, attempt, pod_name(1))
+                    prepare_test_preflight(store, attempt_id)
                     store.claim_create(attempt_id)
                     store.bind_pod(attempt_id, "pod-partial", pod_name(1))
                     store.request_stop(attempt_id)
@@ -1156,8 +1191,10 @@ else:
                 store = ExecutionStore(str(path), project_id=plan.project.project_id,
                                        controller_host="TEST-HOST", clock=lambda: self.now)
                 exposure = store.reserve_attempt(plan, attempt, pod_name(1))
-                if action not in ("claim", "cancel"):
-                    store.claim_create(attempt_id)
+                if action != "cancel":
+                    prepare_test_preflight(store, attempt_id)
+                    if action != "claim":
+                        store.claim_create(attempt_id)
                 if action in ("stop", "terminate", "billing", "billing_complete"):
                     store.bind_pod(attempt_id, "pod-crash", pod_name(1))
                 if action in ("terminate", "billing", "billing_complete"):

@@ -17,6 +17,7 @@ API_URL = "https://api.runpod.io/v2"
 MAX_INVENTORY_PAGES = 100
 MAX_INVENTORY_PODS = 10_000
 MAX_BILLING_RECORDS = 10_000
+MAX_SSH_PUBLIC_KEYS = 256
 MAX_RESPONSE_BYTES = 8_388_608
 
 
@@ -70,6 +71,22 @@ class RunPodClient:
             raise ValueError("Invalid Pod ID")
         return self._request("DELETE", "/pods/" + pod_id)
 
+    def ssh_key_fingerprints(self):
+        """Read registered account keys and return only their SHA-256 digests."""
+        from runpod_experiments.ssh import ssh_public_key_fingerprint
+
+        result = self._get("/account/ssh-keys")
+        keys = result.get("keys") if isinstance(result, dict) else None
+        if not isinstance(keys, list) or len(keys) > MAX_SSH_PUBLIC_KEYS:
+            raise ProviderError("Invalid SSH key response", kind="invalid_response")
+        try:
+            fingerprints = tuple(ssh_public_key_fingerprint(key) for key in keys)
+        except ValueError:
+            raise ProviderError("Invalid SSH key response", kind="invalid_response") from None
+        if len(fingerprints) != len(set(fingerprints)):
+            raise ProviderError("SSH key response contains duplicate keys", kind="invalid_response")
+        return frozenset(fingerprints)
+
     def _create_pod(self, request):
         if not isinstance(request, dict):
             raise ValueError("Invalid Pod request")
@@ -94,13 +111,18 @@ class RunPodClient:
             raise ProviderError("Invalid CPU catalog response", kind="invalid_response")
         return result
 
-    def gpu_offer(self, gpu_id, gpu_count=1):
+    def gpu_offer(self, gpu_id, gpu_count=1, *, min_cuda_version=None):
         """Return the current GPU catalog quote for the requested GPU count."""
         if (not isinstance(gpu_id, str) or not re.fullmatch(r"[A-Za-z0-9 _.-]{1,128}", gpu_id) or
-                type(gpu_count) is not int or not 1 <= gpu_count <= 64):
+                type(gpu_count) is not int or not 1 <= gpu_count <= 64 or
+                (min_cuda_version is not None and
+                 (not isinstance(min_cuda_version, str) or
+                  re.fullmatch(r"[0-9]+\.[0-9]+", min_cuda_version) is None))):
             raise ValueError("Invalid GPU catalog request")
         gpu_path = urllib.parse.quote(gpu_id, safe="")
         query = urllib.parse.urlencode({"include": "AVAILABILITY", "product": "POD", "count": gpu_count})
+        if min_cuda_version is not None:
+            query += "&" + urllib.parse.urlencode({"minCudaVersion": min_cuda_version})
         result = self._get("/catalog/gpus/" + gpu_path + "?" + query)
         if not isinstance(result, dict):
             raise ProviderError("Invalid GPU catalog response", kind="invalid_response")

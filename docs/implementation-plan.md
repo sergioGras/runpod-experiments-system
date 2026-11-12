@@ -1,11 +1,11 @@
 # Implementation and consumer migration plan
 
-Status: M0 design and M1 are complete. M2 remains open pending verified per-Pod
-billing evidence. The initial M3 SQLite store slice passes its focused and full
-offline checks on the isolated `design/unified-execution` worktree; M3's full
-exit criteria remain open. An additive M4 store-backed supervisor slice now has
-offline and installed-artifact evidence; M4's full exit criteria remain open.
-Production migration has not begun. Read
+Status: M0 design and M1 are complete. M2 remains open pending account-level
+qualification of billing and resource quotes. The isolated
+`design/unified-execution` worktree now has an internal schema-v4 SQLite store,
+store-backed cleanup supervisor, and store-backed one-shot create controller.
+These slices have offline evidence, but M3 and M4 exit criteria remain open;
+there is no complete serial engine or production migration. Read
 [architecture](architecture.md), [testing](testing-strategy.md) and
 [contribution rules](../CONTRIBUTING.md) together. The earlier
 [unification study](unification-roadmap.md) supplies the capability inventory.
@@ -65,8 +65,8 @@ credential discovery, including child processes. Define stage/event schemas and
 redacted operational evidence. Include a fourth synthetic project to ensure the
 engine does not embed the three current project names or special-case their IDs.
 
-M1 implementation currently adds frozen schema-v2 contract records and stage
-events, canonical UTF-8 JSON envelope helpers (sorted keys, compact form, one
+The M1 baseline added frozen schema-v2 contract records and stage events,
+canonical UTF-8 JSON envelope helpers (sorted keys, compact form, one
 MiB maximum), duplicate-key/nonfinite rejection, typed failure categories, an
 opt-in test-mode provider guard, and synthetic fixtures. Approval scopes bind
 the hash of their project policy. `validate_attempt` checks attempt identity,
@@ -161,7 +161,7 @@ and Windows ACL before using it for live state.
 ### Current M3 slice (internal and unreleased)
 
 `runpod_experiments.execution_store.ExecutionStore` currently supplies a
-schema-v3 SQLite ledger for one project on one configured controller host. It
+schema-v4 SQLite ledger for one project on one configured controller host. It
 canonicalizes the database path and immutably binds the store to the supplied
 project and host identities. `StateStoreConfig` provides the path formula and
 explicit configuration inputs, while deployment still must set the same root in
@@ -288,38 +288,52 @@ remaining scope/capacity/budget and finite policy. Restart can recover verified
 results without creating a new resource. Operational failure and scientific
 failure both retain permitted evidence and independent cleanup.
 
-### Create-contract prerequisite (implemented; controller remains open)
+### Store-backed one-shot create slice (internal; qualification remains open)
 
-The current planning slice advances the canonical contract envelope to v2 and
-the local execution-store schema to v3. `ExecutionPlan` now carries a typed,
+The current planning slice advances the canonical contract envelope to v3 and
+the local execution-store schema to v4. `ExecutionPlan` carries a typed,
 non-secret `PodProvisioningSpec` with a digest-pinned image, explicit ports and
 reviewed Secure/SSH settings. CPU request payloads include the selected flavor
 and vCPU count. GPU payloads express per-GPU host RAM/vCPU minima derived from
 the total Pod profile and bind the requested CUDA floor; VRAM remains a separate
 profile requirement because the provider's Pod detail reports host RAM there.
-Each `AttemptPlan` carries the exact normalized
-`QuoteObservation`, whose digest, selected resource, units, hourly total and
-region are checked together. Reservation rebuilds the allowlisted CPU/GPU Pod
+Each `AttemptPlan` carries the exact normalized `QuoteObservation`, including
+CPU host RAM or GPU VRAM-per-card evidence and the CUDA floor. Its digest,
+selected resource, units, hourly total and region are checked together.
+Reservation rebuilds the allowlisted CPU/GPU Pod
 request from those immutable records and rejects a request digest mismatch
 before writing any reservation. The store can rebuild that same request after
 restart only after verifying its stored documents and lifecycle projection.
 
 This is a breaking internal schema change. Existing non-empty contract documents
 and store databases are not migrated; the store refuses any non-current schema.
-The create controller, provider payload qualification, quote freshness policy,
-GPU runtime conformance and secret delivery remain open. No provider call is
-made by this slice. The request contract deliberately has no arbitrary fields,
-mounts or secret values; extensions require an explicit schema change and tests.
+`StoreCreateController` now performs a bounded preflight: it verifies a separate
+ready supervisor and heartbeat, checks account inventory for project/name
+conflicts, confirms the local public-key fingerprint is registered, refreshes
+the selected resource quote and region, persists hash-bound evidence, and
+consumes one durable claim before sending at most one create request. It
+rechecks the supervisor after claiming. A timeout or malformed response holds
+the exposure for reconciliation; this path never retries or deletes an unknown
+resource. The request contract deliberately has no arbitrary fields, mounts or
+secret values; extensions require an explicit schema change and tests.
 
-On Windows with Python 3.12.14, the full offline suite passed 131 tests with one
-directory-symlink capability skip. The updated billing/provider adapter suites
-passed 11 connection tests and 19 provider tests. A clean no-dependency install
-of the candidate wheel (SHA-256
-`d3de528335d70b3d313f7058d985a53a141330b3d4b7aa3b2e81d866f03d1db3`) imported
-the v2 contract and store schema and rebuilt a GPU create body with per-GPU host
-RAM/vCPU minima and the CUDA floor. The full suite also covers CPU reconstruction
-from a reopened store. These were local synthetic checks only; no RunPod
-credentials, account endpoints or resources were used.
+This remains an internal component, not the M6 serial engine or a consumer API.
+Provider payload and account response qualification, GPU runtime VRAM
+conformance, secret delivery, restart recovery, and owner-specific approval
+integration remain open. The offline tests use fake providers and do not call
+RunPod. Existing non-empty v3 store databases and v2 contract documents have no
+migration path; consumers remain on their existing package pins until the
+separate migration gates pass.
+
+On Windows with Python 3.12.14, the full offline suite passed 143 tests with one
+directory-symlink capability skip. A fresh no-dependency venv installed the
+candidate wheel `0.2.0.dev0` (SHA-256
+`768430a2b5306acbbbaaabbccaead307b87b0105eb27f4350f6000eaad0565a2`); from
+outside the checkout, the installed artifact imported contract schema 3, store
+schema 4 and `StoreCreateController`. CPU/GPU fake-provider create paths and
+CPU reconstruction from a reopened store are covered by the full suite. These
+were local synthetic checks only; no RunPod credentials, account endpoints or
+resources were used.
 
 ## Consumer migrations
 

@@ -75,10 +75,16 @@ class GPUPolicyTests(unittest.TestCase):
         client = Client("test-key")
         self.assertEqual(client.gpu_offer("NVIDIA A40", 1)["id"], "NVIDIA A40")
         self.assertEqual(observed, ["/catalog/gpus/NVIDIA%20A40?include=AVAILABILITY&product=POD&count=1"])
+        self.assertEqual(client.gpu_offer("NVIDIA A40", 2, min_cuda_version="12.4")["id"],
+                         "NVIDIA A40")
+        self.assertEqual(observed[-1],
+                         "/catalog/gpus/NVIDIA%20A40?include=AVAILABILITY&product=POD&count=2&minCudaVersion=12.4")
         with self.assertRaises(ValueError):
             client.gpu_offer("../bad", 1)
         with self.assertRaises(ValueError):
             client.gpu_offer("NVIDIA A40", True)
+        with self.assertRaises(ValueError):
+            client.gpu_offer("NVIDIA A40", 1, min_cuda_version="12")
 
 
 if __name__ == "__main__":

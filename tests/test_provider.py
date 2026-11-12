@@ -116,7 +116,7 @@ class ProviderErrorNormalizationTests(unittest.TestCase):
 class QuoteNormalizationTests(unittest.TestCase):
     def test_cpu_quote_uses_secure_rate_conservative_microdollar_rounding(self):
         offer = {"id": "cpu3c", "price": {"securePerVcpu": 0.03000001},
-                 "ramGbPerVcpu": 2, "vcpu": {"min": 2, "max": 32},
+                 "ramGbPerVcpu": 2.5, "vcpu": {"min": 2, "max": 32},
                  "availability": "HIGH",
                  "dataCenters": [{"id": "EU-CZ-1", "availability": "HIGH"},
                                  {"id": "US-CA-1", "availability": "NONE"}]}
@@ -126,6 +126,7 @@ class QuoteNormalizationTests(unittest.TestCase):
         self.assertEqual(quote.compute_hourly_micro_usd, 120_004)
         self.assertEqual(quote.storage_hourly_micro_usd, 1)
         self.assertEqual(quote.total_hourly_micro_usd, 120_005)
+        self.assertEqual(quote.memory_gb, 10)
         self.assertEqual(quote.region_ids, ("EU-CZ-1",))
         self.assertTrue(quote.catalog_available)
 
@@ -145,7 +146,7 @@ class QuoteNormalizationTests(unittest.TestCase):
         self.assertFalse(isinstance(quote, dict))
 
     def test_gpu_quote_keeps_capacity_and_region_evidence_separate(self):
-        offer = {"id": "NVIDIA A40", "secure": True,
+        offer = {"id": "NVIDIA A40", "secure": True, "memory": 48,
                  "price": {"secure": 0.59}, "maxCount": {"secure": 4}}
         quote = normalize_gpu_quote(offer, resource_id="NVIDIA A40", gpu_count=2,
                                     observed_epoch=1_900_000_000,
@@ -153,7 +154,14 @@ class QuoteNormalizationTests(unittest.TestCase):
         self.assertEqual(quote.compute_hourly_micro_usd, 1_180_000)
         self.assertEqual(quote.storage_hourly_micro_usd, 1_000)
         self.assertEqual(quote.region_ids, ())
+        self.assertEqual(quote.memory_gb, 48)
         self.assertTrue(quote.catalog_available)
+        cuda_scoped = normalize_gpu_quote(
+            {**offer, "dataCenters": [{"id": "EU-CZ-1", "availability": "HIGH"}]},
+            resource_id="NVIDIA A40", gpu_count=2, observed_epoch=1_900_000_000,
+            minimum_cuda="12.4")
+        self.assertEqual(cuda_scoped.minimum_cuda, "12.4")
+        self.assertEqual(cuda_scoped.region_ids, ("EU-CZ-1",))
         no_capacity = normalize_gpu_quote(
             {**offer, "maxCount": {"secure": 0}}, resource_id="NVIDIA A40",
             gpu_count=1, observed_epoch=1_900_000_000)

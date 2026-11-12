@@ -74,7 +74,7 @@ def attempt(plan=None, **changes):
     resource = plan.resource_options[0]
     quote = QuoteObservation(resource.kind, resource.resource_id, resource.cpu_count,
                              resource.cpu_count, resource.hourly_micro_usd, 0, True,
-                             resource.region_ids, 1_900_000_000, ONE)
+                             resource.region_ids, 1_900_000_000, ONE, resource.memory_gb)
     fields = dict(attempt_id="attempt-001", job_id=plan.job_id,
                   approval_id=plan.approval.approval_id, attempt_number=1,
                   request_sha256=ZERO,
@@ -199,25 +199,34 @@ class ExecutionContractTests(unittest.TestCase):
             validate_attempt(plan, attempt(plan, quote_sha256=ZERO))
         other = QuoteObservation(ResourceKind.CPU, "cpu-other", 4, 4,
                                  item.selected_resource.hourly_micro_usd, 0, True,
-                                 item.selected_resource.region_ids, item.created_epoch, ONE)
+                                 item.selected_resource.region_ids, item.created_epoch, ONE, 8)
         with self.assertRaises(ContractError):
             validate_attempt(plan, attempt(
                 plan, selected_quote=other,
                 quote_sha256=sha256_bytes(encode_document("quote_observation", other))))
         future = QuoteObservation(ResourceKind.CPU, item.selected_resource.resource_id,
                                  4, 4, item.selected_resource.hourly_micro_usd, 0, True,
-                                 item.selected_resource.region_ids, item.created_epoch + 1, ONE)
+                                 item.selected_resource.region_ids, item.created_epoch + 1, ONE, 8)
         with self.assertRaises(ContractError):
             validate_attempt(plan, attempt(
                 plan, selected_quote=future,
                 quote_sha256=sha256_bytes(encode_document("quote_observation", future))))
         region_mismatch = QuoteObservation(
             ResourceKind.CPU, item.selected_resource.resource_id, 4, 4,
-            item.selected_resource.hourly_micro_usd, 0, True, (), item.created_epoch, ONE)
+            item.selected_resource.hourly_micro_usd, 0, True, (), item.created_epoch, ONE, 8)
         with self.assertRaises(ContractError):
             validate_attempt(plan, attempt(
                 plan, selected_quote=region_mismatch,
                 quote_sha256=sha256_bytes(encode_document("quote_observation", region_mismatch))))
+        insufficient_memory = QuoteObservation(
+            ResourceKind.CPU, item.selected_resource.resource_id, 4, 4,
+            item.selected_resource.hourly_micro_usd, 0, True,
+            item.selected_resource.region_ids, item.created_epoch, ONE,
+            item.selected_resource.memory_gb - 1)
+        with self.assertRaises(ContractError):
+            validate_attempt(plan, attempt(
+                plan, selected_quote=insufficient_memory,
+                quote_sha256=sha256_bytes(encode_document("quote_observation", insufficient_memory))))
 
     def test_attempt_must_remain_within_plan_approval_and_provenance(self):
         plan = execution_plan()
@@ -316,7 +325,7 @@ class CanonicalDocumentTests(unittest.TestCase):
         with self.assertRaises(ContractError):
             strict_json_loads(b" " * 1_048_577)
         with self.assertRaises(ContractError):
-            decode_document('{"kind":"execution_plan","payload":{},"schema_version":3}',
+            decode_document('{"kind":"execution_plan","payload":{},"schema_version":99}',
                             expected_kind="execution_plan")
         with self.assertRaises(ContractError):
             decode_document('{"kind":"other","payload":{},"schema_version":1}',
