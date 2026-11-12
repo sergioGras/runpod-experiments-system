@@ -6,22 +6,32 @@ from pathlib import Path
 
 from runpod_experiments.attempts import AttemptError
 from runpod_experiments.collection import collect_once
+from runpod_experiments.execution_store import ExecutionStore
 from runpod_experiments.ssh import SSHFetcher
+from runpod_experiments.store_transport import resolve_store_ssh_context
 
 
 def collect_owned_once(client, ledger, attempt_id, project_id, store, names, key_file,
                        known_hosts, remote_root, previous=None, *, fetcher_type=SSHFetcher):
-    attempt = ledger.get(attempt_id)
-    if attempt["project_id"] != project_id or attempt["state"] != "active" or not attempt["pod_id"]:
-        raise AttemptError("No active attempt in this project")
-    pod = client.pod(attempt["pod_id"])
-    if pod.get("id") != attempt["pod_id"] or pod.get("name") != attempt["pod_name"] or pod.get("status") != "RUNNING":
-        raise AttemptError("Pod identity mismatch during collection")
-    ssh = pod.get("ssh")
-    endpoint = ssh.get("direct") if isinstance(ssh, dict) else None
-    if not isinstance(endpoint, dict):
-        raise AttemptError("Direct SSH endpoint not available")
-    fetch = fetcher_type(endpoint.get("host"), endpoint.get("port"), endpoint.get("username"),
+    if isinstance(ledger, ExecutionStore):
+        target = resolve_store_ssh_context(client, ledger, attempt_id, project_id)
+        endpoint = target.endpoint
+        host, port, username = endpoint.host, endpoint.port, endpoint.username
+    else:
+        attempt = ledger.get(attempt_id)
+        if attempt["project_id"] != project_id or attempt["state"] != "active" or not attempt["pod_id"]:
+            raise AttemptError("No active attempt in this project")
+        pod = client.pod(attempt["pod_id"])
+        if (pod.get("id") != attempt["pod_id"] or pod.get("name") != attempt["pod_name"] or
+                pod.get("status") != "RUNNING"):
+            raise AttemptError("Pod identity mismatch during collection")
+        ssh = pod.get("ssh")
+        endpoint = ssh.get("direct") if isinstance(ssh, dict) else None
+        if not isinstance(endpoint, dict):
+            raise AttemptError("Direct SSH endpoint not available")
+        host, port, username = (endpoint.get("host"), endpoint.get("port"),
+                                endpoint.get("username"))
+    fetch = fetcher_type(host, port, username,
                          key_file, known_hosts, remote_root)
     return collect_once(store, fetch, names, attempt_id, previous)
 
@@ -38,7 +48,11 @@ def collect_loop(client, ledger, attempt_id, project_id, store, names, key_file,
         stopping = (directory / "collection.stop").exists()
         terminal = False
         try:
-            attempt = ledger.get(attempt_id)
+            if isinstance(ledger, ExecutionStore):
+                ledger.verify_attempt_lifecycle_projection(attempt_id)
+                attempt = ledger.get_attempt(attempt_id)
+            else:
+                attempt = ledger.get(attempt_id)
             terminal = attempt["project_id"] == project_id and attempt["state"] in {"terminated", "cancelled"}
             if terminal:
                 errors = {}

@@ -6,19 +6,25 @@ import struct
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from runpod_experiments.contracts import (
     ApprovalScope, AttemptPlan, ExecutionPlan, FailureCategory, PodProvisioningSpec,
     ProjectPolicy, QuoteObservation, ResourceKind, ResourceProfile, RetryPolicy,
     TransferManifest, encode_document, sha256_bytes,
 )
+from runpod_experiments.artifacts import ArtifactStore
+from runpod_experiments.collection_process import launch_execution_store
 from runpod_experiments.create_spec import pod_create_request_sha256
 from runpod_experiments.errors import ExecutionError
 from runpod_experiments.execution_store import ExecutionStore
 from runpod_experiments.interactive_ssh import SSHInteractiveProcess
+from runpod_experiments.remote_process import start_python
+from runpod_experiments.run_collection import collect_owned_once
 from runpod_experiments.ssh import ssh_public_key_fingerprint
 from runpod_experiments.state_config import StateStoreConfig
 from runpod_experiments.store_create import StoreCreateController
+from runpod_experiments.upload import upload_bundle
 
 
 ZERO = "0" * 64
@@ -148,6 +154,16 @@ class StoreCreateControllerTests(unittest.TestCase):
             self.attempt["attempt_id"], self.process, self.supervisor_directory,
             self.key_path)
 
+    def set_live_cpu_detail(self, receipt):
+        self.client.detail = {
+            "id": receipt.pod_id, "name": receipt.pod_name, "status": "RUNNING",
+            "cost": 0.3, "cloud": "SECURE", "disk": 20, "dataCenterId": REGION,
+            "image": "runpod/base@sha256:" + ZERO, "mounts": {},
+            "cpu": {"id": "cpu-small", "vcpuCount": 4, "memory": 8},
+            "ports": ["22/tcp"],
+            "ssh": {"direct": {"host": "127.0.0.1", "port": 2222, "username": "root"}},
+        }
+
     def test_cpu_create_binds_verified_preflight_and_returns_safe_receipt(self):
         receipt = self.create()
         self.assertEqual(receipt.pod_id, "pod-created-001")
@@ -249,14 +265,7 @@ class StoreCreateControllerTests(unittest.TestCase):
 
     def test_store_backed_interactive_ssh_checks_live_resource_before_launch(self):
         receipt = self.create()
-        self.client.detail = {
-            "id": receipt.pod_id, "name": receipt.pod_name, "status": "RUNNING",
-            "cost": 0.3, "cloud": "SECURE", "disk": 20, "dataCenterId": REGION,
-            "image": "runpod/base@sha256:" + ZERO, "mounts": {},
-            "cpu": {"id": "cpu-small", "vcpuCount": 4, "memory": 8},
-            "ports": ["22/tcp"],
-            "ssh": {"direct": {"host": "127.0.0.1", "port": 2222, "username": "root"}},
-        }
+        self.set_live_cpu_detail(receipt)
         known_hosts = self.root / "known_hosts"
         known_hosts.write_text("[127.0.0.1]:2222 ssh-ed25519 fixture\n", encoding="utf-8")
         private_key = self.root / "id_ed25519"
@@ -305,6 +314,117 @@ class StoreCreateControllerTests(unittest.TestCase):
                 self.root / "ssh-mismatch.log",
                 popen=lambda *_args, **_kwargs: self.fail("mismatched Pod must not launch SSH"))
         self.assertEqual(caught.exception.code, "attempt_resource_shape_unverified")
+
+        self.client.detail["cpu"]["vcpuCount"] = 4
+        self.client.detail["ports"] = ["22/tcp", "8080/http"]
+        with self.assertRaises(ExecutionError) as caught:
+            SSHInteractiveProcess(
+                self.client, self.store, self.attempt["attempt_id"], self.project.project_id,
+                private_key, known_hosts, "/tmp/nebula", "worker.py", [], 60,
+                self.root / "ssh-ports.log",
+                popen=lambda *_args, **_kwargs: self.fail("unexpected exposed port must block SSH"))
+        self.assertEqual(caught.exception.code, "attempt_ports_unverified")
+
+    def test_store_backed_upload_launch_and_collection_share_the_verified_target(self):
+        receipt = self.create()
+        self.set_live_cpu_detail(receipt)
+        known_hosts = self.root / "known_hosts"
+        known_hosts.write_text("[127.0.0.1]:2222 ssh-ed25519 fixture\n", encoding="utf-8")
+        private_key = self.root / "id_ed25519"
+        private_key.write_bytes(b"private-key-fixture")
+        worker = b"synthetic worker source"
+        source = self.root / "worker.py"
+        source.write_bytes(worker)
+        uploaded = []
+
+        def upload_runner(argv, **kwargs):
+            uploaded.append((argv, kwargs["input"]))
+            return SimpleNamespace(stdout=b"", returncode=0)
+
+        self.assertEqual(upload_bundle(
+            self.client, self.store, self.attempt["attempt_id"], self.project.project_id,
+            self.root, {"worker.py": sha256_bytes(worker)}, private_key, known_hosts,
+            "/tmp/nebula", runner=upload_runner), 1)
+        self.assertEqual(uploaded[0][1], worker)
+        self.assertIn("root@127.0.0.1", uploaded[0][0])
+
+        launched = {}
+
+        def popen(argv, **kwargs):
+            launched.update(argv=argv, kwargs=kwargs)
+            return SimpleNamespace(pid=5050)
+
+        process = start_python(
+            self.client, self.store, self.attempt["attempt_id"], self.project.project_id,
+            private_key, known_hosts, "/tmp/nebula", "worker.py", ["--run"], 30,
+            self.root / "worker.log", popen=popen)
+        self.assertEqual(process.pid, 5050)
+        self.assertIn("root@127.0.0.1", launched["argv"])
+        self.assertIn("timeout 30 python3 worker.py --run", launched["argv"][-1])
+
+        class Fetcher:
+            def __init__(self, host, port, username, *_args):
+                self.endpoint = (host, port, username)
+
+            def __call__(self, _name):
+                return b"synthetic result"
+
+        artifacts = ArtifactStore(self.root / "artifacts")
+        previous, errors = collect_owned_once(
+            self.client, self.store, self.attempt["attempt_id"], self.project.project_id,
+            artifacts, ["results/out.bin"], private_key, known_hosts, "/tmp/nebula",
+            fetcher_type=Fetcher)
+        self.assertEqual(errors, {})
+        self.assertEqual(previous["results/out.bin"], sha256_bytes(b"synthetic result"))
+
+    def test_detached_store_collector_binds_allowlist_store_and_attempt(self):
+        receipt = self.create()
+        self.set_live_cpu_detail(receipt)
+        known_hosts = self.root / "known_hosts"
+        known_hosts.write_text("[127.0.0.1]:2222 ssh-ed25519 fixture\n", encoding="utf-8")
+        private_key = self.root / "id_ed25519"
+        private_key.write_bytes(b"private-key-fixture")
+        artifact_directory = self.root / "artifacts"
+        names = ["results/out.bin"]
+        launched = {}
+
+        def popen(argv, **kwargs):
+            launched.update(argv=argv, kwargs=kwargs)
+            return SimpleNamespace(pid=6060)
+
+        process = launch_execution_store(
+            self.state_config, self.attempt["attempt_id"], self.project.project_id,
+            artifact_directory, names, private_key, known_hosts, "/tmp/nebula", popen=popen)
+        self.assertEqual(process.pid, 6060)
+        self.assertIn("--store-root", launched["argv"])
+        collector_directory = (self.state_config.state_root / self.project.project_id /
+                               self.attempt["attempt_id"] / "collector")
+        names_path = collector_directory / "collection-allowlist.json"
+        self.assertEqual(json.loads(names_path.read_text(encoding="utf-8")), names)
+        with self.assertRaises(ValueError):
+            launch_execution_store(
+                self.state_config, self.attempt["attempt_id"], self.project.project_id,
+                artifact_directory, ["different.bin"], private_key, known_hosts,
+                "/tmp/nebula", popen=popen)
+
+        from runpod_experiments import collection_process as entry
+        from runpod_experiments.ssh import SSHFetcher
+        argv = launched["argv"]
+        cli = ["collector", *argv[argv.index("--store-root"):]]
+        original_collect_loop = entry.collect_loop
+
+        def one_collection(*args, **kwargs):
+            return original_collect_loop(*args, max_polls=1, **kwargs)
+
+        with patch.object(entry.RunPodClient, "from_config", return_value=self.client), \
+             patch.object(entry, "collect_loop", side_effect=one_collection), \
+             patch.object(SSHFetcher, "__call__", return_value=b"stored-result"), \
+             patch("sys.argv", cli):
+            entry.main()
+        manifest = artifact_directory / "manifest.jsonl"
+        self.assertTrue(manifest.is_file())
+        self.assertEqual(json.loads(manifest.read_text(encoding="utf-8").splitlines()[0])["name"],
+                         "results/out.bin")
 
     def test_missing_region_or_changed_quote_blocks_create(self):
         self.client.cpu_offer = lambda *_args: {

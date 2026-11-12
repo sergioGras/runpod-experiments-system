@@ -3,8 +3,8 @@
 Status: M0 design and M1 are complete. M2 remains open pending account-level
 qualification of billing and resource quotes. The isolated
 `design/unified-execution` worktree now has an internal schema-v4 SQLite store,
-store-backed cleanup supervisor and one-shot create controller, plus a direct
-interactive SSH path that verifies store-backed Pod identity and CPU shape.
+store-backed cleanup supervisor and one-shot create controller, plus
+store-verified direct SSH paths for upload, remote launch and collection.
 These slices have offline evidence, but M3 through M6 exit criteria remain open;
 there is no complete serial engine or production migration. Read
 [architecture](architecture.md), [testing](testing-strategy.md) and
@@ -289,14 +289,16 @@ remaining scope/capacity/budget and finite policy. Restart can recover verified
 results without creating a new resource. Operational failure and scientific
 failure both retain permitted evidence and independent cleanup.
 
-`SSHInteractiveProcess` now supports an `ExecutionStore` attempt in addition to
-the legacy ledger. That path verifies the lifecycle projection, project policy,
-selected resource/region, live provider detail and direct SSH endpoint before
-launching the existing bounded binary transport. Synthetic coverage proves the
-store-backed CPU path and that an unexpected live shape prevents process launch;
-the legacy ledger path remains covered. This is a transport slice only: store-
-backed upload/collection, proxy transport and serial-engine orchestration remain
-open. The GPU path is still blocked by unavailable per-card VRAM runtime evidence.
+`SSHInteractiveProcess`, bundle upload, bounded remote launch, result collection
+and a detached collector now support an `ExecutionStore` attempt in addition to
+the legacy ledger. Shared resolution verifies the lifecycle projection, project
+policy, selected resource/region, declared ports, live provider detail and
+direct SSH endpoint before opening the transport. Fake-provider coverage exercises CPU upload,
+launch, interactive pipes, collection and a reopened detached-collector CLI;
+unexpected live shape prevents SSH startup, and the legacy paths remain covered.
+This is a transport slice only: proxy transport, restartable serial-engine
+orchestration and end-to-end stage/retry recovery remain open. The GPU path is
+still blocked by unavailable per-card VRAM runtime evidence.
 
 ### Store-backed one-shot create slice (internal; qualification remains open)
 
@@ -335,16 +337,16 @@ RunPod. Existing non-empty v3 store databases and v2 contract documents have no
 migration path; consumers remain on their existing package pins until the
 separate migration gates pass.
 
-On Windows with Python 3.12.14, the full offline suite passed 144 tests with one
+On Windows with Python 3.12.14, the full offline suite passed 146 tests with one
 directory-symlink capability skip. A fresh no-dependency venv installed the
 candidate wheel `0.2.0.dev0` (SHA-256
-`4469755929ebab79f27f7c1127b6fba6e8e2773e9c5baa4a7b6f6f55b48c62d3`); from
+`57dfdbde0427718fd41ca145932635a5e049c9e9a978c71bb075800690fd4c1f`); from
 outside the checkout, the installed artifact imported contract schema 3, store
-schema 4, `StoreCreateController`, and the store-aware interactive SSH types.
-CPU/GPU fake-provider create paths, guarded CPU SSH startup, shape rejection and
-CPU reconstruction from a reopened store are covered by the full suite. These
-were local synthetic checks only; no RunPod credentials, account endpoints or
-resources were used.
+schema 4, the create controller, and the store-backed SSH/collector helpers.
+CPU/GPU fake-provider create paths, guarded CPU transport operations, shape
+rejection and CPU reconstruction from a reopened store are covered by the full
+suite. These were local synthetic checks only; no RunPod credentials, account
+endpoints or resources were used.
 
 ## Consumer migrations
 

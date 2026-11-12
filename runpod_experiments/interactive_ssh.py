@@ -7,11 +7,9 @@ from pathlib import Path, PurePosixPath
 
 from runpod_experiments.binary_process import BinaryProcess
 from runpod_experiments.attempts import AttemptError
-from runpod_experiments.contracts import FailureCategory
-from runpod_experiments.errors import ExecutionError
 from runpod_experiments.execution_store import ExecutionStore
-from runpod_experiments.provider import ProviderAdapter
 from runpod_experiments.ssh import SSHFetcher
+from runpod_experiments.store_transport import resolve_store_ssh_context
 
 
 class SSHInteractiveProcess(BinaryProcess):
@@ -27,17 +25,8 @@ class SSHInteractiveProcess(BinaryProcess):
                  remote_root, script, arguments, timeout_seconds, log_path, *,
                  popen=subprocess.Popen, output_chunk_bytes=65536, queued_chunks=32):
         if isinstance(ledger, ExecutionStore):
-            if ledger.project_id != project_id:
-                raise ExecutionError(FailureCategory.AUTHORIZATION, "attempt_outside_project")
-            ledger.verify_attempt_lifecycle_projection(attempt_id)
-            attempt = ledger.get_attempt(attempt_id)
-            if attempt["state"] != "active" or not attempt["pod_id"]:
-                raise ExecutionError(FailureCategory.CONFIGURATION, "attempt_not_active")
-            policy = ledger.project_policy_for_attempt(attempt_id)
-            profile, region = ledger.selected_resource_for_attempt(attempt_id)
-            endpoint = ProviderAdapter(client).get_attempt_direct_ssh(
-                attempt["pod_id"], attempt["pod_name"], policy,
-                resource_profile=profile, selected_region=region)
+            target = resolve_store_ssh_context(client, ledger, attempt_id, project_id)
+            endpoint = target.endpoint
             host, port, username = endpoint.host, endpoint.port, endpoint.username
         else:
             attempt = ledger.get(attempt_id)

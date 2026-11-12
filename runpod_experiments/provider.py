@@ -169,8 +169,13 @@ class ProviderAdapter:
 
     def get_attempt_direct_ssh(self, pod_id: str, pod_name: str, policy: ProjectPolicy, *,
                                resource_profile: ResourceProfile,
-                               selected_region: str) -> DirectSSHEndpoint:
+                               selected_region: str,
+                               expected_ports: tuple[str, ...]) -> DirectSSHEndpoint:
         """Return a direct endpoint only after exact live resource-shape checks."""
+        if (not isinstance(expected_ports, tuple) or not expected_ports or
+                any(not isinstance(port, str) for port in expected_ports) or
+                len(expected_ports) != len(set(expected_ports))):
+            raise ContractError("expected_ports must be a non-empty immutable tuple")
         raw, observation = self._read_attempt_detail(
             pod_id, pod_name, policy, resource_profile=resource_profile,
             selected_region=selected_region)
@@ -179,6 +184,11 @@ class ProviderAdapter:
         if observation.resource_violation is not None:
             raise ExecutionError(FailureCategory.RESOURCE_MISMATCH,
                                  "attempt_resource_shape_unverified")
+        ports = raw.get("ports")
+        if (not isinstance(ports, list) or any(not isinstance(port, str) for port in ports) or
+                len(ports) != len(set(ports)) or set(ports) != set(expected_ports)):
+            raise ExecutionError(FailureCategory.RESOURCE_MISMATCH,
+                                 "attempt_ports_unverified")
         ssh = raw.get("ssh")
         direct = ssh.get("direct") if isinstance(ssh, dict) else None
         if not isinstance(direct, dict):
