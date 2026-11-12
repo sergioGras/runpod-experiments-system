@@ -7,6 +7,10 @@ from pathlib import Path, PurePosixPath
 
 from runpod_experiments.binary_process import BinaryProcess
 from runpod_experiments.attempts import AttemptError
+from runpod_experiments.contracts import FailureCategory
+from runpod_experiments.errors import ExecutionError
+from runpod_experiments.execution_store import ExecutionStore
+from runpod_experiments.provider import ProviderAdapter
 from runpod_experiments.ssh import SSHFetcher
 
 
@@ -22,18 +26,35 @@ class SSHInteractiveProcess(BinaryProcess):
     def __init__(self, client, ledger, attempt_id, project_id, key_file, known_hosts,
                  remote_root, script, arguments, timeout_seconds, log_path, *,
                  popen=subprocess.Popen, output_chunk_bytes=65536, queued_chunks=32):
-        attempt = ledger.get(attempt_id)
-        if attempt["project_id"] != project_id or attempt["state"] != "active" or not attempt["pod_id"]:
-            raise AttemptError("No active attempt in this project")
-        pod = client.pod(attempt["pod_id"])
-        if (pod.get("id") != attempt["pod_id"] or pod.get("name") != attempt["pod_name"] or
-                pod.get("status") != "RUNNING"):
-            raise AttemptError("Pod identity mismatch before interactive SSH")
-        ssh = pod.get("ssh")
-        endpoint = ssh.get("direct") if isinstance(ssh, dict) else None
-        if not isinstance(endpoint, dict):
-            raise AttemptError("Direct SSH endpoint not available")
-        connection = SSHFetcher(endpoint.get("host"), endpoint.get("port"), endpoint.get("username"),
+        if isinstance(ledger, ExecutionStore):
+            if ledger.project_id != project_id:
+                raise ExecutionError(FailureCategory.AUTHORIZATION, "attempt_outside_project")
+            ledger.verify_attempt_lifecycle_projection(attempt_id)
+            attempt = ledger.get_attempt(attempt_id)
+            if attempt["state"] != "active" or not attempt["pod_id"]:
+                raise ExecutionError(FailureCategory.CONFIGURATION, "attempt_not_active")
+            policy = ledger.project_policy_for_attempt(attempt_id)
+            profile, region = ledger.selected_resource_for_attempt(attempt_id)
+            endpoint = ProviderAdapter(client).get_attempt_direct_ssh(
+                attempt["pod_id"], attempt["pod_name"], policy,
+                resource_profile=profile, selected_region=region)
+            host, port, username = endpoint.host, endpoint.port, endpoint.username
+        else:
+            attempt = ledger.get(attempt_id)
+            if (attempt["project_id"] != project_id or attempt["state"] != "active" or
+                    not attempt["pod_id"]):
+                raise AttemptError("No active attempt in this project")
+            pod = client.pod(attempt["pod_id"])
+            if (pod.get("id") != attempt["pod_id"] or pod.get("name") != attempt["pod_name"] or
+                    pod.get("status") != "RUNNING"):
+                raise AttemptError("Pod identity mismatch before interactive SSH")
+            ssh = pod.get("ssh")
+            endpoint = ssh.get("direct") if isinstance(ssh, dict) else None
+            if not isinstance(endpoint, dict):
+                raise AttemptError("Direct SSH endpoint not available")
+            host, port, username = (endpoint.get("host"), endpoint.get("port"),
+                                    endpoint.get("username"))
+        connection = SSHFetcher(host, port, username,
                                 key_file, known_hosts, remote_root)
         if (not isinstance(script, str) or not script or "\\" in script or "\x00" in script or
                 PurePosixPath(script).is_absolute() or ".." in PurePosixPath(script).parts or

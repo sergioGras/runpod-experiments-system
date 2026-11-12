@@ -1,4 +1,5 @@
 import base64
+import io
 import json
 from pathlib import Path
 import struct
@@ -14,6 +15,7 @@ from runpod_experiments.contracts import (
 from runpod_experiments.create_spec import pod_create_request_sha256
 from runpod_experiments.errors import ExecutionError
 from runpod_experiments.execution_store import ExecutionStore
+from runpod_experiments.interactive_ssh import SSHInteractiveProcess
 from runpod_experiments.ssh import ssh_public_key_fingerprint
 from runpod_experiments.state_config import StateStoreConfig
 from runpod_experiments.store_create import StoreCreateController
@@ -34,12 +36,18 @@ class FakeCreateClient:
         self.create_error = None
         self.response = None
         self.gpu_queries = []
+        self.detail = None
 
     def pods(self):
         return [dict(item) for item in self.inventory]
 
     def ssh_key_fingerprints(self):
         return frozenset(self.keys)
+
+    def pod(self, pod_id):
+        if not isinstance(self.detail, dict) or self.detail.get("id") != pod_id:
+            raise AssertionError("unexpected fake Pod detail request")
+        return dict(self.detail)
 
     def cpu_offer(self, resource_id, vcpu_count):
         self.assertions = (resource_id, vcpu_count)
@@ -238,6 +246,65 @@ class StoreCreateControllerTests(unittest.TestCase):
             "id": "NVIDIA A40", "count": 1, "minRamPerGpu": 32,
             "minVcpuCountPerGpu": 8, "minCudaVersion": "12.4",
         })
+
+    def test_store_backed_interactive_ssh_checks_live_resource_before_launch(self):
+        receipt = self.create()
+        self.client.detail = {
+            "id": receipt.pod_id, "name": receipt.pod_name, "status": "RUNNING",
+            "cost": 0.3, "cloud": "SECURE", "disk": 20, "dataCenterId": REGION,
+            "image": "runpod/base@sha256:" + ZERO, "mounts": {},
+            "cpu": {"id": "cpu-small", "vcpuCount": 4, "memory": 8},
+            "ports": ["22/tcp"],
+            "ssh": {"direct": {"host": "127.0.0.1", "port": 2222, "username": "root"}},
+        }
+        known_hosts = self.root / "known_hosts"
+        known_hosts.write_text("[127.0.0.1]:2222 ssh-ed25519 fixture\n", encoding="utf-8")
+        private_key = self.root / "id_ed25519"
+        private_key.write_bytes(b"private-key-fixture")
+        started = {}
+
+        class PipeProcess:
+            def __init__(self, argv, kwargs):
+                started.update(argv=argv, kwargs=kwargs)
+                self.stdin = io.BytesIO()
+                self.stdout = io.BytesIO(b"response")
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                self.returncode = 0
+                return 0
+
+            def terminate(self):
+                self.returncode = -15
+
+            def kill(self):
+                self.returncode = -9
+
+        def popen(argv, **kwargs):
+            return PipeProcess(argv, kwargs)
+
+        session = SSHInteractiveProcess(
+            self.client, self.store, self.attempt["attempt_id"], self.project.project_id,
+            private_key, known_hosts, "/tmp/nebula", "worker.py", ["--serve"], 60,
+            self.root / "ssh.log", popen=popen)
+        try:
+            self.assertEqual(session.receive(8, 1), b"response")
+            self.assertIn("StrictHostKeyChecking=yes", started["argv"])
+            self.assertIn("root@127.0.0.1", started["argv"])
+        finally:
+            session.terminate()
+
+        self.client.detail["cpu"]["vcpuCount"] = 8
+        with self.assertRaises(ExecutionError) as caught:
+            SSHInteractiveProcess(
+                self.client, self.store, self.attempt["attempt_id"], self.project.project_id,
+                private_key, known_hosts, "/tmp/nebula", "worker.py", [], 60,
+                self.root / "ssh-mismatch.log",
+                popen=lambda *_args, **_kwargs: self.fail("mismatched Pod must not launch SSH"))
+        self.assertEqual(caught.exception.code, "attempt_resource_shape_unverified")
 
     def test_missing_region_or_changed_quote_blocks_create(self):
         self.client.cpu_offer = lambda *_args: {

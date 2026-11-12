@@ -20,6 +20,8 @@ from runpod_experiments.resource_policy import resource_profile_violation
 
 _POD_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 _STATUS = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z")
+_SSH_HOST = re.compile(r"[A-Za-z0-9.:-]{1,255}\Z")
+_SSH_USERNAME = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,63}\Z")
 
 
 class ReadOnlyProvider(Protocol):
@@ -60,6 +62,22 @@ class PodObservation:
                 (not isinstance(self.resource_violation, str) or
                  re.fullmatch(r"[a-z][a-z0-9_]{0,63}", self.resource_violation) is None)):
             raise ContractError("provider Pod resource violation is malformed")
+
+
+@dataclass(frozen=True, slots=True)
+class DirectSSHEndpoint:
+    """Validated direct SSH coordinates; no raw provider record is retained."""
+
+    host: str
+    port: int
+    username: str
+
+    def __post_init__(self) -> None:
+        if (not isinstance(self.host, str) or _SSH_HOST.fullmatch(self.host) is None or
+                self.host.startswith("-") or type(self.port) is not int or
+                not 1 <= self.port <= 65535 or not isinstance(self.username, str) or
+                _SSH_USERNAME.fullmatch(self.username) is None):
+            raise ContractError("direct SSH endpoint is malformed")
 
 
 class ProviderAdapter:
@@ -103,10 +121,9 @@ class ProviderAdapter:
                      if any(item.name.startswith(prefix) and len(item.name) > len(prefix)
                             for prefix in policy.pod_name_prefixes))
 
-    def get_attempt_pod(self, pod_id: str, pod_name: str, policy: ProjectPolicy, *,
-                        resource_profile: ResourceProfile | None = None,
-                        selected_region: str | None = None) -> PodObservation:
-        """Read one candidate and require its live ID/name/project identity to agree."""
+    def _read_attempt_detail(self, pod_id: str, pod_name: str, policy: ProjectPolicy, *,
+                             resource_profile: ResourceProfile | None = None,
+                             selected_region: str | None = None) -> tuple[dict, PodObservation]:
         if not isinstance(policy, ProjectPolicy):
             raise ContractError("policy must be a ProjectPolicy")
         if (not isinstance(pod_name, str) or not any(
@@ -139,7 +156,40 @@ class ProviderAdapter:
                         for prefix in policy.pod_name_prefixes)):
             raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
                                  "attempt_identity_mismatch")
+        return raw, observation
+
+    def get_attempt_pod(self, pod_id: str, pod_name: str, policy: ProjectPolicy, *,
+                        resource_profile: ResourceProfile | None = None,
+                        selected_region: str | None = None) -> PodObservation:
+        """Read one candidate and require its live ID/name/project identity to agree."""
+        _, observation = self._read_attempt_detail(
+            pod_id, pod_name, policy, resource_profile=resource_profile,
+            selected_region=selected_region)
         return observation
+
+    def get_attempt_direct_ssh(self, pod_id: str, pod_name: str, policy: ProjectPolicy, *,
+                               resource_profile: ResourceProfile,
+                               selected_region: str) -> DirectSSHEndpoint:
+        """Return a direct endpoint only after exact live resource-shape checks."""
+        raw, observation = self._read_attempt_detail(
+            pod_id, pod_name, policy, resource_profile=resource_profile,
+            selected_region=selected_region)
+        if observation.status != "RUNNING":
+            raise ExecutionError(FailureCategory.TRANSIENT_READ, "attempt_pod_not_running")
+        if observation.resource_violation is not None:
+            raise ExecutionError(FailureCategory.RESOURCE_MISMATCH,
+                                 "attempt_resource_shape_unverified")
+        ssh = raw.get("ssh")
+        direct = ssh.get("direct") if isinstance(ssh, dict) else None
+        if not isinstance(direct, dict):
+            raise ExecutionError(FailureCategory.TRANSPORT_FAILURE,
+                                 "direct_ssh_endpoint_unavailable")
+        try:
+            return DirectSSHEndpoint(direct.get("host"), direct.get("port"),
+                                     direct.get("username"))
+        except ContractError:
+            raise ExecutionError(FailureCategory.RESOURCE_MISMATCH,
+                                 "direct_ssh_endpoint_invalid") from None
 
     def quote_cpu(self, resource_id: str, vcpu_count: int, *, observed_epoch: int,
                   storage_hourly_usd: str | int | float = "0") -> QuoteObservation:
