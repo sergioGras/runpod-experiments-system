@@ -16,7 +16,7 @@ from typing import Any, Iterator
 
 from runpod_experiments.contracts import (
     ApprovalScope, AttemptPlan, BillingObservation, ContractError, ExecutionPlan,
-    FailureCategory,
+    FailureCategory, ProjectPolicy,
     canonical_json_bytes, decode_document, encode_document, sha256_bytes,
     strict_json_loads, validate_attempt,
 )
@@ -797,6 +797,57 @@ class ExecutionStore:
         if row is None:
             raise ExecutionError(FailureCategory.CONFIGURATION, "unknown_attempt")
         return dict(row)
+
+    def project_policy_for_attempt(self, attempt_id: str) -> ProjectPolicy:
+        """Reconstruct the approved project policy bound to one stored attempt."""
+        self.verify_attempt_lifecycle_projection(attempt_id)
+        with closing(self._connect()) as db:
+            row = db.execute("""SELECT a.project_id,a.plan_sha256,p.document AS plan_document,
+                    s.document AS approval_document,s.scope_sha256,s.policy_sha256
+                FROM execution_attempts a
+                JOIN execution_plans p ON p.plan_sha256=a.plan_sha256
+                JOIN execution_approvals s
+                  ON s.project_id=a.project_id AND s.approval_id=a.approval_id
+                WHERE a.attempt_id=? AND a.project_id=?""",
+                (attempt_id, self.project_id)).fetchone()
+        if row is None:
+            raise ExecutionError(FailureCategory.CONFIGURATION, "unknown_attempt")
+        try:
+            plan_bytes = bytes(row["plan_document"])
+            approval_bytes = bytes(row["approval_document"])
+            if (sha256_bytes(plan_bytes) != row["plan_sha256"] or
+                    sha256_bytes(approval_bytes) != row["scope_sha256"]):
+                raise ContractError("stored execution documents do not match their digests")
+            plan_payload = decode_document(plan_bytes, expected_kind="execution_plan")
+            approval_payload = decode_document(approval_bytes, expected_kind="approval_scope")
+            project_payload = plan_payload.get("project")
+            required = {
+                "project_id", "pod_name_prefixes", "namespace_registry_sha256",
+                "controller_hosts", "max_active_resources", "schema_version",
+            }
+            if not isinstance(project_payload, dict) or set(project_payload) != required:
+                raise ContractError("stored project policy is malformed")
+            policy = ProjectPolicy(
+                project_id=project_payload["project_id"],
+                pod_name_prefixes=tuple(project_payload["pod_name_prefixes"]),
+                namespace_registry_sha256=project_payload["namespace_registry_sha256"],
+                controller_hosts=tuple(project_payload["controller_hosts"]),
+                max_active_resources=project_payload["max_active_resources"],
+                schema_version=project_payload["schema_version"],
+            )
+            if (sha256_bytes(encode_document("project_policy", policy)) != row["policy_sha256"] or
+                    approval_payload.get("project_policy_sha256") != row["policy_sha256"] or
+                    approval_payload.get("project_id") != row["project_id"] or
+                    plan_payload.get("approval") != approval_payload):
+                raise ContractError("stored project policy is not bound to its approval")
+        except (ContractError, KeyError, TypeError):
+            raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                 "project_policy_malformed") from None
+        if (policy.project_id != row["project_id"] or
+                self.controller_host not in policy.controller_hosts or
+                approval_payload.get("controller_host") != self.controller_host):
+            raise ExecutionError(FailureCategory.AUTHORIZATION, "controller_host_not_approved")
+        return policy
 
     def verify_attempt_lifecycle_projection(self, attempt_id: str) -> bool:
         """Check mutable lifecycle state against the authenticated event history.

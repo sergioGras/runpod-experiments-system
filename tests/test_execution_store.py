@@ -16,7 +16,9 @@ from runpod_experiments.contracts import (
 )
 from runpod_experiments.errors import ExecutionError
 from runpod_experiments.execution_store import ExecutionStore
+from runpod_experiments.ownership import request_delete_for_store_attempt
 from runpod_experiments.provider import ProviderAdapter
+from runpod_experiments.runpod import ProviderError
 
 
 ZERO = "0" * 64
@@ -169,6 +171,65 @@ class ExecutionStoreTests(unittest.TestCase):
         with self.assertRaises(ExecutionError) as caught:
             self.store.verify_attempt_lifecycle_projection(attempt.attempt_id)
         self.assertEqual(caught.exception.code, "attempt_projection_mismatch")
+
+    def test_store_backed_delete_requires_stopping_state_and_exact_live_identity(self):
+        attempt, _ = self.reserve()
+        self.assertEqual(self.store.project_policy_for_attempt(attempt.attempt_id),
+                         self.plan.project)
+        self.store.claim_create(attempt.attempt_id)
+        self.store.bind_pod(attempt.attempt_id, "pod-1", pod_name(1))
+
+        class Provider:
+            def __init__(self):
+                self.detail = {"id": "pod-1", "name": "nebula-other", "status": "RUNNING"}
+                self.delete_calls = []
+                self.delete_error = None
+
+            def pod(self, pod_id):
+                if self.detail["id"] != pod_id:
+                    raise ProviderError("missing", status=404)
+                return dict(self.detail)
+
+            def _delete_pod(self, pod_id):
+                self.delete_calls.append(pod_id)
+                if self.delete_error is not None:
+                    raise self.delete_error
+
+        provider = Provider()
+        with self.assertRaises(ExecutionError) as caught:
+            request_delete_for_store_attempt(
+                provider, self.store, attempt.attempt_id,
+                self.plan.project.project_id)
+        self.assertEqual(caught.exception.code, "attempt_not_stoppable")
+        self.store.request_stop(attempt.attempt_id)
+        with self.assertRaises(ExecutionError) as caught:
+            request_delete_for_store_attempt(
+                provider, self.store, attempt.attempt_id,
+                self.plan.project.project_id)
+        self.assertEqual(caught.exception.code, "attempt_identity_mismatch")
+        self.assertEqual(provider.delete_calls, [])
+
+        provider.detail["name"] = pod_name(1)
+        self.assertEqual(request_delete_for_store_attempt(
+            provider, self.store, attempt.attempt_id,
+            self.plan.project.project_id), "delete_requested")
+        self.assertEqual(provider.delete_calls, ["pod-1"])
+        self.assertEqual(self.store.get_attempt(attempt.attempt_id)["state"], "stopping")
+
+        provider.detail["status"] = "TERMINATED"
+        self.assertEqual(request_delete_for_store_attempt(
+            provider, self.store, attempt.attempt_id,
+            self.plan.project.project_id), "already_terminated")
+        self.assertEqual(provider.delete_calls, ["pod-1"])
+
+        provider.detail["status"] = "RUNNING"
+        provider.delete_error = ProviderError("private provider text", status=503)
+        with self.assertRaises(ExecutionError) as caught:
+            request_delete_for_store_attempt(
+                provider, self.store, attempt.attempt_id,
+                self.plan.project.project_id)
+        self.assertEqual(caught.exception.code, "http_503")
+        self.assertEqual(caught.exception.category, FailureCategory.AMBIGUOUS_OPERATION)
 
     def test_cancel_releases_only_an_unclaimed_reservation(self):
         attempt, exposure = self.reserve()

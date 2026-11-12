@@ -205,7 +205,7 @@ scoped project/host identity; ambiguous create/stop reconciliation; immutable
 evidence rows; billing adjustments; and an end-to-end fake path from normalized
 provider billing through transactional accounting. Each crash case reopened the
 store and verified unchanged attempt/accounting state and event chain. On Windows
-with Python 3.12.10, all 21 focused store tests and all 115 library tests passed.
+with Python 3.12.10, all 22 focused store tests and all 116 library tests passed.
 Over-cap posted billing remains recorded, and further admission is denied; the
 aggregate also remains exact when individually valid charges sum above SQLite's
 integer limit. Direct mutations of the mutable Pod/state projection are rejected
@@ -235,10 +235,13 @@ must not authorize a different resource or be reported as successful termination
 The current M4 code still uses the legacy `AttemptLedger` and file-backed
 `ResourcePolicy`; M3's `ExecutionStore` is not its source of lifecycle truth.
 `ProviderAdapter` deliberately exposes read-only operations, while cleanup
-mutations remain behind the existing ownership guard. Add a store-backed
-supervisor/monitor and a narrowly scoped mutation adapter alongside the legacy
-path. Do not mix the two ledgers for one attempt or run both controllers against
-the same job. Cut over only after restart, ambiguous-create reconciliation,
+mutations remain behind the existing ownership guard. The additive
+`request_delete_for_store_attempt()` primitive verifies the lifecycle projection,
+derives project scope from the hash-verified plan and approval documents,
+requires a latched stopping state and exact live project/Pod identity, and does
+not record termination. A store-backed supervisor/monitor is still required.
+Do not mix the two ledgers for one attempt or run both controllers against the
+same job. Cut over only after restart, ambiguous-create reconciliation,
 exact-Pod deletion and confirmed-absence conformance tests pass.
 
 ## M5 and M6: transport, workload execution and retries
