@@ -299,6 +299,31 @@ class ExecutionStoreTests(unittest.TestCase):
             self.reserve(number=2)
         self.assertEqual(caught.exception.code, "total_cap_exceeded")
 
+    def test_accounting_aggregates_can_exceed_sqlite_integer_range(self):
+        from runpod_experiments.execution_store import SQLITE_MAX_INTEGER
+
+        plan = plan_for(self.now, max_slots=1)
+        attempts = []
+        for number in (1, 2):
+            attempt, _ = self.reserve(number, plan=plan)
+            self.activate_and_terminate(attempt, number)
+            attempts.append((number, attempt))
+        for number, attempt in attempts:
+            observation = BillingObservation(
+                f"bill-large-{number}", plan.project.project_id,
+                attempt.attempt_id, f"pod-{number}", SQLITE_MAX_INTEGER - 1,
+                self.now - 1, self.now + 1, self.now + 2,
+                str(number) * 64)
+            self.store.record_billing_observation(observation)
+
+        snapshot = self.store.accounting_snapshot(
+            plan.project.project_id, plan.approval.approval_id)
+        expected = 2 * (SQLITE_MAX_INTEGER - 1)
+        self.assertEqual(snapshot.billed_micro_usd, expected)
+        self.assertEqual(snapshot.committed_micro_usd,
+                         expected + 2 * 105_000)
+        self.assertEqual(snapshot.remaining_micro_usd, 0)
+
     def test_billing_adjustments_replace_prior_amount_and_reopen_hold(self):
         attempt, exposure = self.reserve()
         self.activate_and_terminate(attempt)

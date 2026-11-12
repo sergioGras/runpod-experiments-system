@@ -183,6 +183,11 @@ reconciled exact scoped provider inventory. The local hash chain is not tamper-p
 against a party that can rewrite the database, and it does not authenticate a
 caller-supplied billing or provider-reconciliation claim.
 
+Each persisted charge is bounded to SQLite's signed integer range, while
+aggregated costs use Python's arbitrary-precision integers. This preserves the
+full sum when actual posted charges exceed an approved cap or the database
+integer range; admission then remains closed because remaining budget is zero.
+
 The store tests cover restart/reopen across reservation, claim, binding, stop
 and settlement; one-use claims and idempotent local retries; project and approval
 admission caps; fresh-database plus last-budget and last-slot process races;
@@ -195,8 +200,10 @@ scoped project/host identity; ambiguous create/stop reconciliation; immutable
 evidence rows; billing adjustments; and an end-to-end fake path from normalized
 provider billing through transactional accounting. Each crash case reopened the
 store and verified unchanged attempt/accounting state and event chain. On Windows
-with Python 3.12.10, all 18 focused store tests and all 112 library tests passed.
-Over-cap posted billing remains recorded, and further admission is denied.
+with Python 3.12.10, all 19 focused store tests and all 113 library tests passed.
+Over-cap posted billing remains recorded, and further admission is denied; the
+aggregate also remains exact when individually valid charges sum above SQLite's
+integer limit.
 Three state-configuration tests passed; one symlink test was skipped because
 this Windows host does not permit directory symlink creation. These runs used local
 temporary databases and fake/local fixtures; no RunPod credentials, account

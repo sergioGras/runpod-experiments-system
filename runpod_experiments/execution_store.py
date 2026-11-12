@@ -317,10 +317,10 @@ class ExecutionStore:
 
     @staticmethod
     def _sum(values: list[int]) -> int:
-        total = sum(values)
-        if total > SQLITE_MAX_INTEGER:
-            raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED, "accounting_overflow")
-        return total
+        # Persisted values are individually bounded by SQLite's integer range,
+        # but actual posted charges can exceed an approved total across rows.
+        # Python integers preserve that aggregate so over-cap costs remain visible.
+        return sum(values)
 
     @staticmethod
     def _append_event(db: sqlite3.Connection, entity_type: str, entity_id: str,
