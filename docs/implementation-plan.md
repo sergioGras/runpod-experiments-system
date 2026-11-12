@@ -65,7 +65,7 @@ credential discovery, including child processes. Define stage/event schemas and
 redacted operational evidence. Include a fourth synthetic project to ensure the
 engine does not embed the three current project names or special-case their IDs.
 
-M1 implementation currently adds frozen schema-v1 contract records and stage
+M1 implementation currently adds frozen schema-v2 contract records and stage
 events, canonical UTF-8 JSON envelope helpers (sorted keys, compact form, one
 MiB maximum), duplicate-key/nonfinite rejection, typed failure categories, an
 opt-in test-mode provider guard, and synthetic fixtures. Approval scopes bind
@@ -102,19 +102,24 @@ safe category/code values; generic HTTP
 errors never prove capacity rejection, and mutation errors remain ambiguous.
 `QuoteObservation` stores compute and storage estimates separately, with
 microdollar rounding upward and a hash of the source response. The read-only
-adapter now parses exact-Pod billing into immutable `BillingObservation` records.
-It requires an attempt's bounded start/end interval, calls the documented REST
-v1 `/billing/pods` operation with `grouping=podId`, and uses its `amount`,
-`podId` and bucket-start `time` fields. Bucket ends are derived from the requested
-bucket size because the published response schema has no end field. Rows outside
-the requested interval and overlapping buckets fail closed. Amounts round upward
-to microdollars; raw billing rows are not retained; empty responses produce no
-observation and cannot settle a hold. Adjustments require the caller to link the
-exact superseded row. See the official
-[RunPod REST v1 OpenAPI](https://github.com/runpod/docs/blob/main/api-reference/openapi.json)
-for the endpoint and schema. The response contract differs from the v2-shaped
-draft method on the main checkout, so this branch uses the documented v1 contract
-and does not claim the draft v2 response is validated.
+adapter parses exact-Pod billing into immutable `BillingObservation` records
+through REST v2. It requires an attempt's bounded start/end interval, calls
+`GET /v2/billing/pods` with `podId` and `bucketSize`, and validates response query
+metadata, record count, Pod identity, explicit period bounds and `totalAmount`.
+The provider may snap query bounds out to full buckets; the returned metadata
+must cover the requested interval and each billed row must overlap it. Amounts
+round upward to microdollars; the complete response is hashed, raw billing rows
+are not retained, and empty responses produce no observation and cannot settle a
+hold. Adjustments require the caller to link the exact superseded row. The
+request and response follow the official
+[REST v2 billing reference](https://docs.runpod.io/api-reference-v2/billing/get-pod-billing-history).
+The create-request builder follows the documented
+[REST v2 Pod creation schema](https://docs.runpod.io/api-reference-v2/pods/create-a-pod).
+As of 2026-11-12, RunPod's official
+[migration guide](https://docs.runpod.io/api-reference-v2/migrate-from-v1)
+says REST v1 is scheduled to retire on 2026-11-15; this branch now uses v2 for
+both Pod and billing reads. This is schema review and synthetic testing only,
+not live account qualification.
 
 The new billing parser and transport path have synthetic coverage, but no
 provider account was queried. M2 remains open pending permitted account-level
@@ -156,7 +161,7 @@ and Windows ACL before using it for live state.
 ### Current M3 slice (internal and unreleased)
 
 `runpod_experiments.execution_store.ExecutionStore` currently supplies a
-schema-v2 SQLite ledger for one project on one configured controller host. It
+schema-v3 SQLite ledger for one project on one configured controller host. It
 canonicalizes the database path and immutably binds the store to the supplied
 project and host identities. `StateStoreConfig` provides the path formula and
 explicit configuration inputs, while deployment still must set the same root in
@@ -245,8 +250,10 @@ before recording create absence or termination. Its observation count is
 intentionally in-memory, so restart repeats checks conservatively. It reconstructs
 the selected resource profile from the hash-verified attempt and plan, and checks
 live Pod identity, selected region, CPU shape, image digest, disk, mounts, status
-and hourly rate. GPU identity/count/VRAM are checked, but GPU profiles fail closed
-until the system-memory and CUDA telemetry contract is qualified.
+and hourly rate. For GPU profiles the v2 response's `gpu.memory` is treated as
+host system RAM, and the monitor checks ID/count, total vCPU and system-memory
+minima plus the CUDA floor. It still fails closed because Pod detail does not
+expose per-card VRAM and that runtime evidence is not independently collected.
 `launch_execution_store()` validates the existing state root/host/attempt, derives
 the deadline from durable state and starts this monitor in a separate process.
 The supervisor state records the hash of the exact attempt plan for future
@@ -280,6 +287,39 @@ requests cleanup. Retry eligibility is based on typed failure, reconciled state,
 remaining scope/capacity/budget and finite policy. Restart can recover verified
 results without creating a new resource. Operational failure and scientific
 failure both retain permitted evidence and independent cleanup.
+
+### Create-contract prerequisite (implemented; controller remains open)
+
+The current planning slice advances the canonical contract envelope to v2 and
+the local execution-store schema to v3. `ExecutionPlan` now carries a typed,
+non-secret `PodProvisioningSpec` with a digest-pinned image, explicit ports and
+reviewed Secure/SSH settings. CPU request payloads include the selected flavor
+and vCPU count. GPU payloads express per-GPU host RAM/vCPU minima derived from
+the total Pod profile and bind the requested CUDA floor; VRAM remains a separate
+profile requirement because the provider's Pod detail reports host RAM there.
+Each `AttemptPlan` carries the exact normalized
+`QuoteObservation`, whose digest, selected resource, units, hourly total and
+region are checked together. Reservation rebuilds the allowlisted CPU/GPU Pod
+request from those immutable records and rejects a request digest mismatch
+before writing any reservation. The store can rebuild that same request after
+restart only after verifying its stored documents and lifecycle projection.
+
+This is a breaking internal schema change. Existing non-empty contract documents
+and store databases are not migrated; the store refuses any non-current schema.
+The create controller, provider payload qualification, quote freshness policy,
+GPU runtime conformance and secret delivery remain open. No provider call is
+made by this slice. The request contract deliberately has no arbitrary fields,
+mounts or secret values; extensions require an explicit schema change and tests.
+
+On Windows with Python 3.12.14, the full offline suite passed 131 tests with one
+directory-symlink capability skip. The updated billing/provider adapter suites
+passed 11 connection tests and 19 provider tests. A clean no-dependency install
+of the candidate wheel (SHA-256
+`d3de528335d70b3d313f7058d985a53a141330b3d4b7aa3b2e81d866f03d1db3`) imported
+the v2 contract and store schema and rebuilt a GPU create body with per-GPU host
+RAM/vCPU minima and the CUDA floor. The full suite also covers CPU reconstruction
+from a reopened store. These were local synthetic checks only; no RunPod
+credentials, account endpoints or resources were used.
 
 ## Consumer migrations
 

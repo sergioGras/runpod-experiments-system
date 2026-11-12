@@ -8,7 +8,8 @@ from unittest.mock import patch
 
 from runpod_experiments.contracts import (
     ApprovalScope, AttemptPlan, BillingObservation, BillingStatus, CleanupStatus, ContractError,
-    ExecutionOutcome, ExecutionPlan, FailureCategory, ManifestFile,
+    ExecutionOutcome, ExecutionPlan, FailureCategory, ManifestFile, PodProvisioningSpec,
+    QuoteObservation,
     OperationalStatus, ProjectPolicy, ResourceKind, ResourceProfile,
     RetryPolicy, SCHEMA_VERSION, ScientificVerdict, StageEvent, StageStatus, TransferDirection,
     TransferManifest, canonical_json_bytes, decode_document, encode_document,
@@ -58,6 +59,8 @@ def execution_plan(**changes):
     fields = dict(job_id="hello-job", project=project, approval=approval(project),
                   source_commit=COMMIT, source_sha256=ZERO, config_sha256=ONE,
                   package_sha256="2" * 64, resource_options=(cpu_profile(),),
+                  provisioning=PodProvisioningSpec("runpod/base@" + cpu_profile().image_digest,
+                                                  ("22/tcp",)),
                   transfers=TransferManifest((), 1024, 4096),
                   retry=RetryPolicy(2, 3600,
                                     (FailureCategory.TRANSIENT_READ,
@@ -69,9 +72,14 @@ def execution_plan(**changes):
 def attempt(plan=None, **changes):
     plan = plan or execution_plan()
     resource = plan.resource_options[0]
+    quote = QuoteObservation(resource.kind, resource.resource_id, resource.cpu_count,
+                             resource.cpu_count, resource.hourly_micro_usd, 0, True,
+                             resource.region_ids, 1_900_000_000, ONE)
     fields = dict(attempt_id="attempt-001", job_id=plan.job_id,
                   approval_id=plan.approval.approval_id, attempt_number=1,
-                  request_sha256=ZERO, quote_sha256=ONE,
+                  request_sha256=ZERO,
+                  quote_sha256=sha256_bytes(encode_document("quote_observation", quote)),
+                  selected_quote=quote,
                   policy_sha256=sha256_bytes(encode_document("project_policy", plan.project)),
                   source_sha256=plan.source_sha256, config_sha256=plan.config_sha256,
                   package_sha256=plan.package_sha256,
@@ -135,6 +143,23 @@ class ResourceAndTransferContracts(unittest.TestCase):
 
 
 class ExecutionContractTests(unittest.TestCase):
+    def test_provisioning_image_is_pinned_and_has_no_url_scheme(self):
+        digest = cpu_profile().image_digest
+        image_ref = "registry.example/team/base@" + digest
+        self.assertEqual(PodProvisioningSpec(image_ref, ("22/tcp",)).image_ref, image_ref)
+        for invalid in (
+                "https://registry.example/team/base@" + digest,
+                "registry.example/team/base:latest",
+                "registry.example/team/base@sha256:" + "z" * 64,
+                "user:password@registry.example/team/base@" + digest):
+            with self.subTest(image_ref=invalid), self.assertRaises(ContractError):
+                PodProvisioningSpec(invalid, ("22/tcp",))
+
+    def test_plan_requires_provisioning_digest_to_match_every_resource(self):
+        with self.assertRaises(ContractError):
+            execution_plan(provisioning=PodProvisioningSpec(
+                "runpod/base@sha256:" + "f" * 64, ("22/tcp",)))
+
     def test_plan_binds_project_approval_and_hourly_limits(self):
         self.assertEqual(execution_plan().approval.project_id, "synthetic-nebula")
         with self.assertRaises(ContractError):
@@ -165,6 +190,34 @@ class ExecutionContractTests(unittest.TestCase):
         self.assertEqual(item.attempt_number, 1)
         with self.assertRaises(ContractError):
             attempt(attempt_number=0)
+
+    def test_attempt_requires_matching_persisted_quote(self):
+        plan = execution_plan()
+        item = attempt(plan)
+        validate_attempt(plan, item)
+        with self.assertRaises(ContractError):
+            validate_attempt(plan, attempt(plan, quote_sha256=ZERO))
+        other = QuoteObservation(ResourceKind.CPU, "cpu-other", 4, 4,
+                                 item.selected_resource.hourly_micro_usd, 0, True,
+                                 item.selected_resource.region_ids, item.created_epoch, ONE)
+        with self.assertRaises(ContractError):
+            validate_attempt(plan, attempt(
+                plan, selected_quote=other,
+                quote_sha256=sha256_bytes(encode_document("quote_observation", other))))
+        future = QuoteObservation(ResourceKind.CPU, item.selected_resource.resource_id,
+                                 4, 4, item.selected_resource.hourly_micro_usd, 0, True,
+                                 item.selected_resource.region_ids, item.created_epoch + 1, ONE)
+        with self.assertRaises(ContractError):
+            validate_attempt(plan, attempt(
+                plan, selected_quote=future,
+                quote_sha256=sha256_bytes(encode_document("quote_observation", future))))
+        region_mismatch = QuoteObservation(
+            ResourceKind.CPU, item.selected_resource.resource_id, 4, 4,
+            item.selected_resource.hourly_micro_usd, 0, True, (), item.created_epoch, ONE)
+        with self.assertRaises(ContractError):
+            validate_attempt(plan, attempt(
+                plan, selected_quote=region_mismatch,
+                quote_sha256=sha256_bytes(encode_document("quote_observation", region_mismatch))))
 
     def test_attempt_must_remain_within_plan_approval_and_provenance(self):
         plan = execution_plan()
@@ -263,7 +316,7 @@ class CanonicalDocumentTests(unittest.TestCase):
         with self.assertRaises(ContractError):
             strict_json_loads(b" " * 1_048_577)
         with self.assertRaises(ContractError):
-            decode_document('{"kind":"execution_plan","payload":{},"schema_version":2}',
+            decode_document('{"kind":"execution_plan","payload":{},"schema_version":3}',
                             expected_kind="execution_plan")
         with self.assertRaises(ContractError):
             decode_document('{"kind":"other","payload":{},"schema_version":1}',

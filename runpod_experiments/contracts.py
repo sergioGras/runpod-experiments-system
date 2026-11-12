@@ -15,7 +15,7 @@ import re
 from typing import Any
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_DOCUMENT_BYTES = 1_048_576
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _COMMIT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
@@ -175,6 +175,8 @@ class ApprovalScope:
 
 @dataclass(frozen=True, slots=True)
 class ResourceProfile:
+    """Selected Pod shape; GPU memory is VRAM, `memory_gb` is host system RAM."""
+
     kind: ResourceKind
     resource_id: str
     hourly_micro_usd: int
@@ -356,6 +358,42 @@ class RetryPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class PodProvisioningSpec:
+    """Persisted, non-secret provider settings needed to rebuild one create body."""
+
+    image_ref: str
+    ports: tuple[str, ...]
+    cloud_type: str = "SECURE"
+    start_ssh: bool = True
+    start_jupyter: bool = False
+    schema_version: int = SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        image_pattern = r"[A-Za-z0-9._/:+-]+@sha256:[0-9a-f]{64}\Z"
+        if (not isinstance(self.image_ref, str) or "://" in self.image_ref or
+                re.fullmatch(image_pattern, self.image_ref) is None):
+            raise ContractError("image_ref must be a credential-free digest-pinned image")
+        if not isinstance(self.ports, tuple) or not self.ports:
+            raise ContractError("ports must be a non-empty immutable tuple")
+        for port in self.ports:
+            if not isinstance(port, str):
+                raise ContractError("port entries must be strings")
+            match = re.fullmatch(r"([0-9]{1,5})/(tcp|http)", port)
+            if match is None or not 1 <= int(match.group(1)) <= 65535:
+                raise ContractError("port entry is malformed")
+        if len(self.ports) != len(set(self.ports)) or "22/tcp" not in self.ports:
+            raise ContractError("ports must be unique and include the SSH port")
+        if self.cloud_type != "SECURE":
+            raise ContractError("only the reviewed Secure cloud profile is supported")
+        if type(self.start_ssh) is not bool or self.start_ssh is not True:
+            raise ContractError("the current transport requires SSH")
+        if type(self.start_jupyter) is not bool or self.start_jupyter is not False:
+            raise ContractError("Jupyter is disabled in the current provisioning profile")
+        if type(self.schema_version) is not int or self.schema_version != SCHEMA_VERSION:
+            raise ContractError("unsupported PodProvisioningSpec schema version")
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionPlan:
     job_id: str
     project: ProjectPolicy
@@ -365,6 +403,7 @@ class ExecutionPlan:
     config_sha256: str
     package_sha256: str
     resource_options: tuple[ResourceProfile, ...]
+    provisioning: PodProvisioningSpec
     transfers: TransferManifest
     retry: RetryPolicy
     schema_version: int = SCHEMA_VERSION
@@ -389,6 +428,12 @@ class ExecutionPlan:
             raise ContractError("resource_options must be a non-empty immutable tuple")
         if len(set(self.resource_options)) != len(self.resource_options):
             raise ContractError("resource_options must be unique")
+        if not isinstance(self.provisioning, PodProvisioningSpec):
+            raise ContractError("provisioning must be a PodProvisioningSpec")
+        image_digest = re.search(r"sha256:[0-9a-f]{64}\Z", self.provisioning.image_ref)
+        if image_digest is None or any(
+                option.image_digest != image_digest.group(0) for option in self.resource_options):
+            raise ContractError("provisioning image differs from resource profile digests")
         if not isinstance(self.transfers, TransferManifest):
             raise ContractError("transfers must be a TransferManifest")
         if not isinstance(self.retry, RetryPolicy):
@@ -412,6 +457,7 @@ class AttemptPlan:
     attempt_number: int
     request_sha256: str
     quote_sha256: str
+    selected_quote: QuoteObservation
     policy_sha256: str
     source_sha256: str
     config_sha256: str
@@ -433,6 +479,8 @@ class AttemptPlan:
             _sha(getattr(self, field), field)
         if not isinstance(self.selected_resource, ResourceProfile):
             raise ContractError("selected_resource must be a ResourceProfile")
+        if not isinstance(self.selected_quote, QuoteObservation):
+            raise ContractError("selected_quote must be a QuoteObservation")
         _text(self.selected_region, "selected_region", _IDENTIFIER)
         for field in ("runtime_seconds", "cleanup_reserve_seconds", "created_epoch", "deadline_epoch"):
             _positive_int(getattr(self, field), field)
@@ -455,6 +503,16 @@ def validate_attempt(plan: ExecutionPlan, attempt: AttemptPlan) -> None:
     if (attempt.selected_resource not in plan.resource_options or
             attempt.selected_region not in attempt.selected_resource.region_ids):
         raise ContractError("attempt selected an unapproved resource or region")
+    selected = attempt.selected_resource
+    quote = attempt.selected_quote
+    units = selected.cpu_count if selected.kind is ResourceKind.CPU else selected.gpu_count
+    if (sha256_bytes(encode_document("quote_observation", quote)) != attempt.quote_sha256 or
+            quote.kind is not selected.kind or quote.resource_id != selected.resource_id or
+            quote.requested_units != units or not quote.catalog_available or
+            quote.observed_epoch > attempt.created_epoch or
+            quote.total_hourly_micro_usd != selected.hourly_micro_usd or
+            attempt.selected_region not in quote.region_ids):
+        raise ContractError("attempt quote differs from its selected resource")
     if attempt.selected_resource.hourly_micro_usd > approval.max_hourly_micro_usd:
         raise ContractError("attempt resource exceeds the approved hourly ceiling")
     if attempt.runtime_seconds > approval.max_runtime_seconds:

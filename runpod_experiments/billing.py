@@ -1,8 +1,7 @@
 """Normalize exact-Pod billing responses into immutable common observations."""
 from __future__ import annotations
 
-import calendar
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 import hashlib
 import json
@@ -50,6 +49,19 @@ def _epoch_seconds(value: datetime, *, end: bool = False) -> int:
 
 def billing_query_bounds(start_time: Any, end_time: Any) -> tuple[int, int]:
     """Validate and normalize the required start/end query for attempt billing."""
+    start, end = billing_interval_datetimes(start_time, end_time)
+    try:
+        start_epoch = _epoch_seconds(start)
+        end_epoch = _epoch_seconds(end, end=True)
+    except (OverflowError, ValueError):
+        raise ContractError("billing query bounds are outside the supported range") from None
+    if end_epoch <= start_epoch:
+        raise ContractError("billing query interval must have positive duration")
+    return start_epoch, end_epoch
+
+
+def billing_interval_datetimes(start_time: Any, end_time: Any) -> tuple[datetime, datetime]:
+    """Parse and compare RFC 3339 bounds without losing subsecond precision."""
     if not isinstance(start_time, str) or not isinstance(end_time, str):
         raise ContractError("billing query bounds are required")
     try:
@@ -61,47 +73,21 @@ def billing_query_bounds(start_time: Any, end_time: Any) -> tuple[int, int]:
             end.tzinfo is None or end.utcoffset() is None):
         raise ContractError("billing query bounds are malformed")
     try:
-        start_epoch = _epoch_seconds(start)
-        end_epoch = _epoch_seconds(end, end=True)
+        start = start.astimezone(timezone.utc)
+        end = end.astimezone(timezone.utc)
     except (OverflowError, ValueError):
         raise ContractError("billing query bounds are outside the supported range") from None
-    if end_epoch <= start_epoch:
+    if end <= start:
         raise ContractError("billing query interval must have positive duration")
-    return start_epoch, end_epoch
+    return start, end
 
 
-def billing_period_bounds(value: Any, bucket_size: str) -> tuple[int, int]:
-    """Map the documented REST v1 bucket start to conservative epoch bounds."""
-    if not isinstance(value, str) or not value:
-        raise ContractError("billing time bound is malformed")
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        raise ContractError("billing time bound is malformed") from None
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise ContractError("billing time bound is malformed")
-    try:
-        start = parsed.astimezone(timezone.utc)
-    except (OverflowError, ValueError):
-        raise ContractError("billing time bound is outside the supported range") from None
-    try:
-        if bucket_size == "hour":
-            end = start + timedelta(hours=1)
-        elif bucket_size == "day":
-            end = start + timedelta(days=1)
-        elif bucket_size == "week":
-            end = start + timedelta(days=7)
-        elif bucket_size == "month":
-            year, month = start.year + (start.month == 12), (start.month % 12) + 1
-            day = min(start.day, calendar.monthrange(year, month)[1])
-            end = start.replace(year=year, month=month, day=day)
-        elif bucket_size == "year":
-            day = min(start.day, calendar.monthrange(start.year + 1, start.month)[1])
-            end = start.replace(year=start.year + 1, day=day)
-        else:
-            raise ContractError("billing bucket size is malformed")
-    except (OverflowError, ValueError):
-        raise ContractError("billing period is outside the supported range") from None
+def billing_period_bounds(start_value: Any, end_value: Any) -> tuple[int, int]:
+    """Normalize the explicit period bounds returned by RunPod REST v2."""
+    if (not isinstance(start_value, str) or not start_value or
+            not isinstance(end_value, str) or not end_value):
+        raise ContractError("billing time bounds are malformed")
+    start, end = billing_interval_datetimes(start_value, end_value)
     start_epoch = _epoch_seconds(start)
     end_epoch = _epoch_seconds(end, end=True)
     if end_epoch <= start_epoch:
@@ -127,19 +113,32 @@ def normalize_pod_billing(
     permit a caller to release an exposure hold. Replacement links are explicit
     because only the caller can identify which persisted observation is replaced.
     """
-    if not isinstance(response, list):
+    if not isinstance(response, dict):
         raise ContractError("Pod billing response is malformed")
     if not isinstance(bucket_size, str) or bucket_size not in _BUCKETS:
         raise ContractError("billing bucket size is malformed")
     if type(observed_epoch) is not int or not 0 < observed_epoch <= _MAX_SQLITE_INTEGER:
         raise ContractError("billing observation time is malformed")
-    requested_start, requested_end = billing_query_bounds(start_time, end_time)
-    records = response
+    requested_start, requested_end = billing_interval_datetimes(start_time, end_time)
+    records = response.get("records")
     if not isinstance(records, list) or len(records) > _MAX_RECORDS:
         raise ContractError("Pod billing response is malformed")
+    metadata = response.get("metadata")
+    query = metadata.get("query") if isinstance(metadata, dict) else None
+    if not isinstance(query, dict):
+        raise ContractError("Pod billing query metadata is malformed")
+    if (query.get("podId") != provider_pod_id or query.get("bucketSize") != bucket_size):
+        raise ContractError("Pod billing query scope differs from the requested Pod")
+    effective_start, effective_end = billing_interval_datetimes(
+        query.get("startTime"), query.get("endTime"))
+    if effective_start > requested_start or effective_end < requested_end:
+        raise ContractError("Pod billing query metadata does not cover the requested interval")
+    record_count = metadata.get("recordCount")
+    if type(record_count) is not int or record_count != len(records):
+        raise ContractError("Pod billing record count differs from query metadata")
 
     try:
-        evidence = json.dumps(records, sort_keys=True, separators=(",", ":"),
+        evidence = json.dumps(response, sort_keys=True, separators=(",", ":"),
                               ensure_ascii=False, allow_nan=False).encode("utf-8")
         if len(evidence) > _MAX_EVIDENCE_BYTES:
             raise ValueError("billing evidence exceeds the supported size")
@@ -154,14 +153,19 @@ def normalize_pod_billing(
     for record in records:
         if not isinstance(record, dict) or record.get("podId") != provider_pod_id:
             raise ContractError("Pod billing record identity is malformed")
-        start, end = billing_period_bounds(record.get("time"), bucket_size)
-        if end <= requested_start or start >= requested_end:
+        start_time = record.get("startTime")
+        end_time = record.get("endTime")
+        period_start, period_end = billing_interval_datetimes(start_time, end_time)
+        start, end = billing_period_bounds(start_time, end_time)
+        if period_start < effective_start or period_end > effective_end:
+            raise ContractError("billing response period is outside its query metadata")
+        if period_end <= requested_start or period_start >= requested_end:
             raise ContractError("billing response period is outside the requested interval")
         covered.append((start, end))
-        amount = _amount_micro_usd(record.get("amount"))
+        amount = _amount_micro_usd(record.get("totalAmount"))
         supersedes = (supersedes_observation_ids or {}).get((start, end))
         material = {
-            "schema": "runpod-pod-billing-observation-v1",
+            "schema": "runpod-pod-billing-observation-v2",
             "project_id": project_id,
             "attempt_id": attempt_id,
             "provider_pod_id": provider_pod_id,

@@ -18,10 +18,22 @@ from runpod_experiments.upload import upload_bundle
 from runpod_experiments.remote_process import start_python
 
 
+def pod_billing_response(pod_id, records, start_time="2026-11-11T08:00:00Z",
+                         end_time="2026-11-11T10:00:00Z", bucket_size="hour"):
+    return {"records": records, "metadata": {
+        "query": {"podId": pod_id, "bucketSize": bucket_size,
+                  "startTime": start_time, "endTime": end_time},
+        "recordCount": len(records), "uniquePodCount": int(bool(records)),
+        "totals": {"totalAmount": sum(record.get("totalAmount", 0) for record in records)},
+    }}
+
+
 class ConnectionTests(unittest.TestCase):
     def test_exact_pod_billing_is_a_read_only_validated_observation(self):
-        response = [{"podId": "pod-123", "time": "2026-11-11T08:00:00Z",
-                     "amount": 0.11, "timeBilledMs": 3_600_000}]
+        records = [{"podId": "pod-123", "startTime": "2026-11-11T08:00:00Z",
+                    "endTime": "2026-11-11T09:00:00Z", "totalAmount": 0.11,
+                    "gpuAmount": 0.11, "cpuAmount": 0, "diskAmount": 0}]
+        response = pod_billing_response("pod-123", records)
         calls = []
         def opener(request, timeout):
             calls.append(request)
@@ -32,9 +44,9 @@ class ConnectionTests(unittest.TestCase):
         self.assertEqual(result, response)
         self.assertEqual(calls[0].get_method(), "GET")
         query = urllib.parse.parse_qs(urllib.parse.urlsplit(calls[0].full_url).query)
-        self.assertEqual(urllib.parse.urlsplit(calls[0].full_url).netloc, "rest.runpod.io")
-        self.assertEqual(urllib.parse.urlsplit(calls[0].full_url).path, "/v1/billing/pods")
-        self.assertEqual(query, {"podId": ["pod-123"], "grouping": ["podId"],
+        self.assertEqual(urllib.parse.urlsplit(calls[0].full_url).netloc, "api.runpod.io")
+        self.assertEqual(urllib.parse.urlsplit(calls[0].full_url).path, "/v2/billing/pods")
+        self.assertEqual(query, {"podId": ["pod-123"],
             "bucketSize": ["hour"],
             "startTime": ["2026-11-11T08:00:00Z"], "endTime": ["2026-11-11T10:00:00Z"]})
         self.assertNotIn("private-token", calls[0].full_url)
@@ -43,8 +55,9 @@ class ConnectionTests(unittest.TestCase):
         calls = []
         def opener(request, timeout):
             calls.append(request)
-            return io.BytesIO(json.dumps([{"podId": "other",
-                "time": "2026-11-11T08:00:00Z", "amount": 0}]).encode())
+            record = {"podId": "other", "startTime": "2026-11-11T08:00:00Z",
+                      "endTime": "2026-11-11T09:00:00Z", "totalAmount": 0}
+            return io.BytesIO(json.dumps(pod_billing_response("pod-1", [record])).encode())
         client = RunPodClient("test-key", opener=opener)
         with self.assertRaises(ValueError):
             client.pod_billing("../pod")
@@ -57,25 +70,31 @@ class ConnectionTests(unittest.TestCase):
             client.pod_billing("pod-1", start_time="2026-11-11T09:00:00Z",
                 end_time="2026-11-11T08:00:00Z")
         self.assertFalse(calls)
-        with self.assertRaises(ProviderError):
+        with self.assertRaises(ValueError):
             client.pod_billing("pod-1")
-        foreign_record = [{"podId": "other", "time": "2026-11-11T08:00:00Z",
-                           "amount": 0}]
-        client._opener = lambda request, timeout: io.BytesIO(json.dumps(foreign_record).encode())
+        foreign_record = {"podId": "other", "startTime": "2026-11-11T08:00:00Z",
+                          "endTime": "2026-11-11T09:00:00Z", "totalAmount": 0}
+        client._opener = lambda request, timeout: io.BytesIO(json.dumps(
+            pod_billing_response("pod-1", [foreign_record])).encode())
         with self.assertRaisesRegex(ProviderError, "unexpected identity"):
-            client.pod_billing("pod-1")
+            client.pod_billing("pod-1", start_time="2026-11-11T08:00:00Z",
+                               end_time="2026-11-11T10:00:00Z")
 
     def test_pod_billing_rejects_missing_amount_and_overlapping_periods(self):
-        response = [{"podId": "pod-1", "time": "2026-11-11T08:00:00Z"}]
+        response = pod_billing_response("pod-1", [{"podId": "pod-1",
+            "startTime": "2026-11-11T08:00:00Z", "endTime": "2026-11-11T09:00:00Z"}])
         client = RunPodClient("test-key", opener=lambda *_args, **_kwargs:
                               io.BytesIO(json.dumps(response).encode()))
         with self.assertRaisesRegex(ProviderError, "invalid amount"):
-            client.pod_billing("pod-1")
+            client.pod_billing("pod-1", start_time="2026-11-11T08:00:00Z",
+                               end_time="2026-11-11T10:00:00Z")
 
-        response[0]["amount"] = 0
-        response.append(dict(response[0]))
+        response["records"][0]["totalAmount"] = 0
+        response["records"].append(dict(response["records"][0]))
+        response["metadata"]["recordCount"] = 2
         with self.assertRaisesRegex(ProviderError, "overlapping periods"):
-            client.pod_billing("pod-1")
+            client.pod_billing("pod-1", start_time="2026-11-11T08:00:00Z",
+                               end_time="2026-11-11T10:00:00Z")
 
     def test_inventory_pagination_and_cursor_loop(self):
         pages = iter([{"pods": [{"id": "a"}], "pagination": {"hasNextPage": True, "nextCursor": "next"}},

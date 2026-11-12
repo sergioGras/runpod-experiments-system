@@ -35,7 +35,7 @@ class ReadOnlyProvider(Protocol):
 
     def pod_billing(self, pod_id: str, *, bucket_size: str = "hour",
                     start_time: str | None = None,
-                    end_time: str | None = None) -> list[dict]: ...
+                    end_time: str | None = None) -> dict: ...
 
 
 @dataclass(frozen=True, slots=True)

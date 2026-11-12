@@ -16,14 +16,18 @@ from typing import Any, Iterator
 
 from runpod_experiments.contracts import (
     ApprovalScope, AttemptPlan, BillingObservation, ContractError, ExecutionPlan,
-    FailureCategory, ProjectPolicy, ResourceKind, ResourceProfile,
+    FailureCategory, PodProvisioningSpec, ProjectPolicy, ResourceKind, ResourceProfile,
     canonical_json_bytes, decode_document, encode_document, sha256_bytes,
     strict_json_loads, validate_attempt,
 )
 from runpod_experiments.errors import ExecutionError
+from runpod_experiments.create_spec import (
+    build_pod_create_request, pod_create_request_sha256,
+)
+from runpod_experiments.resource_policy import request_hash
 
 
-STORE_SCHEMA_VERSION = 2
+STORE_SCHEMA_VERSION = 3
 SQLITE_MAX_INTEGER = 9_223_372_036_854_775_807
 _POD_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 _POD_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,127}\Z")
@@ -354,6 +358,10 @@ class ExecutionStore:
                 not any(pod_name.startswith(prefix) and len(pod_name) > len(prefix)
                         for prefix in plan.project.pod_name_prefixes)):
             raise ExecutionError(FailureCategory.AUTHORIZATION, "pod_name_outside_project")
+        if pod_create_request_sha256(
+                plan.provisioning, attempt.selected_resource,
+                attempt.selected_region, pod_name) != attempt.request_sha256:
+            raise ExecutionError(FailureCategory.CONFIGURATION, "create_request_digest_mismatch")
         now = self._now()
         if (attempt.created_epoch > now or now >= attempt.deadline_epoch or
                 now >= plan.approval.expires_epoch):
@@ -851,6 +859,63 @@ class ExecutionStore:
             raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
                                  "attempt_resource_profile_mismatch") from None
         return profile, region
+
+    def provisioning_for_attempt(self, attempt_id: str) -> PodProvisioningSpec:
+        """Reconstruct the immutable, non-secret provider settings for an attempt."""
+        self.verify_attempt_lifecycle_projection(attempt_id)
+        with closing(self._connect()) as db:
+            row = db.execute("""SELECT a.project_id,a.plan_sha256,p.document AS plan_document
+                FROM execution_attempts a JOIN execution_plans p
+                  ON p.plan_sha256=a.plan_sha256
+                WHERE a.attempt_id=? AND a.project_id=?""",
+                (attempt_id, self.project_id)).fetchone()
+        if row is None:
+            raise ExecutionError(FailureCategory.CONFIGURATION, "unknown_attempt")
+        try:
+            raw = bytes(row["plan_document"])
+            if sha256_bytes(raw) != row["plan_sha256"]:
+                raise ContractError("stored execution plan does not match its digest")
+            payload = decode_document(raw, expected_kind="execution_plan")
+            project = payload.get("project")
+            value = payload.get("provisioning")
+            required = {"image_ref", "ports", "cloud_type", "start_ssh",
+                        "start_jupyter", "schema_version"}
+            if (not isinstance(project, dict) or project.get("project_id") != self.project_id or
+                    not isinstance(value, dict) or set(value) != required):
+                raise ContractError("stored provisioning profile is malformed")
+            return PodProvisioningSpec(
+                image_ref=value["image_ref"], ports=tuple(value["ports"]),
+                cloud_type=value["cloud_type"], start_ssh=value["start_ssh"],
+                start_jupyter=value["start_jupyter"],
+                schema_version=value["schema_version"])
+        except (ContractError, KeyError, TypeError, ValueError):
+            raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                 "attempt_provisioning_mismatch") from None
+
+    def create_request_for_attempt(self, attempt_id: str) -> dict[str, Any]:
+        """Rebuild and verify the exact canonical provider request after restart."""
+        self.verify_attempt_lifecycle_projection(attempt_id)
+        with closing(self._connect()) as db:
+            row = db.execute("""SELECT attempt_sha256,attempt_document,pod_name
+                FROM execution_attempts WHERE attempt_id=? AND project_id=?""",
+                (attempt_id, self.project_id)).fetchone()
+        if row is None:
+            raise ExecutionError(FailureCategory.CONFIGURATION, "unknown_attempt")
+        try:
+            raw = bytes(row["attempt_document"])
+            if sha256_bytes(raw) != row["attempt_sha256"]:
+                raise ContractError("stored attempt does not match its digest")
+            attempt = decode_document(raw, expected_kind="attempt_plan")
+            resource, region = self.selected_resource_for_attempt(attempt_id)
+            provisioning = self.provisioning_for_attempt(attempt_id)
+            request = build_pod_create_request(
+                provisioning, resource, region, row["pod_name"])
+            if request_hash(request) != attempt.get("request_sha256"):
+                raise ContractError("rebuilt create request differs from its stored digest")
+            return request
+        except (ContractError, KeyError, TypeError, ValueError):
+            raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                 "attempt_request_mismatch") from None
 
     def project_policy_for_attempt(self, attempt_id: str) -> ProjectPolicy:
         """Reconstruct the approved project policy bound to one stored attempt."""

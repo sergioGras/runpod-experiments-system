@@ -1,5 +1,6 @@
 import os
 from contextlib import closing
+from dataclasses import replace
 from pathlib import Path
 import json
 import sqlite3
@@ -11,8 +12,8 @@ import unittest
 
 from runpod_experiments.contracts import (
     ApprovalScope, AttemptPlan, BillingObservation, ExecutionPlan,
-    FailureCategory, ManifestFile, ProjectPolicy, ResourceKind,
-    ResourceProfile, RetryPolicy, TransferDirection, TransferManifest,
+    FailureCategory, ManifestFile, PodProvisioningSpec, ProjectPolicy, QuoteObservation,
+    ResourceKind, ResourceProfile, RetryPolicy, TransferDirection, TransferManifest,
     encode_document, sha256_bytes,
 )
 from runpod_experiments.errors import ExecutionError
@@ -21,6 +22,7 @@ from runpod_experiments.ownership import request_delete_for_store_attempt
 from runpod_experiments.provider import ProviderAdapter
 from runpod_experiments.runpod import ProviderError
 from runpod_experiments.resource_policy import resource_profile_violation
+from runpod_experiments.create_spec import pod_create_request_sha256
 from runpod_experiments.state_config import StateStoreConfig
 from runpod_experiments.supervision import StoreCleanupMonitor, run_supervisor
 from runpod_experiments.supervisor_process import launch_execution_store
@@ -45,19 +47,27 @@ def plan_for(now: int, *, max_total: int = 1_000_000, max_slots: int = 1,
     resource = ResourceProfile(
         ResourceKind.CPU, "cpu-small", hourly_rate, ("EU-TEST-1",),
         "sha256:" + ZERO, 20, 4, 8)
+    provisioning = PodProvisioningSpec("runpod/base@sha256:" + ZERO, ("22/tcp",))
     return ExecutionPlan(
         "research-job", project, approval, COMMIT, SOURCE, CONFIG, PACKAGE,
-        (resource,), TransferManifest((), 1024, 4096),
+        (resource,), provisioning, TransferManifest((), 1024, 4096),
         RetryPolicy(3, 3600, (FailureCategory.TRANSIENT_READ,
                                FailureCategory.VERIFIED_CAPACITY_REJECTION)))
 
 
 def attempt_for(plan: ExecutionPlan, attempt_id: str, number: int, now: int) -> AttemptPlan:
+    resource = plan.resource_options[0]
+    quote = QuoteObservation(
+        resource.kind, resource.resource_id, resource.cpu_count, resource.cpu_count,
+        resource.hourly_micro_usd, 0, True, resource.region_ids, now - 1, ONE)
     return AttemptPlan(
         attempt_id, plan.job_id, plan.approval.approval_id, number,
-        ZERO, ONE, sha256_bytes(encode_document("project_policy", plan.project)),
+        pod_create_request_sha256(plan.provisioning, resource,
+                                  resource.region_ids[0], pod_name(number)),
+        sha256_bytes(encode_document("quote_observation", quote)), quote,
+        sha256_bytes(encode_document("project_policy", plan.project)),
         plan.source_sha256, plan.config_sha256, plan.package_sha256,
-        plan.resource_options[0], plan.resource_options[0].region_ids[0],
+        resource, resource.region_ids[0],
         1200, 60, now - 1, now + 1800)
 
 
@@ -157,6 +167,24 @@ class ExecutionStoreTests(unittest.TestCase):
         self.assertEqual(reopened.get_attempt(attempt.attempt_id)["state"], "terminated")
         self.assertEqual(reopened.get_attempt(attempt.attempt_id)["terminated_epoch"], self.now)
         self.assertTrue(self.store.verify_event_chain())
+
+    def test_create_request_reconstructs_from_immutable_documents_after_reopen(self):
+        attempt, _ = self.reserve()
+        reopened = ExecutionStore(str(self.path), project_id=self.plan.project.project_id,
+                                  controller_host="TEST-HOST", clock=lambda: self.now)
+        request = reopened.create_request_for_attempt(attempt.attempt_id)
+        self.assertEqual(request["name"], pod_name(1))
+        self.assertEqual(request["image"], self.plan.provisioning.image_ref)
+        self.assertEqual(request["dataCenterIds"], ["EU-TEST-1"])
+        self.assertEqual(request["cpu"], {"id": "cpu-small", "vcpuCount": 4})
+
+    def test_reservation_rejects_a_create_request_digest_mismatch(self):
+        attempt = attempt_for(self.plan, "attempt-mismatch", 1, self.now)
+        with self.assertRaises(ExecutionError) as caught:
+            self.store.reserve_attempt(self.plan, replace(attempt, request_sha256="f" * 64),
+                                      pod_name(1))
+        self.assertEqual(caught.exception.code, "create_request_digest_mismatch")
+        self.assertEqual(self.store.events(), ())
 
     def test_attempt_integrity_rejects_mutated_pod_identity_projection(self):
         attempt, _ = self.reserve()
@@ -332,22 +360,39 @@ class ExecutionStoreTests(unittest.TestCase):
         self.assertEqual(resource_profile_violation(pod, profile, region),
                          "invalid_or_excess_hourly_rate")
 
-    def test_resource_profile_guard_checks_gpu_memory_and_identity(self):
+    def test_resource_profile_guard_checks_gpu_system_memory_and_identity(self):
         profile = ResourceProfile(
             ResourceKind.GPU, "NVIDIA A40", 600_000, ("EU-TEST-1",),
             "sha256:" + ZERO, 30, 8, 32, 1, 48, "12.4")
         pod = {
             "status": "RUNNING", "cost": 0.59, "cloud": "SECURE",
             "image": "runpod/gpu@" + profile.image_digest, "disk": 30,
-            "dataCenterId": "EU-TEST-1",
+            "dataCenterId": "EU-TEST-1", "cudaVersion": "12.8",
             "gpu": {"id": "NVIDIA A40", "count": 1, "vcpuCount": 8, "memory": 48},
             "mounts": {},
         }
         self.assertEqual(resource_profile_violation(pod, profile, "EU-TEST-1"),
                          "unverifiable_gpu_profile")
-        pod["gpu"]["memory"] = 40
+        pod["gpu"]["memory"] = 30
         self.assertEqual(resource_profile_violation(pod, profile, "EU-TEST-1"),
                          "unexpected_resource_shape")
+        pod["gpu"]["memory"] = 48
+        pod["cudaVersion"] = "12.3"
+        self.assertEqual(resource_profile_violation(pod, profile, "EU-TEST-1"),
+                         "unexpected_resource_shape")
+
+    def test_gpu_create_request_uses_per_gpu_system_requirements(self):
+        from runpod_experiments.create_spec import build_pod_create_request
+
+        profile = ResourceProfile(
+            ResourceKind.GPU, "NVIDIA A40", 600_000, ("EU-TEST-1",),
+            "sha256:" + ZERO, 30, 8, 64, 2, 48, "12.4")
+        provisioning = PodProvisioningSpec("runpod/gpu@sha256:" + ZERO, ("22/tcp",))
+        request = build_pod_create_request(provisioning, profile, "EU-TEST-1", "nebula-gpu-1")
+        self.assertEqual(request["gpu"], {
+            "id": "NVIDIA A40", "count": 2, "minRamPerGpu": 32,
+            "minVcpuCountPerGpu": 4, "minCudaVersion": "12.4",
+        })
 
     def test_store_cleanup_monitor_keeps_ambiguous_create_held_until_three_absences(self):
         class Provider:
@@ -649,7 +694,11 @@ child = launch_execution_store(StateStoreConfig(state_root, "TEST-HOST"), attemp
                 self.requested_pods = []
             def pod_billing(self, pod_id, **_kwargs):
                 self.requested_pods.append(pod_id)
-                return [{"podId": pod_id, "time": bucket_start, "amount": 0.15}]
+                return {"records": [{"podId": pod_id, "startTime": bucket_start,
+                                     "endTime": bucket_end, "totalAmount": 0.15}],
+                        "metadata": {"query": {"podId": pod_id, "bucketSize": "hour",
+                            "startTime": bucket_start, "endTime": bucket_end},
+                            "recordCount": 1}}
 
         provider = BillingProvider()
         observation, = ProviderAdapter(provider).observe_pod_billing(

@@ -28,8 +28,9 @@ def resource_profile_violation(pod, profile, selected_region):
 
     The M3 profile currently describes Secure CPU/GPU Pods without persistent
     mounts. Shape checks run once the provider reports RUNNING; price and status
-    checks apply throughout provisioning. GPU runtime/system-memory telemetry is
-    not yet mapped, so a matching GPU shape still fails closed.
+    checks apply throughout provisioning. REST v2 GPU memory reports host system
+    RAM, not VRAM, so GPU profiles still fail closed without independent GPU
+    runtime telemetry.
     """
     if not isinstance(profile, ResourceProfile) or not isinstance(pod, dict):
         return "invalid_or_unknown_resource_profile"
@@ -72,10 +73,15 @@ def resource_profile_violation(pod, profile, selected_region):
         gpu = pod.get("gpu")
         if (not isinstance(gpu, dict) or gpu.get("id") != profile.resource_id or
                 type(gpu.get("count")) is not int or gpu.get("count") != profile.gpu_count or
-                type(gpu.get("vcpuCount")) is not int or gpu.get("vcpuCount") != profile.cpu_count or
-                type(gpu.get("memory")) is not int or
-                gpu["memory"] < profile.gpu_memory_gb):
+                type(gpu.get("vcpuCount")) is not int or gpu.get("vcpuCount") < profile.cpu_count or
+                type(gpu.get("memory")) is not int or gpu["memory"] < profile.memory_gb):
             return "unexpected_resource_shape"
+        cuda = pod.get("cudaVersion")
+        if isinstance(cuda, str) and re.fullmatch(r"[0-9]+\.[0-9]+", cuda):
+            actual_cuda = tuple(int(part) for part in cuda.split("."))
+            minimum_cuda = tuple(int(part) for part in profile.minimum_cuda.split("."))
+            if actual_cuda < minimum_cuda:
+                return "unexpected_resource_shape"
         return "unverifiable_gpu_profile"
     return None
 
