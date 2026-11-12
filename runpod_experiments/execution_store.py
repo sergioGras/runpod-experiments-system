@@ -798,6 +798,130 @@ class ExecutionStore:
             raise ExecutionError(FailureCategory.CONFIGURATION, "unknown_attempt")
         return dict(row)
 
+    def verify_attempt_lifecycle_projection(self, attempt_id: str) -> bool:
+        """Check mutable lifecycle state against the authenticated event history.
+
+        Recovery and cleanup code should call this before using a stored Pod ID.
+        It detects accidental edits to mutable attempt state and identity without
+        treating a caller-supplied ledger row as sufficient provider authority.
+        """
+        with closing(self._connect()) as db:
+            db.execute("BEGIN")
+            row = db.execute("""SELECT a.*,p.document AS plan_document
+                FROM execution_attempts a JOIN execution_plans p
+                  ON p.plan_sha256=a.plan_sha256
+                WHERE a.attempt_id=? AND a.project_id=?""",
+                (attempt_id, self.project_id)).fetchone()
+            event_rows = db.execute(
+                "SELECT * FROM execution_events ORDER BY sequence").fetchall()
+            db.commit()
+        if row is None:
+            raise ExecutionError(FailureCategory.CONFIGURATION, "unknown_attempt")
+        self._verify_event_rows(event_rows)
+        if (sha256_bytes(bytes(row["attempt_document"])) != row["attempt_sha256"] or
+                sha256_bytes(bytes(row["plan_document"])) != row["plan_sha256"]):
+            raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                 "attempt_projection_mismatch")
+
+        attempt_events = [event for event in event_rows
+                          if event["entity_type"] == "attempt" and
+                          event["entity_id"] == attempt_id]
+        expected_state = None
+        expected_claimed = 0
+        expected_claimed_epoch = None
+        expected_pod_id = None
+        expected_terminated_epoch = None
+
+        def mismatch():
+            raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                 "attempt_projection_mismatch")
+
+        for index, event in enumerate(attempt_events):
+            try:
+                payload = strict_json_loads(bytes(event["payload"]))
+            except (TypeError, ValueError):
+                mismatch()
+            if not isinstance(payload, dict):
+                mismatch()
+            event_type = event["event_type"]
+            if event_type == "reserved":
+                if index != 0 or expected_state is not None:
+                    mismatch()
+                if (payload.get("project_id") != row["project_id"] or
+                        payload.get("job_id") != row["job_id"] or
+                        payload.get("approval_id") != row["approval_id"] or
+                        payload.get("plan_sha256") != row["plan_sha256"] or
+                        payload.get("attempt_sha256") != row["attempt_sha256"] or
+                        payload.get("pod_name") != row["pod_name"] or
+                        payload.get("exposure_micro_usd") != row["initial_exposure_micro_usd"] or
+                        payload.get("hourly_micro_usd") != row["hourly_micro_usd"]):
+                    mismatch()
+                expected_state = "reserved"
+            elif event_type == "create_claimed":
+                if expected_state != "reserved" or expected_claimed:
+                    mismatch()
+                expected_state = "create_claimed"
+                expected_claimed = 1
+                expected_claimed_epoch = event["created_epoch"]
+            elif event_type == "reconciliation_required":
+                if not expected_claimed or expected_state not in (
+                        "create_claimed", "active", "stopping", "reconciliation_required"):
+                    mismatch()
+                expected_state = "reconciliation_required"
+            elif event_type == "pod_bound":
+                pod_id = payload.get("provider_pod_id")
+                if (expected_state not in ("create_claimed", "reconciliation_required") or
+                        expected_pod_id is not None or not isinstance(pod_id, str) or
+                        payload.get("pod_name") != row["pod_name"]):
+                    mismatch()
+                expected_pod_id = pod_id
+                expected_state = "active"
+            elif event_type == "pod_reconciled_active":
+                if (expected_state != "reconciliation_required" or expected_pod_id is None or
+                        payload.get("provider_pod_id") != expected_pod_id or
+                        payload.get("pod_name") != row["pod_name"]):
+                    mismatch()
+                expected_state = "active"
+            elif event_type == "stop_requested":
+                if expected_state != "active":
+                    mismatch()
+                expected_state = "stopping"
+            elif event_type == "terminated":
+                if (expected_state != "stopping" or expected_pod_id is None or
+                        payload.get("provider_pod_id") != expected_pod_id):
+                    mismatch()
+                expected_state = "terminated"
+                expected_terminated_epoch = event["created_epoch"]
+            elif event_type == "termination_absence_confirmed":
+                if (expected_state != "reconciliation_required" or expected_pod_id is None or
+                        payload.get("provider_pod_id") != expected_pod_id):
+                    mismatch()
+                expected_state = "terminated"
+                expected_terminated_epoch = event["created_epoch"]
+            elif event_type == "create_absence_confirmed":
+                if (expected_state != "reconciliation_required" or expected_pod_id is not None or
+                        payload.get("provider_pod_id") is not None):
+                    mismatch()
+                expected_state = "cancelled"
+            elif event_type == "cancelled_before_create":
+                if expected_state != "reserved" or expected_claimed:
+                    mismatch()
+                expected_state = "cancelled"
+            elif event_type == "billing_marked_complete":
+                if expected_state != "terminated" or expected_pod_id is None:
+                    mismatch()
+            else:
+                mismatch()
+
+        if not attempt_events:
+            mismatch()
+        if (row["state"] != expected_state or row["create_claimed"] != expected_claimed or
+                row["create_claimed_epoch"] != expected_claimed_epoch or
+                row["pod_id"] != expected_pod_id or
+                row["terminated_epoch"] != expected_terminated_epoch):
+            mismatch()
+        return True
+
     def events(self, *, after_sequence: int = 0, limit: int = 1000) -> tuple[dict[str, Any], ...]:
         if (type(after_sequence) is not int or after_sequence < 0 or
                 after_sequence > SQLITE_MAX_INTEGER):
@@ -819,9 +943,8 @@ class ExecutionStore:
             "event_sha256": row["event_sha256"],
         } for row in rows)
 
-    def verify_event_chain(self) -> bool:
-        with closing(self._connect()) as db:
-            rows = db.execute("SELECT * FROM execution_events ORDER BY sequence").fetchall()
+    @staticmethod
+    def _verify_event_rows(rows: list[sqlite3.Row]) -> bool:
         previous = _ZERO_HASH
         for expected_sequence, row in enumerate(rows, start=1):
             payload = bytes(row["payload"])
@@ -841,3 +964,8 @@ class ExecutionStore:
                 raise ExecutionError(FailureCategory.INTERNAL, "event_hash_mismatch")
             previous = row["event_sha256"]
         return True
+
+    def verify_event_chain(self) -> bool:
+        with closing(self._connect()) as db:
+            rows = db.execute("SELECT * FROM execution_events ORDER BY sequence").fetchall()
+        return self._verify_event_rows(rows)

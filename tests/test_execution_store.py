@@ -102,7 +102,9 @@ class ExecutionStoreTests(unittest.TestCase):
 
     def test_create_claim_and_lifecycle_transitions_preserve_identity(self):
         attempt, _ = self.reserve()
+        self.assertTrue(self.store.verify_attempt_lifecycle_projection(attempt.attempt_id))
         self.store.claim_create(attempt.attempt_id)
+        self.assertTrue(self.store.verify_attempt_lifecycle_projection(attempt.attempt_id))
         reopened = ExecutionStore(str(self.path), project_id=self.plan.project.project_id,
                                   controller_host="TEST-HOST", clock=lambda: self.now)
         claimed = reopened.get_attempt(attempt.attempt_id)
@@ -113,12 +115,14 @@ class ExecutionStoreTests(unittest.TestCase):
         with self.assertRaises(ExecutionError):
             self.store.claim_create(attempt.attempt_id)
         self.store.require_reconciliation(attempt.attempt_id, "create_timeout")
+        self.assertTrue(self.store.verify_attempt_lifecycle_projection(attempt.attempt_id))
         prior_event_count = len(self.store.events())
         self.store.require_reconciliation(attempt.attempt_id, "create_timeout")
         self.assertEqual(len(self.store.events()), prior_event_count)
         with self.assertRaises(ExecutionError):
             self.store.bind_pod(attempt.attempt_id, "pod-1", pod_name(2))
         self.store.bind_pod(attempt.attempt_id, "pod-1", pod_name(1))
+        self.assertTrue(self.store.verify_attempt_lifecycle_projection(attempt.attempt_id))
         self.assertEqual(self.store.get_attempt(attempt.attempt_id)["state"], "active")
         reopened = ExecutionStore(str(self.path), project_id=self.plan.project.project_id,
                                   controller_host="TEST-HOST", clock=lambda: self.now)
@@ -126,6 +130,7 @@ class ExecutionStoreTests(unittest.TestCase):
         with self.assertRaises(ExecutionError):
             self.store.confirm_termination(attempt.attempt_id, "pod-2", ONE)
         self.store.request_stop(attempt.attempt_id)
+        self.assertTrue(self.store.verify_attempt_lifecycle_projection(attempt.attempt_id))
         prior_event_count = len(self.store.events())
         self.store.request_stop(attempt.attempt_id)
         self.assertEqual(len(self.store.events()), prior_event_count)
@@ -133,6 +138,7 @@ class ExecutionStoreTests(unittest.TestCase):
                                   controller_host="TEST-HOST", clock=lambda: self.now)
         self.assertEqual(reopened.get_attempt(attempt.attempt_id)["state"], "stopping")
         self.store.confirm_termination(attempt.attempt_id, "pod-1", ONE)
+        self.assertTrue(self.store.verify_attempt_lifecycle_projection(attempt.attempt_id))
         prior_event_count = len(self.store.events())
         self.store.confirm_termination(attempt.attempt_id, "pod-1", ONE)
         self.assertEqual(len(self.store.events()), prior_event_count)
@@ -145,9 +151,29 @@ class ExecutionStoreTests(unittest.TestCase):
         self.assertEqual(reopened.get_attempt(attempt.attempt_id)["terminated_epoch"], self.now)
         self.assertTrue(self.store.verify_event_chain())
 
+    def test_attempt_integrity_rejects_mutated_pod_identity_projection(self):
+        attempt, _ = self.reserve()
+        self.activate_and_terminate(attempt)
+        self.assertTrue(self.store.verify_attempt_lifecycle_projection(attempt.attempt_id))
+        with closing(sqlite3.connect(self.path)) as db:
+            db.execute("UPDATE execution_attempts SET pod_id=? WHERE attempt_id=?",
+                       ("pod-forged", attempt.attempt_id))
+            db.commit()
+        with self.assertRaises(ExecutionError) as caught:
+            self.store.verify_attempt_lifecycle_projection(attempt.attempt_id)
+        self.assertEqual(caught.exception.code, "attempt_projection_mismatch")
+        with closing(sqlite3.connect(self.path)) as db:
+            db.execute("UPDATE execution_attempts SET pod_id=?,state=? WHERE attempt_id=?",
+                       ("pod-1", "active", attempt.attempt_id))
+            db.commit()
+        with self.assertRaises(ExecutionError) as caught:
+            self.store.verify_attempt_lifecycle_projection(attempt.attempt_id)
+        self.assertEqual(caught.exception.code, "attempt_projection_mismatch")
+
     def test_cancel_releases_only_an_unclaimed_reservation(self):
         attempt, exposure = self.reserve()
         self.store.cancel_uncreated(attempt.attempt_id)
+        self.assertTrue(self.store.verify_attempt_lifecycle_projection(attempt.attempt_id))
         prior_event_count = len(self.store.events())
         self.store.cancel_uncreated(attempt.attempt_id)
         self.assertEqual(len(self.store.events()), prior_event_count)
@@ -164,7 +190,9 @@ class ExecutionStoreTests(unittest.TestCase):
         with self.assertRaises(ExecutionError):
             self.store.confirm_absence(attempt.attempt_id, ONE)
         self.store.require_reconciliation(attempt.attempt_id, "create_timeout")
+        self.assertTrue(self.store.verify_attempt_lifecycle_projection(attempt.attempt_id))
         self.store.confirm_absence(attempt.attempt_id, ONE)
+        self.assertTrue(self.store.verify_attempt_lifecycle_projection(attempt.attempt_id))
         prior_event_count = len(self.store.events())
         self.store.confirm_absence(attempt.attempt_id, ONE)
         self.assertEqual(len(self.store.events()), prior_event_count)
@@ -179,11 +207,14 @@ class ExecutionStoreTests(unittest.TestCase):
         self.store.bind_pod(another.attempt_id, "pod-1", pod_name(1))
         self.store.request_stop(another.attempt_id)
         self.store.require_reconciliation(another.attempt_id, "delete_timeout")
+        self.assertTrue(self.store.verify_attempt_lifecycle_projection(another.attempt_id))
         self.store.bind_pod(another.attempt_id, "pod-1", pod_name(1))
+        self.assertTrue(self.store.verify_attempt_lifecycle_projection(another.attempt_id))
         self.assertEqual(self.store.get_attempt(another.attempt_id)["state"], "active")
         self.store.request_stop(another.attempt_id)
         self.store.require_reconciliation(another.attempt_id, "delete_timeout")
         self.store.confirm_absence(another.attempt_id, "2" * 64)
+        self.assertTrue(self.store.verify_attempt_lifecycle_projection(another.attempt_id))
         record = self.store.get_attempt(another.attempt_id)
         self.assertEqual(record["state"], "terminated")
         self.assertEqual(record["exposure_micro_usd"], exposure)

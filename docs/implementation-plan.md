@@ -168,6 +168,10 @@ observations and superseding adjustments. Database triggers protect immutable
 attempt identity and audit/evidence rows. Event rows form a verifiable hash chain
 that detects accidental mutation or reordering of those event rows. Unknown,
 unversioned and incomplete databases fail closed without automatic migration.
+`verify_attempt_lifecycle_projection()` compares lifecycle state, create-claim
+and Pod identity fields with the reserved/lifecycle event projection before
+recovery code uses them. It is an explicit M4 guard, not protection against an
+actor who can rewrite the whole database and recompute its hashes.
 
 Admission estimates exposure by rounding up
 `ResourceProfile.hourly_micro_usd * (runtime_seconds + cleanup_reserve_seconds)`
@@ -201,10 +205,11 @@ scoped project/host identity; ambiguous create/stop reconciliation; immutable
 evidence rows; billing adjustments; and an end-to-end fake path from normalized
 provider billing through transactional accounting. Each crash case reopened the
 store and verified unchanged attempt/accounting state and event chain. On Windows
-with Python 3.12.10, all 20 focused store tests and all 114 library tests passed.
+with Python 3.12.10, all 21 focused store tests and all 115 library tests passed.
 Over-cap posted billing remains recorded, and further admission is denied; the
 aggregate also remains exact when individually valid charges sum above SQLite's
-integer limit.
+integer limit. Direct mutations of the mutable Pod/state projection are rejected
+by the new integrity check.
 Three state-configuration tests passed; one symlink test was skipped because
 this Windows host does not permit directory symlink creation. These runs used local
 temporary databases and fake/local fixtures; no RunPod credentials, account
