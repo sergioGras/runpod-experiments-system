@@ -7,6 +7,7 @@ from runpod_experiments.contracts import FailureCategory, ProjectPolicy
 from runpod_experiments.errors import (
     ExecutionError, ProviderOperation, normalize_provider_error,
 )
+from runpod_experiments.billing import billing_period_bounds
 from runpod_experiments.provider import PodObservation, ProviderAdapter
 from runpod_experiments.quotes import normalize_cpu_quote, normalize_gpu_quote
 from runpod_experiments.runpod import ProviderError, RunPodClient
@@ -171,6 +172,127 @@ class QuoteNormalizationTests(unittest.TestCase):
                                         observed_epoch=1_900_000_000)
                 self.assertEqual(caught.exception.category, FailureCategory.RESOURCE_MISMATCH)
                 self.assertEqual(caught.exception.code, "cpu_quote_invalid")
+
+
+class BillingObservationAdapterTests(unittest.TestCase):
+    def billing_response(self, amount="0.1000001"):
+        return [{"podId": "pod-1", "time": "2026-11-11T08:00:00Z",
+                 "amount": amount, "timeBilledMs": 3_600_000}]
+
+    def test_exact_pod_billing_becomes_safe_microdollar_observations(self):
+        response = self.billing_response()
+
+        class BillingProvider:
+            def __init__(self): self.requests = []
+            def pod_billing(self, pod_id, **kwargs):
+                self.requests.append((pod_id, kwargs))
+                return response
+
+        provider = BillingProvider()
+        adapter = ProviderAdapter(provider)
+        observations = adapter.observe_pod_billing(
+            project_id="synthetic-nebula", attempt_id="attempt-1",
+            provider_pod_id="pod-1", observed_epoch=1_800_000_000,
+            start_time="2026-11-11T08:00:00Z", end_time="2026-11-11T09:00:00Z")
+        self.assertEqual(provider.requests[0][0], "pod-1")
+        self.assertEqual(len(observations), 1)
+        item = observations[0]
+        self.assertEqual(item.amount_micro_usd, 100_001)
+        self.assertEqual(item.project_id, "synthetic-nebula")
+        self.assertEqual(item.attempt_id, "attempt-1")
+        self.assertEqual(item.provider_pod_id, "pod-1")
+        self.assertEqual(item.period_start_epoch, 1_794_384_000)
+        self.assertEqual(item.period_end_epoch, 1_794_387_600)
+        self.assertFalse(hasattr(item, "records"))
+        repeated = adapter.observe_pod_billing(
+            project_id="synthetic-nebula", attempt_id="attempt-1",
+            provider_pod_id="pod-1", observed_epoch=1_800_000_000,
+            start_time="2026-11-11T08:00:00Z", end_time="2026-11-11T09:00:00Z")
+        self.assertEqual(repeated, observations)
+
+    def test_absent_rows_are_not_zero_billing_and_revisions_need_explicit_links(self):
+        response = self.billing_response()
+
+        class BillingProvider:
+            def pod_billing(self, _pod_id, **_kwargs): return response
+
+        response.clear()
+        self.assertEqual(ProviderAdapter(BillingProvider()).observe_pod_billing(
+            project_id="synthetic-nebula", attempt_id="attempt-1",
+            provider_pod_id="pod-1", observed_epoch=1_800_000_000,
+            start_time="2026-11-11T08:00:00Z",
+            end_time="2026-11-11T09:00:00Z"), ())
+
+        response = self.billing_response("0.11")
+        start, end = 1_794_384_000, 1_794_387_600
+        revised, = ProviderAdapter(BillingProvider()).observe_pod_billing(
+            project_id="synthetic-nebula", attempt_id="attempt-1",
+            provider_pod_id="pod-1", observed_epoch=1_800_000_001,
+            start_time="2026-11-11T08:00:00Z",
+            end_time="2026-11-11T09:00:00Z",
+            supersedes_observation_ids={(start, end): "bill-original"})
+        self.assertEqual(revised.amount_micro_usd, 110_000)
+        self.assertEqual(revised.supersedes_observation_id, "bill-original")
+
+    def test_malformed_or_overlapping_billing_fails_closed(self):
+        response = self.billing_response()
+        response.append(dict(response[0]))
+
+        class BillingProvider:
+            def pod_billing(self, _pod_id, **_kwargs): return response
+
+        with self.assertRaises(ExecutionError) as caught:
+            ProviderAdapter(BillingProvider()).observe_pod_billing(
+                project_id="synthetic-nebula", attempt_id="attempt-1",
+                provider_pod_id="pod-1", observed_epoch=1_800_000_000,
+                start_time="2026-11-11T08:00:00Z",
+                end_time="2026-11-11T09:00:00Z")
+        self.assertEqual(caught.exception.code, "pod_billing_malformed")
+        self.assertNotIn("pod-1", str(caught.exception))
+
+    def test_bucket_end_derivation_covers_all_documented_sizes(self):
+        expected_seconds = {
+            "hour": 3_600,
+            "day": 86_400,
+            "week": 604_800,
+            "month": 29 * 86_400,
+            "year": 365 * 86_400,
+        }
+        starts = {
+            "hour": "2026-11-11T08:00:00Z",
+            "day": "2026-11-11T00:00:00Z",
+            "week": "2026-11-09T00:00:00Z",
+            "month": "2024-01-31T00:00:00Z",
+            "year": "2024-02-29T00:00:00Z",
+        }
+        for bucket, value in starts.items():
+            with self.subTest(bucket=bucket):
+                start, end = billing_period_bounds(value, bucket)
+                self.assertEqual(end - start, expected_seconds[bucket])
+
+    def test_observation_requires_attempt_bounds_and_rejects_unrequested_periods(self):
+        class BillingProvider:
+            def __init__(self): self.calls = 0
+            def pod_billing(self, _pod_id, **_kwargs):
+                self.calls += 1
+                return [{"podId": "pod-1", "time": "2026-11-11T07:00:00Z",
+                         "amount": 0.1}]
+
+        provider = BillingProvider()
+        adapter = ProviderAdapter(provider)
+        with self.assertRaises(TypeError):
+            adapter.observe_pod_billing(
+                project_id="synthetic-nebula", attempt_id="attempt-1",
+                provider_pod_id="pod-1", observed_epoch=1_800_000_000)
+        self.assertEqual(provider.calls, 0)
+        with self.assertRaises(ExecutionError) as caught:
+            adapter.observe_pod_billing(
+                project_id="synthetic-nebula", attempt_id="attempt-1",
+                provider_pod_id="pod-1", observed_epoch=1_800_000_000,
+                start_time="2026-11-11T08:00:00Z",
+                end_time="2026-11-11T09:00:00Z")
+        self.assertEqual(caught.exception.code, "pod_billing_malformed")
+        self.assertEqual(provider.calls, 1)
 
 
 class InventoryPaginationBoundsTests(unittest.TestCase):

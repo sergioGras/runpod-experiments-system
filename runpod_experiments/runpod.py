@@ -1,4 +1,5 @@
 """Read-only RunPod REST transport. No resource mutation is exposed."""
+import math
 import json
 import os
 import re
@@ -6,11 +7,16 @@ import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
+from runpod_experiments.billing import billing_period_bounds
+
 API_URL = "https://api.runpod.io/v2"
+BILLING_API_URL = "https://rest.runpod.io/v1"
 MAX_INVENTORY_PAGES = 100
 MAX_INVENTORY_PODS = 10_000
+MAX_BILLING_RECORDS = 10_000
 MAX_RESPONSE_BYTES = 8_388_608
 
 
@@ -42,9 +48,9 @@ class RunPodClient:
     def _get(self, path):
         return self._request("GET", path)
 
-    def _request(self, method, path, body=None):
+    def _request(self, method, path, body=None, *, base_url=API_URL):
         payload = None if body is None else json.dumps(body).encode("utf-8")
-        request = urllib.request.Request(API_URL + path, data=payload, method=method,
+        request = urllib.request.Request(base_url + path, data=payload, method=method,
             headers={"Authorization": "Bearer " + self._key, "Content-Type": "application/json"})
         try:
             with self._opener(request, timeout=self._timeout) as response:
@@ -124,3 +130,72 @@ class RunPodClient:
             if not isinstance(cursor, str) or not cursor or cursor in seen:
                 raise ProviderError("Invalid or repeated Pod cursor")
             seen.add(cursor)
+
+    def pod_billing(self, pod_id, *, bucket_size="hour", start_time=None, end_time=None):
+        """Read documented REST v1 time-bucketed billing for exactly one Pod.
+
+        Billing records can be absent or change while provider posting is
+        delayed. This method only retrieves and validates an observation; it
+        does not settle a local budget reservation.
+        """
+        if not isinstance(pod_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", pod_id):
+            raise ValueError("Invalid Pod ID")
+        if not isinstance(bucket_size, str) or bucket_size not in {"hour", "day", "week", "month", "year"}:
+            raise ValueError("Invalid billing bucket size")
+        if (start_time is None) != (end_time is None):
+            raise ValueError("Billing start and end times must be provided together")
+        query = {"podId": pod_id, "grouping": "podId", "bucketSize": bucket_size}
+        if start_time is not None:
+            parsed_bounds = []
+            for name, value in (("startTime", start_time), ("endTime", end_time)):
+                if not isinstance(value, str) or not value:
+                    raise ValueError("Billing times must be RFC 3339 strings")
+                try:
+                    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                except ValueError:
+                    raise ValueError("Billing times must be RFC 3339 strings") from None
+                if parsed.tzinfo is None or parsed.utcoffset() is None:
+                    raise ValueError("Billing times must include a timezone")
+                parsed_bounds.append(parsed)
+                query[name] = value
+            if parsed_bounds[1] <= parsed_bounds[0]:
+                raise ValueError("Billing end time must be after start time")
+        result = self._request("GET", "/billing/pods?" + urllib.parse.urlencode(query),
+                               base_url=BILLING_API_URL)
+        if not isinstance(result, list) or len(result) > MAX_BILLING_RECORDS:
+            raise ProviderError("Invalid Pod billing response")
+        parsed_periods = []
+        for record in result:
+            if not isinstance(record, dict) or record.get("podId") != pod_id:
+                raise ProviderError("Pod billing record has an unexpected identity")
+            value = record.get("time")
+            if not isinstance(value, str) or not value:
+                raise ProviderError("Pod billing record has invalid period start")
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                raise ProviderError("Pod billing record has invalid period start") from None
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                raise ProviderError("Pod billing record has invalid period start")
+            if not _valid_billing_amount(record.get("amount")):
+                raise ProviderError("Pod billing record has invalid amount")
+            # The official API specifies the bucket start. The normalizer derives
+            # the bucket end from this request's bucketSize.
+            try:
+                parsed_periods.append(billing_period_bounds(value, bucket_size))
+            except ValueError:
+                raise ProviderError("Pod billing record has invalid period") from None
+        ordered_periods = sorted(parsed_periods)
+        if any(current[0] < previous[1]
+               for previous, current in zip(ordered_periods, ordered_periods[1:])):
+            raise ProviderError("Pod billing records contain overlapping periods")
+        return result
+
+
+def _valid_billing_amount(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (OverflowError, ValueError):
+        return False

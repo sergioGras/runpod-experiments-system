@@ -42,11 +42,11 @@ exit criteria remain open. Production migration has not begun. Read
 | M11 | Integrated acceptance, duplication retirement and release | M7, M8, M9, M10 | All consumer gates, release artifact checks and documented retirement complete |
 
 M0 completed as documentation in commit `3a13149`; M1 is complete in commit
-`b399a2a`. The M2 provider observation slice is committed, but M2 stays open
-until its billing evidence source is validated. M3's first local store tranche
-is implemented and validated; its remaining exit criteria and M4 through M11
-remain open. The order lets consumer experience improve the contracts before
-the parallel cutover.
+`b399a2a`. M2's provider observation and synthetic billing normalization are
+implemented on the design branch, but M2 stays open until account-level billing
+behavior is qualified. M3's first local store tranche is implemented and
+validated; its remaining exit criteria and M4 through M11 remain open. The order
+lets consumer experience improve the contracts before the parallel cutover.
 If serial migration exposes a missing common capability, implement it centrally
 with regression coverage before continuing that migration.
 
@@ -99,15 +99,29 @@ item totals and response-body sizes are bounded. Provider errors are reduced to
 safe category/code values; generic HTTP
 errors never prove capacity rejection, and mutation errors remain ambiguous.
 `QuoteObservation` stores compute and storage estimates separately, with
-microdollar rounding upward and a hash of the source response. A validated
-`BillingObservation` record exists, but no provider invoice importer or settlement
-path is implemented. The existing client exposes catalog rates and Pod details;
-hourly rates are not represented as posted billed charges. M2 remains open until
-the exact per-Pod billing evidence source and its redaction/adjustment parser are
-validated. Existing controllers still use their current guarded low-level path;
-the new adapter does not change their runtime behavior. The adapter suite passes
-13 focused tests and the full offline suite passes 82 tests; no provider account
-or resources were accessed.
+microdollar rounding upward and a hash of the source response. The read-only
+adapter now parses exact-Pod billing into immutable `BillingObservation` records.
+It requires an attempt's bounded start/end interval, calls the documented REST
+v1 `/billing/pods` operation with `grouping=podId`, and uses its `amount`,
+`podId` and bucket-start `time` fields. Bucket ends are derived from the requested
+bucket size because the published response schema has no end field. Rows outside
+the requested interval and overlapping buckets fail closed. Amounts round upward
+to microdollars; raw billing rows are not retained; empty responses produce no
+observation and cannot settle a hold. Adjustments require the caller to link the
+exact superseded row. See the official
+[RunPod REST v1 OpenAPI](https://github.com/runpod/docs/blob/main/api-reference/openapi.json)
+for the endpoint and schema. The response contract differs from the v2-shaped
+draft method on the main checkout, so this branch uses the documented v1 contract
+and does not claim the draft v2 response is validated.
+
+The new billing parser and transport path have synthetic coverage, but no
+provider account was queried. M2 remains open pending permitted account-level
+qualification of bucket boundaries, delayed/adjusted rows and actual billing
+behavior. Existing controllers still use their current guarded low-level path;
+the new adapter does not change their runtime behavior. On Windows with Python
+3.12.10, the provider adapter suite passed 18 tests, the connection suite passed
+11 tests, and the full offline library suite passed 106 tests. No provider
+account or resources were accessed.
 
 ## M3: durable state and accounting
 
@@ -156,16 +170,16 @@ reconciled exact scoped provider inventory. The local hash chain is not tamper-p
 against a party that can rewrite the database, and it does not authenticate a
 caller-supplied billing or provider-reconciliation claim.
 
-The first store tests cover restart/reopen across reservation, claim, binding,
-stop and settlement; one-use claims and idempotent local retries; project and
-approval admission caps; fresh-database plus last-budget and last-slot process
-races; a forced process exit mid-reservation; scoped project/host identity; ambiguous
-create/stop reconciliation; immutable evidence rows; and billing adjustments.
-On Python 3.12.14, 15 focused store tests and all 97 library tests passed using
-`python -m unittest discover -s tests -p 'test_execution_store.py' -v` and
-`python -m unittest discover -s tests -v`. These runs used local temporary
-databases and fake/local fixtures; no RunPod credentials, account calls or
-resources were used. This is not yet a production engine or stable API.
+The store tests cover restart/reopen across reservation, claim, binding, stop
+and settlement; one-use claims and idempotent local retries; project and approval
+admission caps; fresh-database plus last-budget and last-slot process races; a
+forced process exit mid-reservation; scoped project/host identity; ambiguous
+create/stop reconciliation; immutable evidence rows; billing adjustments; and
+an end-to-end fake path from normalized provider billing through transactional
+accounting. On Windows with Python 3.12.10, all 16 focused store tests and all
+106 library tests passed. These runs used local temporary databases and fake/local
+fixtures; no RunPod credentials, account calls or resources were used. This is
+not yet a production engine or stable API.
 Remaining M3 work includes broader transaction crash-point coverage,
 deployment-wide state-root coordination and further accounting edge cases. M10
 owns hierarchical parent/child budget admission. M2 must still provide a

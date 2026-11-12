@@ -4,6 +4,7 @@ import json
 import subprocess
 import tempfile
 import unittest
+import urllib.parse
 import urllib.error
 from pathlib import Path
 
@@ -18,6 +19,64 @@ from runpod_experiments.remote_process import start_python
 
 
 class ConnectionTests(unittest.TestCase):
+    def test_exact_pod_billing_is_a_read_only_validated_observation(self):
+        response = [{"podId": "pod-123", "time": "2026-11-11T08:00:00Z",
+                     "amount": 0.11, "timeBilledMs": 3_600_000}]
+        calls = []
+        def opener(request, timeout):
+            calls.append(request)
+            return io.BytesIO(json.dumps(response).encode())
+        client = RunPodClient("private-token", opener=opener)
+        result = client.pod_billing("pod-123", start_time="2026-11-11T08:00:00Z",
+            end_time="2026-11-11T10:00:00Z")
+        self.assertEqual(result, response)
+        self.assertEqual(calls[0].get_method(), "GET")
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(calls[0].full_url).query)
+        self.assertEqual(urllib.parse.urlsplit(calls[0].full_url).netloc, "rest.runpod.io")
+        self.assertEqual(urllib.parse.urlsplit(calls[0].full_url).path, "/v1/billing/pods")
+        self.assertEqual(query, {"podId": ["pod-123"], "grouping": ["podId"],
+            "bucketSize": ["hour"],
+            "startTime": ["2026-11-11T08:00:00Z"], "endTime": ["2026-11-11T10:00:00Z"]})
+        self.assertNotIn("private-token", calls[0].full_url)
+
+    def test_pod_billing_rejects_unpaired_times_bad_identifiers_and_foreign_rows(self):
+        calls = []
+        def opener(request, timeout):
+            calls.append(request)
+            return io.BytesIO(json.dumps([{"podId": "other",
+                "time": "2026-11-11T08:00:00Z", "amount": 0}]).encode())
+        client = RunPodClient("test-key", opener=opener)
+        with self.assertRaises(ValueError):
+            client.pod_billing("../pod")
+        with self.assertRaises(ValueError):
+            client.pod_billing("pod-1", start_time="2026-11-11T08:00:00Z")
+        with self.assertRaises(ValueError):
+            client.pod_billing("pod-1", start_time="2026-11-11T08:00:00",
+                end_time="2026-11-11T09:00:00")
+        with self.assertRaises(ValueError):
+            client.pod_billing("pod-1", start_time="2026-11-11T09:00:00Z",
+                end_time="2026-11-11T08:00:00Z")
+        self.assertFalse(calls)
+        with self.assertRaises(ProviderError):
+            client.pod_billing("pod-1")
+        foreign_record = [{"podId": "other", "time": "2026-11-11T08:00:00Z",
+                           "amount": 0}]
+        client._opener = lambda request, timeout: io.BytesIO(json.dumps(foreign_record).encode())
+        with self.assertRaisesRegex(ProviderError, "unexpected identity"):
+            client.pod_billing("pod-1")
+
+    def test_pod_billing_rejects_missing_amount_and_overlapping_periods(self):
+        response = [{"podId": "pod-1", "time": "2026-11-11T08:00:00Z"}]
+        client = RunPodClient("test-key", opener=lambda *_args, **_kwargs:
+                              io.BytesIO(json.dumps(response).encode()))
+        with self.assertRaisesRegex(ProviderError, "invalid amount"):
+            client.pod_billing("pod-1")
+
+        response[0]["amount"] = 0
+        response.append(dict(response[0]))
+        with self.assertRaisesRegex(ProviderError, "overlapping periods"):
+            client.pod_billing("pod-1")
+
     def test_inventory_pagination_and_cursor_loop(self):
         pages = iter([{"pods": [{"id": "a"}], "pagination": {"hasNextPage": True, "nextCursor": "next"}},
                       {"pods": [{"id": "b"}], "pagination": {"hasNextPage": False}}])

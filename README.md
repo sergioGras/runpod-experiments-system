@@ -4,13 +4,14 @@ Shared infrastructure for autonomous research experiments using RunPod. Current 
 
 The [cross-project unification roadmap](docs/unification-roadmap.md) proposes the common execution contracts and staged migration for the three consuming projects. It describes planned work, not currently supported capabilities.
 
-Development status: M0 and M1 are complete. M2 remains open because the exact
-per-Pod billing evidence source is not integrated. A read-only provider adapter
-slice is committed, and an internal SQLite admission/accounting store is in
-progress on the isolated design branch with local offline test evidence. M3 also
-remains open; no consumer migration has begun. These changes are not part of the
-pinned 0.1.0 package; existing consumers and their current package pins remain
-unchanged.
+Development status: M0 and M1 are complete. M2's read-only provider adapter now
+includes a synthetic-tested parser for the documented REST v1 exact-Pod billing
+shape. M2 remains open pending account-level qualification of bucket boundaries
+and delayed or adjusted rows. An internal SQLite admission/accounting store is
+in progress on the isolated design branch with local offline test evidence. M3
+also remains open; no consumer migration has begun. These changes are not part
+of the pinned 0.1.0 package; existing consumers and their current package pins
+remain unchanged.
 
 Detailed design and development documents:
 
@@ -33,7 +34,7 @@ These documents define the target design. Current package capabilities are descr
 
 `runpod_experiments.budget.BudgetLedger` persists a cap, idempotent charges and estimated attempt exposures in SQLite using integer microdollars. The create path reserves exposure before provisioning and retains it after an ambiguous response until charges are reconciled. Delayed or unknown costs beyond that estimate must also be accounted for. This is accounting, not a provider billing limit.
 
-`runpod_experiments.runpod.RunPodClient` reads paginated Pod inventory and exact Pod details via REST v2. It can read local runpodctl configuration and current CPU/GPU catalog records; the GPU quote call returns the API's Secure rate and capacity, while regional availability may require a separate catalog view. `ownership.delete_attempt` requests deletion only after the stored project, exact Pod ID and live Pod name match. Credentials and raw inventory must remain private.
+`runpod_experiments.runpod.RunPodClient` reads paginated Pod inventory and exact Pod details via REST v2, and reads Pod billing via the documented REST v1 endpoint. `pod_billing` requests grouping by exact Pod ID; `ProviderAdapter.observe_pod_billing` requires a bounded attempt interval and maps the documented `amount`, `podId` and bucket-start `time` into immutable `BillingObservation` records. It rounds amounts upward to microdollars, hashes evidence without retaining raw rows, and derives bucket ends from the requested interval size. Missing or changing billing rows do not prove zero final cost and must not release a local exposure reservation. This reader has synthetic tests only; the account-specific billing behavior has not been qualified. The client can read local runpodctl configuration and current CPU/GPU catalog records; the GPU quote call returns the API's Secure rate and capacity, while regional availability may require a separate catalog view. `ownership.delete_attempt` requests deletion only after the stored project, exact Pod ID and live Pod name match. Credentials and raw inventory must remain private.
 
 `attempts.AttemptLedger` persists unique attempts and a one-time create claim. `registry.ProjectRegistry` validates cooperating project prefixes. `controller.create_attempt` checks a live supervisor heartbeat, project namespace, remaining estimated budget and instance inventory before one create request; a unique name and durable claim allow the supervisor to reconcile an ambiguous response. CPU and GPU planning helpers bind the exact request to the current Secure catalog rate and capacity, and the supervisor compares nested provider shape fields while allowing extra reported metadata. GPU regional availability still needs a separate current check and the supervisor verifies the actual scheduled data center. `supervision.CleanupMonitor` monitors the pinned resource shape and hourly ceiling, guards deletion, and requires three consecutive reconciled absence observations before recording termination. `run_supervisor` adds heartbeat and stop latching; `supervisor_process.launch` starts it in a separate process. A hashed policy file binds the supervisor to the shape and hourly ceiling checked at create. `planning.runtime_from_remaining` derives a time envelope from the remaining aggregate cap and a current price estimate. These are locally tested components and accident-prevention guards, not provider IAM or an integrated paid controller. They require all cooperating local controllers to share the same ledger and namespace registry; they do not coordinate other hosts or uncooperative account users.
 

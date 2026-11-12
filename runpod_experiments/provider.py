@@ -5,7 +5,10 @@ from dataclasses import dataclass
 import re
 from typing import Protocol
 
-from runpod_experiments.contracts import ContractError, FailureCategory, ProjectPolicy, QuoteObservation
+from runpod_experiments.billing import billing_query_bounds, normalize_pod_billing
+from runpod_experiments.contracts import (
+    BillingObservation, ContractError, FailureCategory, ProjectPolicy, QuoteObservation,
+)
 from runpod_experiments.errors import (
     ExecutionError, ProviderOperation, normalize_provider_error,
 )
@@ -27,6 +30,10 @@ class ReadOnlyProvider(Protocol):
     def cpu_offer(self, cpu_id: str, vcpu_count: int) -> dict: ...
 
     def gpu_offer(self, gpu_id: str, gpu_count: int = 1) -> dict: ...
+
+    def pod_billing(self, pod_id: str, *, bucket_size: str = "hour",
+                    start_time: str | None = None,
+                    end_time: str | None = None) -> list[dict]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,3 +146,33 @@ class ProviderAdapter:
         return normalize_gpu_quote(
             offer, resource_id=resource_id, gpu_count=gpu_count,
             observed_epoch=observed_epoch, storage_hourly_usd=storage_hourly_usd)
+
+    def observe_pod_billing(
+        self,
+        *,
+        project_id: str,
+        attempt_id: str,
+        provider_pod_id: str,
+        observed_epoch: int,
+        start_time: str,
+        end_time: str,
+        bucket_size: str = "hour",
+        supersedes_observation_ids: dict[tuple[int, int], str] | None = None,
+    ) -> tuple[BillingObservation, ...]:
+        """Read and normalize exact-Pod billing; never settles or releases holds."""
+        billing_query_bounds(start_time, end_time)
+        try:
+            raw = self._provider.pod_billing(
+                provider_pod_id, bucket_size=bucket_size,
+                start_time=start_time, end_time=end_time)
+        except ProviderError as error:
+            raise normalize_provider_error(error, ProviderOperation.READ) from None
+        try:
+            return normalize_pod_billing(
+                raw, project_id=project_id, attempt_id=attempt_id,
+                provider_pod_id=provider_pod_id, observed_epoch=observed_epoch,
+                bucket_size=bucket_size, start_time=start_time, end_time=end_time,
+                supersedes_observation_ids=supersedes_observation_ids)
+        except ContractError:
+            raise ExecutionError(FailureCategory.RESOURCE_MISMATCH,
+                                 "pod_billing_malformed") from None

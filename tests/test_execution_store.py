@@ -16,6 +16,7 @@ from runpod_experiments.contracts import (
 )
 from runpod_experiments.errors import ExecutionError
 from runpod_experiments.execution_store import ExecutionStore
+from runpod_experiments.provider import ProviderAdapter
 
 
 ZERO = "0" * 64
@@ -242,6 +243,36 @@ class ExecutionStoreTests(unittest.TestCase):
             self.store.accounting_snapshot("synthetic-other", self.plan.approval.approval_id)
         self.assertEqual(caught.exception.code, "store_identity_mismatch")
         self.assertEqual(self.store.get_attempt(attempt.attempt_id)["attempt_id"], attempt.attempt_id)
+
+    def test_normalized_provider_billing_flows_into_transactional_accounting(self):
+        attempt, exposure = self.reserve()
+        self.activate_and_terminate(attempt)
+        bucket_start = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.now - 3600))
+        bucket_end = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.now))
+
+        class BillingProvider:
+            def __init__(self):
+                self.requested_pods = []
+            def pod_billing(self, pod_id, **_kwargs):
+                self.requested_pods.append(pod_id)
+                return [{"podId": pod_id, "time": bucket_start, "amount": 0.15}]
+
+        provider = BillingProvider()
+        observation, = ProviderAdapter(provider).observe_pod_billing(
+            project_id=self.plan.project.project_id,
+            attempt_id=attempt.attempt_id,
+            provider_pod_id="pod-1",
+            observed_epoch=self.now,
+            start_time=bucket_start,
+            end_time=bucket_end,
+        )
+        self.store.record_billing_observation(observation)
+        snapshot = self.store.accounting_snapshot(self.plan.project.project_id,
+                                                  self.plan.approval.approval_id)
+        self.assertEqual(provider.requested_pods, ["pod-1"])
+        self.assertEqual(snapshot.billed_micro_usd, 150_000)
+        self.assertEqual(snapshot.reserved_micro_usd, exposure)
+        self.assertEqual(self.store.get_attempt(attempt.attempt_id)["billing_complete"], 0)
 
     def test_billing_adjustments_replace_prior_amount_and_reopen_hold(self):
         attempt, exposure = self.reserve()
