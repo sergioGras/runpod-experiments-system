@@ -7,11 +7,11 @@ The [cross-project unification roadmap](docs/unification-roadmap.md) proposes th
 Development status: M0 and M1 are complete. M2's read-only provider adapter now
 includes a synthetic-tested parser for the documented REST v1 exact-Pod billing
 shape. M2 remains open pending account-level qualification of bucket boundaries
-and delayed or adjusted rows. An internal SQLite admission/accounting store is
-in progress on the isolated design branch with local offline test evidence. M3
-also remains open; no consumer migration has begun. These changes are not part
-of the pinned 0.1.0 package; existing consumers and their current package pins
-remain unchanged.
+and delayed or adjusted rows. The isolated design branch contains an internal
+SQLite admission/accounting store and an additive store-backed cleanup supervisor
+with offline and installed-artifact evidence. M3 and M4 remain open; no consumer
+migration has begun. These changes are not part of the pinned 0.1.0 package;
+existing consumers and their current package pins remain unchanged.
 
 Detailed design and development documents:
 
@@ -37,6 +37,17 @@ These documents define the target design. Current package capabilities are descr
 `runpod_experiments.runpod.RunPodClient` reads paginated Pod inventory and exact Pod details via REST v2, and reads Pod billing via the documented REST v1 endpoint. `pod_billing` requests grouping by exact Pod ID; `ProviderAdapter.observe_pod_billing` requires a bounded attempt interval and maps the documented `amount`, `podId` and bucket-start `time` into immutable `BillingObservation` records. It rounds amounts upward to microdollars, hashes evidence without retaining raw rows, and derives bucket ends from the requested interval size. Missing or changing billing rows do not prove zero final cost and must not release a local exposure reservation. This reader has synthetic tests only; the account-specific billing behavior has not been qualified. The client can read local runpodctl configuration and current CPU/GPU catalog records; the GPU quote call returns the API's Secure rate and capacity, while regional availability may require a separate catalog view. `ownership.delete_attempt` requests deletion only after the stored project, exact Pod ID and live Pod name match. Credentials and raw inventory must remain private.
 
 `attempts.AttemptLedger` persists unique attempts and a one-time create claim. `registry.ProjectRegistry` validates cooperating project prefixes. `controller.create_attempt` checks a live supervisor heartbeat, project namespace, remaining estimated budget and instance inventory before one create request; a unique name and durable claim allow the supervisor to reconcile an ambiguous response. CPU and GPU planning helpers bind the exact request to the current Secure catalog rate and capacity, and the supervisor compares nested provider shape fields while allowing extra reported metadata. GPU regional availability still needs a separate current check and the supervisor verifies the actual scheduled data center. `supervision.CleanupMonitor` monitors the pinned resource shape and hourly ceiling, guards deletion, and requires three consecutive reconciled absence observations before recording termination. `run_supervisor` adds heartbeat and stop latching; `supervisor_process.launch` starts it in a separate process. A hashed policy file binds the supervisor to the shape and hourly ceiling checked at create. `planning.runtime_from_remaining` derives a time envelope from the remaining aggregate cap and a current price estimate. These are locally tested components and accident-prevention guards, not provider IAM or an integrated paid controller. They require all cooperating local controllers to share the same ledger and namespace registry; they do not coordinate other hosts or uncooperative account users.
+
+The design branch also adds `StoreCleanupMonitor` and
+`supervisor_process.launch_execution_store` for an existing M3 attempt. This
+path reconstructs the selected CPU/GPU profile from hash-verified plan documents,
+checks live identity, region, CPU shape, image digest, disk, mount state and
+hourly rate, and only deletes through the store-backed ownership guard. It checks
+GPU identity/count/VRAM but deliberately fails closed until the system-memory and
+CUDA telemetry contract is qualified. It is not connected to a create engine or
+any consumer. Provider-detail shape checks have synthetic evidence only;
+account-level and live-host qualification remain open. Never run both supervisor
+paths against one attempt.
 
 `runpod_experiments.ssh.SSHFetcher` downloads bounded named files over direct SSH using an existing key and a pinned known-hosts file. `collection_process` can run independently of the foreground controller; it rechecks the recorded provider ID/name and direct endpoint on every poll, preserves changed snapshots, and retries failed files. `ArtifactStore` saves content-addressed local copies and a manifest. `upload.upload_bundle` checks an entire reviewed hash-pinned manifest before sending any file to the exact recorded Pod. Use a private local store and reviewed allowlists; callers must still approve disclosure and review the SSH host-key trust. Producers should publish complete files by atomic rename when coherent snapshots are required. Proxy SSH and interrupted large-file resume are not yet supported.
 

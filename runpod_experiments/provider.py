@@ -8,12 +8,14 @@ from typing import Protocol
 from runpod_experiments.billing import billing_query_bounds, normalize_pod_billing
 from runpod_experiments.contracts import (
     BillingObservation, ContractError, FailureCategory, ProjectPolicy, QuoteObservation,
+    ResourceProfile,
 )
 from runpod_experiments.errors import (
     ExecutionError, ProviderOperation, normalize_provider_error,
 )
 from runpod_experiments.runpod import ProviderError
 from runpod_experiments.quotes import normalize_cpu_quote, normalize_gpu_quote
+from runpod_experiments.resource_policy import resource_profile_violation
 
 
 _POD_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
@@ -43,6 +45,7 @@ class PodObservation:
     pod_id: str
     name: str
     status: str
+    resource_violation: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.pod_id, str) or _POD_ID.fullmatch(self.pod_id) is None:
@@ -52,6 +55,10 @@ class PodObservation:
             raise ContractError("provider Pod name is malformed")
         if not isinstance(self.status, str) or _STATUS.fullmatch(self.status) is None:
             raise ContractError("provider Pod status is malformed")
+        if (self.resource_violation is not None and
+                (not isinstance(self.resource_violation, str) or
+                 re.fullmatch(r"[a-z][a-z0-9_]{0,63}", self.resource_violation) is None)):
+            raise ContractError("provider Pod resource violation is malformed")
 
 
 class ProviderAdapter:
@@ -95,8 +102,9 @@ class ProviderAdapter:
                      if any(item.name.startswith(prefix) and len(item.name) > len(prefix)
                             for prefix in policy.pod_name_prefixes))
 
-    def get_attempt_pod(self, pod_id: str, pod_name: str,
-                        policy: ProjectPolicy) -> PodObservation:
+    def get_attempt_pod(self, pod_id: str, pod_name: str, policy: ProjectPolicy, *,
+                        resource_profile: ResourceProfile | None = None,
+                        selected_region: str | None = None) -> PodObservation:
         """Read one candidate and require its live ID/name/project identity to agree."""
         if not isinstance(policy, ProjectPolicy):
             raise ContractError("policy must be a ProjectPolicy")
@@ -116,7 +124,12 @@ class ProviderAdapter:
         try:
             if not isinstance(raw, dict):
                 raise ContractError("provider Pod detail is not an object")
-            observation = PodObservation(raw.get("id"), raw.get("name"), raw.get("status"))
+            if ((resource_profile is None) != (selected_region is None) or
+                    (resource_profile is not None and not isinstance(resource_profile, ResourceProfile))):
+                raise ContractError("resource profile and selected region must be supplied together")
+            violation = (resource_profile_violation(raw, resource_profile, selected_region)
+                         if resource_profile is not None else None)
+            observation = PodObservation(raw.get("id"), raw.get("name"), raw.get("status"), violation)
         except ContractError:
             raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
                                  "attempt_pod_malformed") from None

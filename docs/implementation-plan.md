@@ -3,7 +3,9 @@
 Status: M0 design and M1 are complete. M2 remains open pending verified per-Pod
 billing evidence. The initial M3 SQLite store slice passes its focused and full
 offline checks on the isolated `design/unified-execution` worktree; M3's full
-exit criteria remain open. Production migration has not begun. Read
+exit criteria remain open. An additive M4 store-backed supervisor slice now has
+offline and installed-artifact evidence; M4's full exit criteria remain open.
+Production migration has not begun. Read
 [architecture](architecture.md), [testing](testing-strategy.md) and
 [contribution rules](../CONTRIBUTING.md) together. The earlier
 [unification study](unification-roadmap.md) supplies the capability inventory.
@@ -232,19 +234,34 @@ telemetry retries and provider-confirmed absence. Recovery can operate on an
 exact durable attempt even when normal workload bootstrap fails. A damaged ledger
 must not authorize a different resource or be reported as successful termination.
 
-The current M4 code still uses the legacy `AttemptLedger` and file-backed
-`ResourcePolicy`; M3's `ExecutionStore` is not its source of lifecycle truth.
-`ProviderAdapter` deliberately exposes read-only operations, while cleanup
-mutations remain behind the existing ownership guard. The additive
+The legacy detached entrypoint still supports its `AttemptLedger` and file-backed
+`ResourcePolicy` behavior unchanged. The additive
 `request_delete_for_store_attempt()` primitive verifies the lifecycle projection,
 derives project scope from the hash-verified plan and approval documents,
 requires a latched stopping state and exact live project/Pod identity, and does
 not record termination. `StoreCleanupMonitor` now binds unique reserved-name
 candidates, latches stops, and requires three scoped provider absence observations
 before recording create absence or termination. Its observation count is
-intentionally in-memory, so restart repeats checks conservatively. The detached
-entrypoint still constructs the legacy monitor; store-backed launch/recovery and
-resource-shape supervision remain open.
+intentionally in-memory, so restart repeats checks conservatively. It reconstructs
+the selected resource profile from the hash-verified attempt and plan, and checks
+live Pod identity, selected region, CPU shape, image digest, disk, mounts, status
+and hourly rate. GPU identity/count/VRAM are checked, but GPU profiles fail closed
+until the system-memory and CUDA telemetry contract is qualified.
+`launch_execution_store()` validates the existing state root/host/attempt, derives
+the deadline from durable state and starts this monitor in a separate process.
+The legacy CLI and launcher remain available.
+
+On Windows with Python 3.12.14, 30 focused store tests and all 124 library tests
+passed; one symlink-capability test was skipped. A fresh no-dependency venv
+installed the test wheel (SHA-256
+`11aaa73e9e0f5e70353dc908ab30cdd627e2689b085cb0abb7232fa4ac237c92`), and the
+installed-package detached test proved the supervisor PID matches the process
+state and continues after its launcher parent exits. That test uses a local fake
+provider gate; it makes no RunPod requests. Live API response compatibility,
+Windows power-loss behavior, restart recovery during an active deletion, and
+resource-shape qualification against an authorized account remain open. The new
+store-backed path has not been connected to a create engine or consumer. GPU
+attempts cannot pass this watchdog's current fail-closed runtime check.
 Do not mix the two ledgers for one attempt or run both controllers against the
 same job. Cut over only after restart, ambiguous-create reconciliation,
 exact-Pod deletion and confirmed-absence conformance tests pass.

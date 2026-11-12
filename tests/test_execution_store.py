@@ -1,6 +1,7 @@
 import os
 from contextlib import closing
 from pathlib import Path
+import json
 import sqlite3
 import subprocess
 import sys
@@ -19,7 +20,10 @@ from runpod_experiments.execution_store import ExecutionStore
 from runpod_experiments.ownership import request_delete_for_store_attempt
 from runpod_experiments.provider import ProviderAdapter
 from runpod_experiments.runpod import ProviderError
+from runpod_experiments.resource_policy import resource_profile_violation
+from runpod_experiments.state_config import StateStoreConfig
 from runpod_experiments.supervision import StoreCleanupMonitor, run_supervisor
+from runpod_experiments.supervisor_process import launch_execution_store
 
 
 ZERO = "0" * 64
@@ -253,7 +257,12 @@ class ExecutionStoreTests(unittest.TestCase):
         attempt, _ = self.reserve()
         self.store.claim_create(attempt.attempt_id)
         provider = Provider()
-        live = {"id": "pod-1", "name": pod_name(1), "status": "RUNNING"}
+        live = {
+            "id": "pod-1", "name": pod_name(1), "status": "RUNNING", "cost": 0.3,
+            "cloud": "SECURE", "image": "runpod/base@" + self.plan.resource_options[0].image_digest,
+            "disk": 20, "dataCenterId": "EU-TEST-1",
+            "cpu": {"id": "cpu-small", "vcpuCount": 4, "memory": 8}, "mounts": {},
+        }
         provider.inventory = [dict(live)]
         provider.details["pod-1"] = dict(live)
         monitor = StoreCleanupMonitor(
@@ -273,6 +282,72 @@ class ExecutionStoreTests(unittest.TestCase):
         self.assertEqual(monitor.observe(), "terminated")
         self.assertEqual(self.store.get_attempt(attempt.attempt_id)["state"], "terminated")
         self.assertTrue(self.store.verify_attempt_lifecycle_projection(attempt.attempt_id))
+
+    def test_store_cleanup_monitor_deletes_exact_pod_when_resource_profile_is_violated(self):
+        class Provider:
+            def __init__(self, pod):
+                self.pod_record = dict(pod)
+                self.delete_calls = []
+
+            def pods(self):
+                return [dict(self.pod_record)]
+
+            def pod(self, _pod_id):
+                return dict(self.pod_record)
+
+            def _delete_pod(self, pod_id):
+                self.delete_calls.append(pod_id)
+
+        attempt, _ = self.reserve()
+        self.store.claim_create(attempt.attempt_id)
+        live = {
+            "id": "pod-1", "name": pod_name(1), "status": "RUNNING", "cost": 0.3,
+            "cloud": "SECURE", "image": "runpod/base@" + self.plan.resource_options[0].image_digest,
+            "disk": 20, "dataCenterId": "EU-TEST-1",
+            "cpu": {"id": "cpu-other", "vcpuCount": 4, "memory": 8}, "mounts": {},
+        }
+        provider = Provider(live)
+        monitor = StoreCleanupMonitor(
+            provider, self.store, attempt.attempt_id,
+            self.plan.project.project_id, clock=lambda: self.now)
+
+        self.assertEqual(monitor.observe(), "delete_requested")
+        self.assertEqual(monitor.stop_reason, "unexpected_resource_shape")
+        self.assertEqual(provider.delete_calls, ["pod-1"])
+        self.assertEqual(self.store.get_attempt(attempt.attempt_id)["state"], "stopping")
+
+    def test_selected_resource_is_reconstructed_from_hash_bound_attempt_plan(self):
+        attempt, _ = self.reserve()
+        profile, region = self.store.selected_resource_for_attempt(attempt.attempt_id)
+        self.assertEqual(profile, self.plan.resource_options[0])
+        self.assertEqual(region, "EU-TEST-1")
+        pod = {
+            "status": "RUNNING", "cost": 0.3, "cloud": "SECURE",
+            "image": "runpod/base@" + profile.image_digest, "disk": profile.disk_gb,
+            "dataCenterId": region, "cpu": {"id": profile.resource_id,
+                "vcpuCount": profile.cpu_count, "memory": profile.memory_gb}, "mounts": {},
+        }
+        self.assertIsNone(resource_profile_violation(pod, profile, region))
+        pod["cost"] = 0.300001
+        self.assertEqual(resource_profile_violation(pod, profile, region),
+                         "invalid_or_excess_hourly_rate")
+
+    def test_resource_profile_guard_checks_gpu_memory_and_identity(self):
+        profile = ResourceProfile(
+            ResourceKind.GPU, "NVIDIA A40", 600_000, ("EU-TEST-1",),
+            "sha256:" + ZERO, 30, 8, 32, 1, 48, "12.4")
+        pod = {
+            "status": "RUNNING", "cost": 0.59, "cloud": "SECURE",
+            "image": "runpod/gpu@" + profile.image_digest, "disk": 30,
+            "dataCenterId": "EU-TEST-1",
+            "gpu": {"id": "NVIDIA A40", "count": 1, "vcpuCount": 8, "memory": 48},
+            "mounts": {},
+        }
+        self.assertEqual(resource_profile_violation(pod, profile, "EU-TEST-1"),
+                         "unverifiable_gpu_profile")
+        pod["gpu"]["memory"] = 40
+        self.assertEqual(resource_profile_violation(pod, profile, "EU-TEST-1"),
+                         "unexpected_resource_shape")
 
     def test_store_cleanup_monitor_keeps_ambiguous_create_held_until_three_absences(self):
         class Provider:
@@ -323,6 +398,136 @@ class ExecutionStoreTests(unittest.TestCase):
         self.assertTrue(state["ready"])
         self.assertEqual(state["outcome"], "reserved")
         self.assertEqual(state["policy_sha256"], monitor.policy_sha256)
+
+    def test_store_launcher_passes_only_state_identity_and_persisted_deadline(self):
+        config = StateStoreConfig(self.root / "store-launch-state", "TEST-HOST")
+        store = config.open_execution_store(self.plan.project.project_id, clock=lambda: self.now)
+        attempt = attempt_for(self.plan, "attempt-launch", 1, self.now)
+        store.reserve_attempt(self.plan, attempt, pod_name(1))
+        captured = {}
+
+        def popen(argv, **kwargs):
+            captured.update(argv=argv, kwargs=kwargs)
+            return "child-process"
+
+        result = launch_execution_store(
+            config, attempt.attempt_id, self.plan.project.project_id,
+            self.root / "store-launch-control", popen=popen)
+        command = " ".join(captured["argv"])
+        self.assertEqual(result, "child-process")
+        self.assertIn(str(config.state_root), command)
+        self.assertIn("--controller-host TEST-HOST", command)
+        self.assertIn(f"--deadline {attempt.deadline_epoch}", command)
+        self.assertNotIn("apikey", command.lower())
+        self.assertTrue(captured["kwargs"]["close_fds"])
+
+    def test_real_detached_store_supervisor_survives_launcher_parent_exit(self):
+        config = StateStoreConfig(self.root / "detached-state", "TEST-HOST")
+        store = config.open_execution_store(self.plan.project.project_id, clock=lambda: self.now)
+        attempt = attempt_for(self.plan, "attempt-parent-exit", 1, self.now)
+        store.reserve_attempt(self.plan, attempt, pod_name(1))
+        control = self.root / "detached-control"
+        control.mkdir()
+        (control / "stop.request").touch()
+        config_home = self.root / "home"
+        (config_home / ".runpod").mkdir(parents=True)
+        (config_home / ".runpod" / "config.toml").write_text(
+            'apikey = "synthetic-test-key"\n', encoding="utf-8")
+        gate = self.root / "release-provider-read"
+        sitecustomize = self.root / "sitecustomize.py"
+        sitecustomize.write_text('''
+import json
+import os
+import time
+from pathlib import Path
+import urllib.request
+
+class _Response:
+    def __enter__(self): return self
+    def __exit__(self, *_args): return False
+    def read(self, _size=-1):
+        return json.dumps({"pods": [], "pagination": {"hasNextPage": False}}).encode()
+
+def _fake_urlopen(request, timeout=None):
+    if request.get_method() != "GET" or request.full_url != "https://api.runpod.io/v2/pods":
+        raise AssertionError("unexpected provider request in detached test")
+    gate = Path(os.environ["RUNPOD_TEST_RELEASE_FILE"])
+    deadline = time.monotonic() + 20
+    while not gate.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    if not gate.exists():
+        raise TimeoutError("parent did not release fake provider read")
+    return _Response()
+
+urllib.request.urlopen = _fake_urlopen
+''', encoding="utf-8")
+        package_parent = Path(__import__("runpod_experiments").__file__).resolve().parent.parent
+        source = '''
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from runpod_experiments.state_config import StateStoreConfig
+from runpod_experiments.supervisor_process import launch_execution_store
+root = Path(sys.argv[2]); state_root = Path(sys.argv[3]); control = Path(sys.argv[4])
+project, attempt = sys.argv[5], sys.argv[6]
+os.environ["RUNPOD_TEST_RELEASE_FILE"] = sys.argv[7]
+child = launch_execution_store(StateStoreConfig(state_root, "TEST-HOST"), attempt,
+                               project, control)
+(root / "child.pid").write_text(str(child.pid), encoding="ascii")
+'''
+        env = dict(os.environ)
+        env["HOME"] = str(config_home)
+        env["USERPROFILE"] = str(config_home)
+        env["PYTHONPATH"] = str(self.root) + os.pathsep + str(package_parent)
+        env["RUNPOD_TEST_RELEASE_FILE"] = str(gate)
+        process = subprocess.run(
+            [sys.executable, "-c", source,
+             str(package_parent), str(self.root),
+             str(config.state_root), str(control), self.plan.project.project_id,
+             attempt.attempt_id, str(gate)],
+            env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(process.returncode, 0, process.stderr)
+        child_pid = int((self.root / "child.pid").read_text(encoding="ascii"))
+        # The fake provider read is blocked until after the launcher parent exits.
+        gate.touch()
+        state_path = control / "supervisor.json"
+        deadline = time.monotonic() + 20
+        while not state_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(state_path.exists(), (control / "supervisor-process.log").read_text(
+            encoding="utf-8", errors="replace"))
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(state["pid"], child_pid)
+        self.assertTrue(state["ready"])
+        self.assertTrue(state["not_created"])
+        self.assertEqual(store.get_attempt(attempt.attempt_id)["state"], "cancelled")
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+            kernel = ctypes.windll.kernel32
+            kernel.OpenProcess.restype = wintypes.HANDLE
+            kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+            handle = kernel.OpenProcess(0x00100000, False, child_pid)  # SYNCHRONIZE
+            if handle:
+                try:
+                    self.assertEqual(kernel.WaitForSingleObject(handle, 10_000), 0)
+                finally:
+                    kernel.CloseHandle(handle)
+            else:
+                self.assertEqual(kernel.GetLastError(), 87)  # ERROR_INVALID_PARAMETER: already exited
+        else:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(child_pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.02)
+            else:
+                self.fail("detached supervisor did not exit after cancelling the reserved attempt")
 
     def test_cancel_releases_only_an_unclaimed_reservation(self):
         attempt, exposure = self.reserve()

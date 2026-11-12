@@ -95,6 +95,7 @@ class StoreCleanupMonitor:
         self.client, self.store = provider, store
         self.attempt_id, self.project_id = attempt_id, project_id
         self.project_policy = store.project_policy_for_attempt(attempt_id)
+        self.resource_profile, self.selected_region = store.selected_resource_for_attempt(attempt_id)
         self.policy = None
         self.policy_sha256 = sha256_bytes(encode_document(
             "project_policy", self.project_policy))
@@ -103,6 +104,7 @@ class StoreCleanupMonitor:
         self._required_absences = 3
         self._absence_evidence = []
         self.stopping = False
+        self.stop_reason = None
 
     def _reset_absence(self):
         self._absence_evidence.clear()
@@ -179,7 +181,9 @@ class StoreCleanupMonitor:
                 candidate = candidates[0]
                 try:
                     detail = self._provider.get_attempt_pod(
-                        candidate.pod_id, attempt["pod_name"], self.project_policy)
+                        candidate.pod_id, attempt["pod_name"], self.project_policy,
+                        resource_profile=self.resource_profile,
+                        selected_region=self.selected_region)
                 except Exception:
                     self._reset_absence()
                     raise
@@ -190,6 +194,9 @@ class StoreCleanupMonitor:
                 if candidate.status == "TERMINATED" or detail.status == "TERMINATED":
                     self.store.require_reconciliation(self.attempt_id, "candidate_terminated")
                     return "inventory_not_reconciled"
+                if detail.resource_violation is not None:
+                    self.stopping = True
+                    self.stop_reason = detail.resource_violation
                 if self.stopping:
                     self.store.request_stop(self.attempt_id)
                     return request_delete_for_store_attempt(
@@ -234,7 +241,9 @@ class StoreCleanupMonitor:
                                  "attempt_identity_mismatch")
         try:
             detail = self._provider.get_attempt_pod(
-                attempt["pod_id"], attempt["pod_name"], self.project_policy)
+                attempt["pod_id"], attempt["pod_name"], self.project_policy,
+                resource_profile=self.resource_profile,
+                selected_region=self.selected_region)
         except ExecutionError as error:
             if error.code != "attempt_pod_missing":
                 self._reset_absence()
@@ -265,6 +274,9 @@ class StoreCleanupMonitor:
         if not candidates or candidates[0].status == "TERMINATED":
             self._reset_absence()
             return "inventory_not_reconciled"
+        if detail.resource_violation is not None:
+            self.stopping = True
+            self.stop_reason = detail.resource_violation
         self._reset_absence()
         if attempt["state"] == "reconciliation_required":
             self.store.bind_pod(self.attempt_id, attempt["pod_id"], attempt["pod_name"])
@@ -302,6 +314,8 @@ def run_supervisor(monitor, directory, deadline_epoch, *, interval=10, error_lim
              "pid": os.getpid(), "attempt_id": monitor.attempt_id, "project_id": monitor.project_id,
              "deadline_epoch": deadline_epoch,
              "policy_sha256": policy_sha256}
+    if getattr(monitor, "stop_reason", None) is not None:
+        state["stop_reason"] = monitor.stop_reason
     initial_remaining = max(0, deadline_epoch - clock())
     monotonic_start = monotonic()
     while max_polls is None or polls < max_polls:
@@ -314,6 +328,8 @@ def run_supervisor(monitor, directory, deadline_epoch, *, interval=10, error_lim
                 monitor.client.pods()
             outcome = monitor.observe(stop=state["stopping"])
             state["stopping"] = state["stopping"] or monitor.stopping
+            if getattr(monitor, "stop_reason", None) is not None:
+                state["stop_reason"] = monitor.stop_reason
             state["ready"] = True
             errors = 0
             state["outcome"] = outcome

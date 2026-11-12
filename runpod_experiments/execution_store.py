@@ -16,7 +16,7 @@ from typing import Any, Iterator
 
 from runpod_experiments.contracts import (
     ApprovalScope, AttemptPlan, BillingObservation, ContractError, ExecutionPlan,
-    FailureCategory, ProjectPolicy,
+    FailureCategory, ProjectPolicy, ResourceKind, ResourceProfile,
     canonical_json_bytes, decode_document, encode_document, sha256_bytes,
     strict_json_loads, validate_attempt,
 )
@@ -797,6 +797,60 @@ class ExecutionStore:
         if row is None:
             raise ExecutionError(FailureCategory.CONFIGURATION, "unknown_attempt")
         return dict(row)
+
+    def selected_resource_for_attempt(self, attempt_id: str) -> tuple[ResourceProfile, str]:
+        """Return the hash-bound resource profile and region selected for an attempt."""
+        self.verify_attempt_lifecycle_projection(attempt_id)
+        with closing(self._connect()) as db:
+            row = db.execute("""SELECT a.project_id,a.hourly_micro_usd,a.attempt_sha256,
+                    a.attempt_document,a.plan_sha256,p.document AS plan_document
+                FROM execution_attempts a JOIN execution_plans p
+                  ON p.plan_sha256=a.plan_sha256
+                WHERE a.attempt_id=? AND a.project_id=?""",
+                (attempt_id, self.project_id)).fetchone()
+        if row is None:
+            raise ExecutionError(FailureCategory.CONFIGURATION, "unknown_attempt")
+        try:
+            attempt_bytes = bytes(row["attempt_document"])
+            plan_bytes = bytes(row["plan_document"])
+            if (sha256_bytes(attempt_bytes) != row["attempt_sha256"] or
+                    sha256_bytes(plan_bytes) != row["plan_sha256"]):
+                raise ContractError("stored attempt documents do not match their digests")
+            attempt = decode_document(attempt_bytes, expected_kind="attempt_plan")
+            plan = decode_document(plan_bytes, expected_kind="execution_plan")
+            selected = attempt.get("selected_resource")
+            required = {
+                "kind", "resource_id", "hourly_micro_usd", "region_ids", "image_digest",
+                "disk_gb", "cpu_count", "memory_gb", "gpu_count", "gpu_memory_gb",
+                "minimum_cuda",
+            }
+            if not isinstance(selected, dict) or set(selected) != required:
+                raise ContractError("selected resource profile is malformed")
+            profile = ResourceProfile(
+                kind=ResourceKind(selected["kind"]),
+                resource_id=selected["resource_id"],
+                hourly_micro_usd=selected["hourly_micro_usd"],
+                region_ids=tuple(selected["region_ids"]),
+                image_digest=selected["image_digest"],
+                disk_gb=selected["disk_gb"],
+                cpu_count=selected["cpu_count"],
+                memory_gb=selected["memory_gb"],
+                gpu_count=selected["gpu_count"],
+                gpu_memory_gb=selected["gpu_memory_gb"],
+                minimum_cuda=selected["minimum_cuda"],
+            )
+            options = plan.get("resource_options")
+            region = attempt.get("selected_region")
+            project = plan.get("project")
+            if (not isinstance(project, dict) or project.get("project_id") != self.project_id or
+                    not isinstance(options, list) or selected not in options or
+                    not isinstance(region, str) or region not in profile.region_ids or
+                    profile.hourly_micro_usd != row["hourly_micro_usd"]):
+                raise ContractError("selected resource is not bound to the stored plan")
+        except (ContractError, KeyError, TypeError, ValueError):
+            raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                 "attempt_resource_profile_mismatch") from None
+        return profile, region
 
     def project_policy_for_attempt(self, attempt_id: str) -> ProjectPolicy:
         """Reconstruct the approved project policy bound to one stored attempt."""
