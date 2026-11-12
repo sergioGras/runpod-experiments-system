@@ -195,12 +195,13 @@ forced process exit during reservation and immediately after writes at create
 claim, Pod binding, stop request, termination, reconciliation, confirmed create
 absence, pre-create cancellation, billing observation and billing completion,
 both immediately before event insertion and immediately after event insertion but
-before transaction commit;
+before transaction commit; process exit between approval/job/plan reservation
+writes and between billing-row insertion and the accounting-hold update;
 scoped project/host identity; ambiguous create/stop reconciliation; immutable
 evidence rows; billing adjustments; and an end-to-end fake path from normalized
 provider billing through transactional accounting. Each crash case reopened the
 store and verified unchanged attempt/accounting state and event chain. On Windows
-with Python 3.12.10, all 19 focused store tests and all 113 library tests passed.
+with Python 3.12.10, all 20 focused store tests and all 114 library tests passed.
 Over-cap posted billing remains recorded, and further admission is denied; the
 aggregate also remains exact when individually valid charges sum above SQLite's
 integer limit.

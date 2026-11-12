@@ -555,6 +555,96 @@ store.reserve_attempt(plan, attempt, pod_name(1))
         self.assertEqual(reopened.reserve_attempt(self.plan, attempt, pod_name(1)), 105_000)
         self.assertTrue(reopened.verify_event_chain())
 
+    def test_process_exit_between_transaction_writes_rolls_back_partial_state(self):
+        child = r"""
+import os, sqlite3, sys
+from pathlib import Path
+sys.path.insert(0, str(Path.cwd() / 'tests'))
+from test_execution_store import plan_for, attempt_for, pod_name
+from runpod_experiments.contracts import BillingObservation
+from runpod_experiments.execution_store import ExecutionStore
+path, target_sql, action, now_arg = sys.argv[1:]
+now = int(now_arg)
+connect = sqlite3.connect
+def traced_connect(*args, **kwargs):
+    db = connect(*args, **kwargs)
+    previous = [None]
+    def trace(statement):
+        if previous[0] is not None and target_sql in previous[0].lower():
+            os._exit(24)
+        previous[0] = statement.lower()
+    db.set_trace_callback(trace)
+    return db
+sqlite3.connect = traced_connect
+plan = plan_for(now)
+store = ExecutionStore(path, project_id=plan.project.project_id,
+                       controller_host='TEST-HOST', clock=lambda: now)
+if action == 'reserve':
+    attempt = attempt_for(plan, 'partial-reservation', 1, now)
+    store.reserve_attempt(plan, attempt, pod_name(1))
+elif action == 'billing':
+    observation = BillingObservation('partial-billing', plan.project.project_id,
+        'attempt-partial-billing', 'pod-partial', 150000,
+        now - 1, now + 1, now + 2, '1' * 64)
+    store.record_billing_observation(observation)
+else:
+    raise SystemExit('unknown test action')
+os._exit(25)
+"""
+        cases = (
+            ("reserve", "insert or ignore into execution_jobs"),
+            ("billing", "insert into execution_billing"),
+        )
+        for action, target_sql in cases:
+            with self.subTest(action=action):
+                path = self.root / f"partial-{action}.sqlite"
+                store = ExecutionStore(str(path), project_id=self.plan.project.project_id,
+                                       controller_host="TEST-HOST", clock=lambda: self.now)
+                attempt_id = "attempt-partial-billing"
+                if action == "billing":
+                    attempt = attempt_for(self.plan, attempt_id, 1, self.now)
+                    store.reserve_attempt(self.plan, attempt, pod_name(1))
+                    store.claim_create(attempt_id)
+                    store.bind_pod(attempt_id, "pod-partial", pod_name(1))
+                    store.request_stop(attempt_id)
+                    store.confirm_termination(attempt_id, "pod-partial", ONE)
+                    attempt_id = attempt.attempt_id
+                prior_attempt = (store.get_attempt(attempt_id)
+                                 if action == "billing" else None)
+                prior_events = store.events()
+                prior_accounting = (store.accounting_snapshot(
+                    self.plan.project.project_id, self.plan.approval.approval_id)
+                    if action == "billing" else None)
+                env = dict(os.environ)
+                env["USERPROFILE"] = str(self.root)
+                env["HOME"] = str(self.root)
+                process = subprocess.run(
+                    [sys.executable, "-c", child, str(path), target_sql,
+                     action, str(self.now)],
+                    cwd=Path(__file__).resolve().parents[1], env=env,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, timeout=20)
+                self.assertEqual(process.returncode, 24, process.stderr)
+                reopened = ExecutionStore(str(path), project_id=self.plan.project.project_id,
+                                          controller_host="TEST-HOST", clock=lambda: self.now)
+                self.assertEqual(reopened.events(), prior_events)
+                if action == "reserve":
+                    with closing(sqlite3.connect(path)) as db:
+                        for table in ("execution_approvals", "execution_jobs",
+                                      "execution_plans", "execution_attempts",
+                                      "execution_billing", "execution_events"):
+                            self.assertEqual(db.execute(
+                                f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0)
+                else:
+                    self.assertEqual(reopened.accounting_snapshot(
+                        self.plan.project.project_id, self.plan.approval.approval_id),
+                        prior_accounting)
+                    self.assertEqual(reopened.get_attempt(attempt_id), prior_attempt)
+                    with closing(sqlite3.connect(path)) as db:
+                        self.assertEqual(db.execute(
+                            "SELECT COUNT(*) FROM execution_billing").fetchone()[0], 0)
+                self.assertTrue(reopened.verify_event_chain())
+
     def test_process_exit_at_lifecycle_event_boundaries_rolls_back_each_transaction(self):
         child = r"""
 import os, sys
