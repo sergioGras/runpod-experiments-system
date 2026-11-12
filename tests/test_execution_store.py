@@ -513,13 +513,15 @@ sys.path.insert(0, str(Path.cwd() / 'tests'))
 from test_execution_store import plan_for, pod_name, ONE
 from runpod_experiments.contracts import BillingObservation
 from runpod_experiments.execution_store import ExecutionStore
-path, target_event, action, attempt_id, now_arg = sys.argv[1:]
+path, target_event, target_phase, action, attempt_id, now_arg = sys.argv[1:]
 now = int(now_arg)
 plan = plan_for(now)
 append = ExecutionStore._append_event
 def exit_after_target(db, entity_type, entity_id, event_type, created_epoch, payload):
+    if event_type == target_event and target_phase == 'before':
+        os._exit(23)
     append(db, entity_type, entity_id, event_type, created_epoch, payload)
-    if event_type == target_event:
+    if event_type == target_event and target_phase == 'after':
         os._exit(23)
 ExecutionStore._append_event = staticmethod(exit_after_target)
 store = ExecutionStore(path, project_id=plan.project.project_id,
@@ -549,7 +551,7 @@ elif action == 'cancel':
 else:
     raise SystemExit('unknown test action')
 """
-        cases = (
+        events = (
             ("claim", "create_claimed"),
             ("bind", "pod_bound"),
             ("stop", "stop_requested"),
@@ -560,9 +562,11 @@ else:
             ("absence", "create_absence_confirmed"),
             ("cancel", "cancelled_before_create"),
         )
-        for action, target_event in cases:
-            with self.subTest(action=action):
-                path = self.root / f"crash-{action}.sqlite"
+        cases = tuple((action, event, phase)
+                      for action, event in events for phase in ("before", "after"))
+        for action, target_event, target_phase in cases:
+            with self.subTest(action=action, phase=target_phase):
+                path = self.root / f"crash-{action}-{target_phase}.sqlite"
                 plan = plan_for(self.now)
                 attempt_id = f"attempt-{action}"
                 attempt = attempt_for(plan, attempt_id, 1, self.now)
@@ -593,7 +597,7 @@ else:
                 env["USERPROFILE"] = str(self.root)
                 env["HOME"] = str(self.root)
                 process = subprocess.run(
-                    [sys.executable, "-c", child, str(path), target_event, action,
+                    [sys.executable, "-c", child, str(path), target_event, target_phase, action,
                      attempt_id, str(self.now)],
                     cwd=Path(__file__).resolve().parents[1], env=env,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20)

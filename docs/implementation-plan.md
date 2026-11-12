@@ -120,7 +120,7 @@ qualification of bucket boundaries, delayed/adjusted rows and actual billing
 behavior. Existing controllers still use their current guarded low-level path;
 the new adapter does not change their runtime behavior. On Windows with Python
 3.12.10, the provider adapter suite passed 18 tests, the connection suite passed
-11 tests, and the full offline library suite passed 107 tests. No provider
+11 tests, and the full offline library suite passed 111 tests. No provider
 account or resources were accessed.
 
 ## M3: durable state and accounting
@@ -139,15 +139,28 @@ inspectors and explicit import/bridge validation. Establish the canonical state
 root and host identity across multiple checkouts. A second controller host is a
 separate future capability, not a side effect of using the same package.
 
+The internal `StateStoreConfig` requires explicit
+`RUNPOD_EXPERIMENTS_STATE_ROOT` absolute path and
+`RUNPOD_EXPERIMENTS_CONTROLLER_HOST` configured identity. It resolves one file
+per project at `<state-root>/<project-id>/execution.sqlite3`; it has no
+working-directory fallback and rejects unsafe project/database paths. Its
+`open_execution_store()` helper passes the configured project path and host to
+the SQLite store. Newly created directories use owner-only mode on POSIX; on
+Windows they inherit the configured parent ACL. The host label is configuration,
+not proof of machine identity. Every cooperating checkout must still use the
+same root and approved host identity, and the owner must review the chosen path
+and Windows ACL before using it for live state.
+
 ### Current M3 slice (internal and unreleased)
 
 `runpod_experiments.execution_store.ExecutionStore` currently supplies a
 schema-v2 SQLite ledger for one project on one configured controller host. It
-canonicalizes the caller-supplied database path and immutably binds the store to
-the supplied project and host identities. Deployment configuration must still
-select the same state-root path across that project's checkouts and ensure the
-configured host identity matches the real controller. The store atomically
-stores immutable approval, plan and attempt documents; project/approval slot
+canonicalizes the database path and immutably binds the store to the supplied
+project and host identities. `StateStoreConfig` provides the path formula and
+explicit configuration inputs, while deployment still must set the same root in
+every checkout and ensure the configured host identity matches the actual
+controller. The store atomically stores immutable approval, plan and attempt
+documents; project/approval slot
 counts; selected-rate hourly exposure; aggregate per-approval billed and
 estimated totals; and a one-use create claim. It persists candidate Pod binding,
 stop/reconciliation/confirmed-absence transitions, append-only exact-Pod billing
@@ -175,20 +188,23 @@ and settlement; one-use claims and idempotent local retries; project and approva
 admission caps; fresh-database plus last-budget and last-slot process races;
 forced process exit during reservation and immediately after writes at create
 claim, Pod binding, stop request, termination, reconciliation, confirmed create
-absence, pre-create cancellation, billing observation and billing completion;
+absence, pre-create cancellation, billing observation and billing completion,
+both immediately before event insertion and immediately after event insertion but
+before transaction commit;
 scoped project/host identity; ambiguous create/stop reconciliation; immutable
 evidence rows; billing adjustments; and an end-to-end fake path from normalized
 provider billing through transactional accounting. Each crash case reopened the
 store and verified unchanged attempt/accounting state and event chain. On Windows
-with Python 3.12.10, all 17 focused store tests and all 107
-library tests passed. These runs used local temporary databases and fake/local
-fixtures; no RunPod credentials, account calls or resources were used. This is
-not yet a production engine or stable API.
-Remaining M3 work includes deployment-wide state-root coordination, crash checks
-at additional SQL-write boundaries, and further accounting edge cases. M10 owns
-hierarchical parent/child budget admission. M2 still needs account-level billing
-qualification. Consumers continue on their existing package pins until their
-separate migration gates pass.
+with Python 3.12.10, all 17 focused store tests and all 111 library tests passed.
+Three state-configuration tests passed; one symlink test was skipped because
+this Windows host does not permit directory symlink creation. These runs used local
+temporary databases and fake/local fixtures; no RunPod credentials, account
+calls or resources were used. This is not yet a production engine or stable API.
+Remaining M3 work includes verifying common root/host configuration across the
+consumer checkouts, crash checks at additional SQL-write boundaries, and further
+accounting edge cases. M10 owns hierarchical parent/child budget admission. M2
+still needs account-level billing qualification. Consumers continue on their
+existing package pins until their separate migration gates pass.
 
 ## M4: supervision
 
