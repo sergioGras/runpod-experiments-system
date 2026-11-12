@@ -120,7 +120,7 @@ qualification of bucket boundaries, delayed/adjusted rows and actual billing
 behavior. Existing controllers still use their current guarded low-level path;
 the new adapter does not change their runtime behavior. On Windows with Python
 3.12.10, the provider adapter suite passed 18 tests, the connection suite passed
-11 tests, and the full offline library suite passed 106 tests. No provider
+11 tests, and the full offline library suite passed 107 tests. No provider
 account or resources were accessed.
 
 ## M3: durable state and accounting
@@ -172,19 +172,23 @@ caller-supplied billing or provider-reconciliation claim.
 
 The store tests cover restart/reopen across reservation, claim, binding, stop
 and settlement; one-use claims and idempotent local retries; project and approval
-admission caps; fresh-database plus last-budget and last-slot process races; a
-forced process exit mid-reservation; scoped project/host identity; ambiguous
-create/stop reconciliation; immutable evidence rows; billing adjustments; and
-an end-to-end fake path from normalized provider billing through transactional
-accounting. On Windows with Python 3.12.10, all 16 focused store tests and all
-106 library tests passed. These runs used local temporary databases and fake/local
+admission caps; fresh-database plus last-budget and last-slot process races;
+forced process exit during reservation and immediately after writes at create
+claim, Pod binding, stop request, termination, reconciliation, confirmed create
+absence, pre-create cancellation, billing observation and billing completion;
+scoped project/host identity; ambiguous create/stop reconciliation; immutable
+evidence rows; billing adjustments; and an end-to-end fake path from normalized
+provider billing through transactional accounting. Each crash case reopened the
+store and verified unchanged attempt/accounting state and event chain. On Windows
+with Python 3.12.10, all 17 focused store tests and all 107
+library tests passed. These runs used local temporary databases and fake/local
 fixtures; no RunPod credentials, account calls or resources were used. This is
 not yet a production engine or stable API.
-Remaining M3 work includes broader transaction crash-point coverage,
-deployment-wide state-root coordination and further accounting edge cases. M10
-owns hierarchical parent/child budget admission. M2 must still provide a
-validated billing evidence source. Consumers continue on their existing package
-pins until their separate migration gates pass.
+Remaining M3 work includes deployment-wide state-root coordination, crash checks
+at additional SQL-write boundaries, and further accounting edge cases. M10 owns
+hierarchical parent/child budget admission. M2 still needs account-level billing
+qualification. Consumers continue on their existing package pins until their
+separate migration gates pass.
 
 ## M4: supervision
 

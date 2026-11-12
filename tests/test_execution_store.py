@@ -505,6 +505,110 @@ store.reserve_attempt(plan, attempt, pod_name(1))
         self.assertEqual(reopened.reserve_attempt(self.plan, attempt, pod_name(1)), 105_000)
         self.assertTrue(reopened.verify_event_chain())
 
+    def test_process_exit_at_lifecycle_event_boundaries_rolls_back_each_transaction(self):
+        child = r"""
+import os, sys
+from pathlib import Path
+sys.path.insert(0, str(Path.cwd() / 'tests'))
+from test_execution_store import plan_for, pod_name, ONE
+from runpod_experiments.contracts import BillingObservation
+from runpod_experiments.execution_store import ExecutionStore
+path, target_event, action, attempt_id, now_arg = sys.argv[1:]
+now = int(now_arg)
+plan = plan_for(now)
+append = ExecutionStore._append_event
+def exit_after_target(db, entity_type, entity_id, event_type, created_epoch, payload):
+    append(db, entity_type, entity_id, event_type, created_epoch, payload)
+    if event_type == target_event:
+        os._exit(23)
+ExecutionStore._append_event = staticmethod(exit_after_target)
+store = ExecutionStore(path, project_id=plan.project.project_id,
+                       controller_host='TEST-HOST', clock=lambda: now)
+pod_id = 'pod-crash'
+pod = pod_name(1)
+if action == 'claim':
+    store.claim_create(attempt_id)
+elif action == 'bind':
+    store.bind_pod(attempt_id, pod_id, pod)
+elif action == 'stop':
+    store.request_stop(attempt_id)
+elif action == 'terminate':
+    store.confirm_termination(attempt_id, pod_id, ONE)
+elif action == 'billing':
+    bill = BillingObservation('bill-crash', plan.project.project_id, attempt_id,
+        pod_id, 150000, now - 1, now + 1, now + 2, ONE)
+    store.record_billing_observation(bill)
+elif action == 'billing_complete':
+    store.mark_billing_complete(attempt_id, '2' * 64, now - 1, now + 1)
+elif action == 'reconcile':
+    store.require_reconciliation(attempt_id, 'create_timeout')
+elif action == 'absence':
+    store.confirm_absence(attempt_id, ONE)
+elif action == 'cancel':
+    store.cancel_uncreated(attempt_id)
+else:
+    raise SystemExit('unknown test action')
+"""
+        cases = (
+            ("claim", "create_claimed"),
+            ("bind", "pod_bound"),
+            ("stop", "stop_requested"),
+            ("terminate", "terminated"),
+            ("billing", "observed"),
+            ("billing_complete", "billing_marked_complete"),
+            ("reconcile", "reconciliation_required"),
+            ("absence", "create_absence_confirmed"),
+            ("cancel", "cancelled_before_create"),
+        )
+        for action, target_event in cases:
+            with self.subTest(action=action):
+                path = self.root / f"crash-{action}.sqlite"
+                plan = plan_for(self.now)
+                attempt_id = f"attempt-{action}"
+                attempt = attempt_for(plan, attempt_id, 1, self.now)
+                store = ExecutionStore(str(path), project_id=plan.project.project_id,
+                                       controller_host="TEST-HOST", clock=lambda: self.now)
+                exposure = store.reserve_attempt(plan, attempt, pod_name(1))
+                if action not in ("claim", "cancel"):
+                    store.claim_create(attempt_id)
+                if action in ("stop", "terminate", "billing", "billing_complete"):
+                    store.bind_pod(attempt_id, "pod-crash", pod_name(1))
+                if action in ("terminate", "billing", "billing_complete"):
+                    store.request_stop(attempt_id)
+                if action in ("billing", "billing_complete"):
+                    store.confirm_termination(attempt_id, "pod-crash", ONE)
+                    bill = BillingObservation(
+                        "bill-crash", plan.project.project_id, attempt_id, "pod-crash",
+                        150_000, self.now - 1, self.now + 1, self.now + 2, ONE)
+                    if action == "billing_complete":
+                        store.record_billing_observation(bill)
+                if action == "absence":
+                    store.require_reconciliation(attempt_id, "create_timeout")
+
+                prior_attempt = store.get_attempt(attempt_id)
+                prior_events = store.events()
+                prior_accounting = store.accounting_snapshot(
+                    plan.project.project_id, plan.approval.approval_id)
+                env = dict(os.environ)
+                env["USERPROFILE"] = str(self.root)
+                env["HOME"] = str(self.root)
+                process = subprocess.run(
+                    [sys.executable, "-c", child, str(path), target_event, action,
+                     attempt_id, str(self.now)],
+                    cwd=Path(__file__).resolve().parents[1], env=env,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20)
+                self.assertEqual(process.returncode, 23, process.stderr)
+                reopened = ExecutionStore(str(path), project_id=plan.project.project_id,
+                                          controller_host="TEST-HOST", clock=lambda: self.now)
+                self.assertEqual(reopened.get_attempt(attempt_id), prior_attempt)
+                self.assertEqual(reopened.events(), prior_events)
+                self.assertEqual(reopened.accounting_snapshot(
+                    plan.project.project_id, plan.approval.approval_id), prior_accounting)
+                self.assertEqual(reopened.accounting_snapshot(
+                    plan.project.project_id, plan.approval.approval_id).reserved_micro_usd,
+                    exposure if action == "billing_complete" else prior_accounting.reserved_micro_usd)
+                self.assertTrue(reopened.verify_event_chain())
+
 
 if __name__ == "__main__":
     unittest.main()
