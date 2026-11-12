@@ -120,7 +120,7 @@ qualification of bucket boundaries, delayed/adjusted rows and actual billing
 behavior. Existing controllers still use their current guarded low-level path;
 the new adapter does not change their runtime behavior. On Windows with Python
 3.12.10, the provider adapter suite passed 18 tests, the connection suite passed
-11 tests, and the full offline library suite passed 111 tests. No provider
+11 tests, and the full offline library suite passed 112 tests. No provider
 account or resources were accessed.
 
 ## M3: durable state and accounting
@@ -195,7 +195,8 @@ scoped project/host identity; ambiguous create/stop reconciliation; immutable
 evidence rows; billing adjustments; and an end-to-end fake path from normalized
 provider billing through transactional accounting. Each crash case reopened the
 store and verified unchanged attempt/accounting state and event chain. On Windows
-with Python 3.12.10, all 17 focused store tests and all 111 library tests passed.
+with Python 3.12.10, all 18 focused store tests and all 112 library tests passed.
+Over-cap posted billing remains recorded, and further admission is denied.
 Three state-configuration tests passed; one symlink test was skipped because
 this Windows host does not permit directory symlink creation. These runs used local
 temporary databases and fake/local fixtures; no RunPod credentials, account

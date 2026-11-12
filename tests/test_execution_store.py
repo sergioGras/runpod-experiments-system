@@ -274,6 +274,31 @@ class ExecutionStoreTests(unittest.TestCase):
         self.assertEqual(snapshot.reserved_micro_usd, exposure)
         self.assertEqual(self.store.get_attempt(attempt.attempt_id)["billing_complete"], 0)
 
+    def test_posted_billing_above_approval_cap_is_preserved_and_blocks_admission(self):
+        attempt, exposure = self.reserve()
+        self.activate_and_terminate(attempt)
+        posted = BillingObservation(
+            "bill-over-cap", self.plan.project.project_id, attempt.attempt_id,
+            "pod-1", 1_100_000, self.now - 1, self.now + 1,
+            self.now + 2, ONE)
+        self.store.record_billing_observation(posted)
+        pending = self.store.accounting_snapshot(self.plan.project.project_id,
+                                                 self.plan.approval.approval_id)
+        self.assertEqual(pending.billed_micro_usd, 1_100_000)
+        self.assertEqual(pending.reserved_micro_usd, exposure)
+        self.assertEqual(pending.remaining_micro_usd, 0)
+
+        self.store.mark_billing_complete(attempt.attempt_id, "2" * 64,
+                                         self.now - 1, self.now + 1)
+        settled = self.store.accounting_snapshot(self.plan.project.project_id,
+                                                 self.plan.approval.approval_id)
+        self.assertEqual(settled.committed_micro_usd, 1_100_000)
+        self.assertEqual(settled.reserved_micro_usd, 0)
+        self.assertEqual(settled.remaining_micro_usd, 0)
+        with self.assertRaises(ExecutionError) as caught:
+            self.reserve(number=2)
+        self.assertEqual(caught.exception.code, "total_cap_exceeded")
+
     def test_billing_adjustments_replace_prior_amount_and_reopen_hold(self):
         attempt, exposure = self.reserve()
         self.activate_and_terminate(attempt)
