@@ -205,7 +205,7 @@ scoped project/host identity; ambiguous create/stop reconciliation; immutable
 evidence rows; billing adjustments; and an end-to-end fake path from normalized
 provider billing through transactional accounting. Each crash case reopened the
 store and verified unchanged attempt/accounting state and event chain. On Windows
-with Python 3.12.10, all 22 focused store tests and all 116 library tests passed.
+with Python 3.12.10, all 25 focused store tests and all 119 library tests passed.
 Over-cap posted billing remains recorded, and further admission is denied; the
 aggregate also remains exact when individually valid charges sum above SQLite's
 integer limit. Direct mutations of the mutable Pod/state projection are rejected
@@ -239,7 +239,12 @@ mutations remain behind the existing ownership guard. The additive
 `request_delete_for_store_attempt()` primitive verifies the lifecycle projection,
 derives project scope from the hash-verified plan and approval documents,
 requires a latched stopping state and exact live project/Pod identity, and does
-not record termination. A store-backed supervisor/monitor is still required.
+not record termination. `StoreCleanupMonitor` now binds unique reserved-name
+candidates, latches stops, and requires three scoped provider absence observations
+before recording create absence or termination. Its observation count is
+intentionally in-memory, so restart repeats checks conservatively. The detached
+entrypoint still constructs the legacy monitor; store-backed launch/recovery and
+resource-shape supervision remain open.
 Do not mix the two ledgers for one attempt or run both controllers against the
 same job. Cut over only after restart, ambiguous-create reconciliation,
 exact-Pod deletion and confirmed-absence conformance tests pass.

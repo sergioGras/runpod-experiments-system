@@ -19,6 +19,7 @@ from runpod_experiments.execution_store import ExecutionStore
 from runpod_experiments.ownership import request_delete_for_store_attempt
 from runpod_experiments.provider import ProviderAdapter
 from runpod_experiments.runpod import ProviderError
+from runpod_experiments.supervision import StoreCleanupMonitor, run_supervisor
 
 
 ZERO = "0" * 64
@@ -230,6 +231,98 @@ class ExecutionStoreTests(unittest.TestCase):
                 self.plan.project.project_id)
         self.assertEqual(caught.exception.code, "http_503")
         self.assertEqual(caught.exception.category, FailureCategory.AMBIGUOUS_OPERATION)
+
+    def test_store_cleanup_monitor_reconciles_exact_create_and_confirms_cleanup(self):
+        class Provider:
+            def __init__(self):
+                self.inventory = []
+                self.details = {}
+                self.delete_calls = []
+
+            def pods(self):
+                return [dict(item) for item in self.inventory]
+
+            def pod(self, pod_id):
+                if pod_id not in self.details:
+                    raise ProviderError("missing", status=404)
+                return dict(self.details[pod_id])
+
+            def _delete_pod(self, pod_id):
+                self.delete_calls.append(pod_id)
+
+        attempt, _ = self.reserve()
+        self.store.claim_create(attempt.attempt_id)
+        provider = Provider()
+        live = {"id": "pod-1", "name": pod_name(1), "status": "RUNNING"}
+        provider.inventory = [dict(live)]
+        provider.details["pod-1"] = dict(live)
+        monitor = StoreCleanupMonitor(
+            provider, self.store, attempt.attempt_id,
+            self.plan.project.project_id, clock=lambda: self.now)
+
+        self.assertEqual(monitor.observe(), "active")
+        self.assertEqual(self.store.get_attempt(attempt.attempt_id)["pod_id"], "pod-1")
+        self.assertEqual(monitor.observe(stop=True), "delete_requested")
+        self.assertEqual(provider.delete_calls, ["pod-1"])
+        self.assertEqual(self.store.get_attempt(attempt.attempt_id)["state"], "stopping")
+
+        provider.inventory = []
+        provider.details["pod-1"]["status"] = "TERMINATED"
+        self.assertEqual(monitor.observe(), "confirming_absence")
+        self.assertEqual(monitor.observe(), "confirming_absence")
+        self.assertEqual(monitor.observe(), "terminated")
+        self.assertEqual(self.store.get_attempt(attempt.attempt_id)["state"], "terminated")
+        self.assertTrue(self.store.verify_attempt_lifecycle_projection(attempt.attempt_id))
+
+    def test_store_cleanup_monitor_keeps_ambiguous_create_held_until_three_absences(self):
+        class Provider:
+            def pods(self):
+                return []
+
+            def pod(self, pod_id):
+                raise ProviderError("missing", status=404)
+
+            def _delete_pod(self, pod_id):
+                raise AssertionError("an unbound create must never be deleted")
+
+        attempt, exposure = self.reserve()
+        self.store.claim_create(attempt.attempt_id)
+        monitor = StoreCleanupMonitor(
+            Provider(), self.store, attempt.attempt_id,
+            self.plan.project.project_id, clock=lambda: self.now)
+
+        self.assertEqual(monitor.observe(), "unresolved")
+        self.assertEqual(self.store.get_attempt(attempt.attempt_id)["exposure_micro_usd"], exposure)
+        self.assertEqual(monitor.observe(stop=True), "confirming_absence")
+        self.assertEqual(monitor.observe(), "confirming_absence")
+        self.assertEqual(monitor.observe(), "not_created")
+        record = self.store.get_attempt(attempt.attempt_id)
+        self.assertEqual(record["state"], "cancelled")
+        self.assertEqual(record["exposure_micro_usd"], 0)
+        self.assertTrue(self.store.verify_attempt_lifecycle_projection(attempt.attempt_id))
+
+    def test_store_cleanup_monitor_uses_independent_supervisor_loop(self):
+        class Provider:
+            def pods(self):
+                return []
+
+            def pod(self, pod_id):
+                raise ProviderError("missing", status=404)
+
+            def _delete_pod(self, pod_id):
+                raise AssertionError("no Pod is bound")
+
+        attempt, _ = self.reserve()
+        monitor = StoreCleanupMonitor(
+            Provider(), self.store, attempt.attempt_id,
+            self.plan.project.project_id, clock=lambda: self.now)
+        state = run_supervisor(
+            monitor, self.root / "store-supervisor", self.now + 100,
+            interval=1, clock=lambda: self.now, monotonic=lambda: 0,
+            sleep=lambda _: None, max_polls=1)
+        self.assertTrue(state["ready"])
+        self.assertEqual(state["outcome"], "reserved")
+        self.assertEqual(state["policy_sha256"], monitor.policy_sha256)
 
     def test_cancel_releases_only_an_unclaimed_reservation(self):
         attempt, exposure = self.reserve()
