@@ -249,12 +249,13 @@ and hourly rate. GPU identity/count/VRAM are checked, but GPU profiles fail clos
 until the system-memory and CUDA telemetry contract is qualified.
 `launch_execution_store()` validates the existing state root/host/attempt, derives
 the deadline from durable state and starts this monitor in a separate process.
-The legacy CLI and launcher remain available.
+The supervisor state records the hash of the exact attempt plan for future
+readiness checks. The legacy CLI and launcher remain available.
 
 On Windows with Python 3.12.14, 30 focused store tests and all 124 library tests
 passed; one symlink-capability test was skipped. A fresh no-dependency venv
 installed the test wheel (SHA-256
-`11aaa73e9e0f5e70353dc908ab30cdd627e2689b085cb0abb7232fa4ac237c92`), and the
+`25ce293cdf3cdacc5ef4a19862ae2a304546244ddcaf4b27c768534c85d6fb17`), and the
 installed-package detached test proved the supervisor PID matches the process
 state and continues after its launcher parent exits. That test uses a local fake
 provider gate; it makes no RunPod requests. Live API response compatibility,

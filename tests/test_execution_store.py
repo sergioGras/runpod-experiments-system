@@ -398,6 +398,8 @@ class ExecutionStoreTests(unittest.TestCase):
         self.assertTrue(state["ready"])
         self.assertEqual(state["outcome"], "reserved")
         self.assertEqual(state["policy_sha256"], monitor.policy_sha256)
+        self.assertEqual(state["attempt_sha256"],
+                         self.store.get_attempt(attempt.attempt_id)["attempt_sha256"])
 
     def test_store_launcher_passes_only_state_identity_and_persisted_deadline(self):
         config = StateStoreConfig(self.root / "store-launch-state", "TEST-HOST")
@@ -501,6 +503,8 @@ child = launch_execution_store(StateStoreConfig(state_root, "TEST-HOST"), attemp
         self.assertEqual(state["pid"], child_pid)
         self.assertTrue(state["ready"])
         self.assertTrue(state["not_created"])
+        self.assertEqual(state["attempt_sha256"],
+                         store.get_attempt(attempt.attempt_id)["attempt_sha256"])
         self.assertEqual(store.get_attempt(attempt.attempt_id)["state"], "cancelled")
         if os.name == "nt":
             import ctypes

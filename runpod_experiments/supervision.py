@@ -94,6 +94,7 @@ class StoreCleanupMonitor:
             raise ExecutionError(FailureCategory.AUTHORIZATION, "attempt_outside_project")
         self.client, self.store = provider, store
         self.attempt_id, self.project_id = attempt_id, project_id
+        self.attempt_sha256 = store.get_attempt(attempt_id)["attempt_sha256"]
         self.project_policy = store.project_policy_for_attempt(attempt_id)
         self.resource_profile, self.selected_region = store.selected_resource_for_attempt(attempt_id)
         self.policy = None
@@ -314,6 +315,9 @@ def run_supervisor(monitor, directory, deadline_epoch, *, interval=10, error_lim
              "pid": os.getpid(), "attempt_id": monitor.attempt_id, "project_id": monitor.project_id,
              "deadline_epoch": deadline_epoch,
              "policy_sha256": policy_sha256}
+    attempt_sha256 = getattr(monitor, "attempt_sha256", None)
+    if attempt_sha256 is not None:
+        state["attempt_sha256"] = attempt_sha256
     if getattr(monitor, "stop_reason", None) is not None:
         state["stop_reason"] = monitor.stop_reason
     initial_remaining = max(0, deadline_epoch - clock())
