@@ -472,13 +472,29 @@ class SerialExecutionEngine:
                     policy_sha256, workload.known_hosts)
 
             start("upload")
+            upload_deadline = self.monotonic() + min(
+                self.store.attempt_runtime_seconds(attempt_id),
+                max(0, attempt["deadline_epoch"] - self.clock()))
+
+            def check_upload_health() -> None:
+                self._check_supervisor(supervisor_process, supervisor_directory,
+                                       attempt, policy_sha256)
+                if collector_process is not None and collector_process.poll() is not None:
+                    raise ExecutionError(FailureCategory.TRANSPORT_FAILURE,
+                                         "collector_process_exited")
+                if (self.clock() >= attempt["deadline_epoch"] or
+                        self.monotonic() >= upload_deadline):
+                    raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                         "attempt_deadline_reached")
+
             self.uploader(
                 self.client, self.store, attempt_id, project,
                 workload.source_root, bundle, workload.key_file,
                 workload.known_hosts, workload.remote_root,
                 max_file_bytes=plan.transfers.max_file_bytes,
                 max_total_bytes=plan.transfers.max_total_bytes,
-                ssh_route=workload.ssh_route)
+                ssh_route=workload.ssh_route,
+                transfer_check=check_upload_health)
             succeed()
             self._check_supervisor(supervisor_process, supervisor_directory,
                                    attempt, policy_sha256)

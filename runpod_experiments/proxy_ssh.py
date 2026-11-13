@@ -3,12 +3,16 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
+import json
 import math
+import os
 import re
 import secrets
 import shlex
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -16,6 +20,7 @@ from runpod_experiments.provider import SSHRouteEndpoint
 
 
 _ANSI = re.compile(r"\x1b\[(?:\?2004[hl]|[0-9;]*m)")
+PROXY_CHUNK_BYTES = 1_000_000
 
 
 class SSHProxyError(RuntimeError):
@@ -176,17 +181,20 @@ def _run_bounded(argv: list[str], request: bytes, timeout: int | float,
 class SSHProxySession:
     """Run one finite shell command through a PTY-backed proxy route.
 
-    Shell stdout and stderr are suppressed by the remote wrapper. A requested
-    file result is returned as one strict base64 frame; arbitrary binary streams
-    and long-lived interactive protocols are deliberately unsupported here.
+    Shell stdout and stderr are suppressed by the remote wrapper. Bounded file
+    reads and writes use strict base64 frames; large files are divided into
+    digest-checked chunks. Arbitrary binary streams and long-lived interactive
+    protocols remain unsupported here.
     """
 
     def __init__(self, endpoint: SSHRouteEndpoint, key_file: str | Path,
                  known_hosts: str | Path, *, max_script_bytes: int = 50_000_000,
-                 max_output_bytes: int = 16_000_000, runner=None):
+                 max_output_bytes: int = 16_000_000, runner=None,
+                 monotonic=time.monotonic):
         if (not isinstance(endpoint, SSHRouteEndpoint) or endpoint.route != "proxy" or
-                type(max_script_bytes) is not int or max_script_bytes <= 0 or
-                type(max_output_bytes) is not int or max_output_bytes <= 0):
+                type(max_script_bytes) is not int or max_script_bytes < 2048 or
+                type(max_output_bytes) is not int or max_output_bytes < 512 or
+                not callable(monotonic)):
             raise ValueError("Invalid proxy SSH configuration")
         key_path, hosts_path = Path(key_file), Path(known_hosts)
         if not key_path.is_file() or not hosts_path.is_file():
@@ -195,6 +203,10 @@ class SSHProxySession:
         self.key_file, self.known_hosts = str(key_path), str(hosts_path)
         self.max_script_bytes, self.max_output_bytes = max_script_bytes, max_output_bytes
         self.runner = runner
+        output_chunk = max(1, (max_output_bytes - 512) * 3 // 4)
+        script_chunk = max(1, (max_script_bytes - 2048) * 3 // 4)
+        self.chunk_bytes = min(PROXY_CHUNK_BYTES, output_chunk, script_chunk)
+        self.monotonic = monotonic
 
     @staticmethod
     def _remote_path(value: str) -> str:
@@ -205,7 +217,8 @@ class SSHProxySession:
         return value
 
     def _request(self, script: str, result_file: str | None,
-                 max_result_bytes: int, timeout: int | float) -> SSHProxyResult:
+                 max_result_bytes: int, timeout: int | float,
+                 result_cleanup: str | None = None) -> SSHProxyResult:
         if (not isinstance(script, str) or "\x00" in script or
                 len(script.encode("utf-8")) > self.max_script_bytes or
                 type(max_result_bytes) is not int or max_result_bytes < 0 or
@@ -214,6 +227,8 @@ class SSHProxySession:
             raise ValueError("Invalid proxy command or transfer limit")
         if result_file is not None:
             result_file = self._remote_path(result_file)
+        if result_cleanup is not None:
+            result_cleanup = self._remote_path(result_cleanup)
 
         token = "RUNPOD_" + secrets.token_hex(12).upper()
         script_marker = token + "_SCRIPT"
@@ -246,6 +261,8 @@ class SSHProxySession:
                 "  fi",
                 "fi",
             ]
+        if result_cleanup is not None:
+            lines.append("rm -f -- " + shlex.quote(result_cleanup))
         lines += ["rm -rf -- \"$__runpod_proxy_dir\"", "exit"]
         request = ("\n".join(lines) + "\n").encode("utf-8")
 
@@ -281,13 +298,195 @@ class SSHProxySession:
 
     def read_file(self, remote_path: str, *, max_bytes: int = 10_000_000,
                   timeout: int | float = 30) -> bytes:
-        """Read one bounded remote file through a strict framed base64 response."""
+        """Read one bounded file, splitting large results into checked chunks."""
         remote_path = self._remote_path(remote_path)
-        if type(max_bytes) is not int or max_bytes <= 0:
-            raise ValueError("max_bytes must be a positive integer")
-        result = self._request("true", remote_path, max_bytes, timeout)
-        assert result.payload is not None
-        return result.payload
+        if (type(max_bytes) is not int or max_bytes <= 0 or
+                isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or
+                not math.isfinite(timeout) or timeout <= 0 or timeout > 3600):
+            raise ValueError("Invalid proxy file read limit or timeout")
+        if max_bytes <= self.chunk_bytes:
+            result = self._request("true", remote_path, max_bytes, timeout)
+            assert result.payload is not None
+            return result.payload
+
+        deadline = self.monotonic() + timeout
+        metadata = self._read_file_metadata(remote_path, deadline)
+        size = metadata["size"]
+        if size > max_bytes:
+            raise SSHProxyError("Remote file exceeds its configured size limit")
+        if size <= self.chunk_bytes:
+            result = self._request("true", remote_path, max_bytes,
+                                   min(timeout, self._remaining(deadline)))
+            assert result.payload is not None
+            payload = result.payload
+            if len(payload) != size or hashlib.sha256(payload).hexdigest() != metadata["sha256"]:
+                raise SSHProxyError("Remote file changed during collection")
+            return payload
+
+        output = bytearray()
+        digest = hashlib.sha256()
+        for offset in range(0, size, self.chunk_bytes):
+            count = min(self.chunk_bytes, size - offset)
+            chunk = self._read_file_chunk(
+                remote_path, metadata, offset, count,
+                min(timeout, self._remaining(deadline)))
+            if len(chunk) != count:
+                raise SSHProxyError("Remote file chunk length differs")
+            digest.update(chunk)
+            output.extend(chunk)
+        if len(output) != size or digest.hexdigest() != metadata["sha256"]:
+            raise SSHProxyError("Remote file changed during collection")
+        return bytes(output)
+
+    def _remaining(self, deadline: float) -> float:
+        remaining = deadline - self.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("SSH proxy file transfer exceeded its deadline")
+        return remaining
+
+    def _read_file_metadata(self, remote_path: str, deadline: float) -> dict:
+        temporary = str(PurePosixPath(remote_path).parent /
+                        (".runpod-metadata-" + secrets.token_hex(12)))
+        python_program = (
+            "import hashlib,json,os,stat\n"
+            f"source={remote_path!r}; target={temporary!r}\n"
+            "fd=os.open(source,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))\n"
+            "try:\n"
+            " info=os.fstat(fd)\n"
+            " if not stat.S_ISREG(info.st_mode): raise ValueError('not_regular')\n"
+            " digest=hashlib.sha256()\n"
+            " while True:\n  block=os.read(fd,1048576)\n  if not block: break\n  digest.update(block)\n"
+            " after=os.fstat(fd)\n"
+            " identity=(info.st_size,info.st_mtime_ns,info.st_dev,info.st_ino)\n"
+            " if identity!=(after.st_size,after.st_mtime_ns,after.st_dev,after.st_ino): raise ValueError('changed')\n"
+            " data=json.dumps({'size':info.st_size,'mtime_ns':info.st_mtime_ns,'device':info.st_dev,'inode':info.st_ino,'sha256':digest.hexdigest()},separators=(',',':')).encode()\n"
+            " out=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)\n"
+            " try:\n  view=memoryview(data)\n  while view:\n   written=os.write(out,view)\n   view=view[written:]\n"
+            " finally: os.close(out)\n"
+            "finally: os.close(fd)"
+        )
+        script = "python3 - <<'RUNPOD_FILE_METADATA'\n" + python_program + "\nRUNPOD_FILE_METADATA"
+        response = self._request(
+            script, temporary, 2048, min(60, self._remaining(deadline)),
+            result_cleanup=temporary)
+        try:
+            metadata = json.loads(response.payload.decode("ascii"))
+        except (AttributeError, UnicodeError, ValueError):
+            raise SSHProxyError("Remote file metadata is invalid") from None
+        if (not isinstance(metadata, dict) or type(metadata.get("size")) is not int or
+                metadata["size"] < 0 or type(metadata.get("mtime_ns")) is not int or
+                type(metadata.get("device")) is not int or type(metadata.get("inode")) is not int or
+                not isinstance(metadata.get("sha256"), str) or
+                not re.fullmatch(r"[0-9a-f]{64}", metadata["sha256"])):
+            raise SSHProxyError("Remote file metadata is invalid")
+        return metadata
+
+    def _read_file_chunk(self, remote_path: str, metadata: dict, offset: int,
+                         count: int, timeout: int | float) -> bytes:
+        temporary = str(PurePosixPath(remote_path).parent /
+                        (".runpod-chunk-" + secrets.token_hex(12)))
+        python_program = (
+            "import os,stat\n"
+            f"source={remote_path!r}; target={temporary!r}\n"
+            f"expected=({metadata['size']!r},{metadata['mtime_ns']!r},{metadata['device']!r},{metadata['inode']!r})\n"
+            f"offset={offset!r}; count={count!r}\n"
+            "fd=os.open(source,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))\n"
+            "try:\n"
+            " info=os.fstat(fd)\n"
+            " actual=(info.st_size,info.st_mtime_ns,info.st_dev,info.st_ino)\n"
+            " if not stat.S_ISREG(info.st_mode) or actual!=expected: raise ValueError('changed')\n"
+            " if offset<0 or count<0 or offset+count>info.st_size: raise ValueError('range')\n"
+            " os.lseek(fd,offset,os.SEEK_SET)\n"
+            " data=os.read(fd,count)\n"
+            " if len(data)!=count: raise ValueError('short_read')\n"
+            " out=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)\n"
+            " try:\n"
+            "  view=memoryview(data)\n"
+            "  while view:\n   written=os.write(out,view)\n   view=view[written:]\n"
+            " finally: os.close(out)\n"
+            "finally: os.close(fd)"
+        )
+        script = "python3 - <<'RUNPOD_FILE_CHUNK'\n" + python_program + "\nRUNPOD_FILE_CHUNK"
+        response = self._request(script, temporary, count, timeout,
+                                 result_cleanup=temporary)
+        assert response.payload is not None
+        return response.payload
+
+    def write_file_chunks(self, source_path: str | Path, remote_path: str,
+                          expected_sha256: str, *, max_bytes: int,
+                          chunk_bytes: int | None = None, timeout: int | float = 300,
+                          check=lambda: None) -> int:
+        """Upload a reviewed file in bounded, non-replayed chunks and publish atomically."""
+        remote_path = self._remote_path(remote_path)
+        source = Path(source_path)
+        chunk_size = self.chunk_bytes if chunk_bytes is None else chunk_bytes
+        if (source.is_symlink() or not source.is_file() or type(max_bytes) is not int or
+                max_bytes <= 0 or type(chunk_size) is not int or
+                not 1 <= chunk_size <= self.chunk_bytes or
+                not isinstance(expected_sha256, str) or
+                not re.fullmatch(r"[0-9a-f]{64}", expected_sha256) or
+                isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or
+                not math.isfinite(timeout) or timeout <= 0 or timeout > 3600 or
+                not callable(check)):
+            raise ValueError("Invalid chunked proxy upload contract")
+        source = source.resolve(strict=True)
+        deadline = self.monotonic() + timeout
+        source_digest = hashlib.sha256()
+        size = 0
+        with source.open("rb") as stream:
+            while True:
+                check()
+                block = stream.read(chunk_size)
+                if not block:
+                    break
+                size += len(block)
+                if size > max_bytes:
+                    raise ValueError("Upload exceeds its configured size limit")
+                source_digest.update(block)
+        if size > max_bytes or source_digest.hexdigest() != expected_sha256:
+            raise ValueError("Upload source differs from its reviewed digest")
+
+        temporary = remote_path + ".tmp-" + secrets.token_hex(12)
+        parent = str(PurePosixPath(remote_path).parent)
+        check()
+        self.execute("set -e\numask 077\nmkdir -p -- " + shlex.quote(parent) +
+                     "\nset -C\n: > " + shlex.quote(temporary) + "\nset +C",
+                     timeout=min(90, self._remaining(deadline)))
+        digest = hashlib.sha256()
+        offset = 0
+        with source.open("rb") as stream:
+            while True:
+                check()
+                block = stream.read(chunk_size)
+                if not block:
+                    break
+                if offset + len(block) > size or offset + len(block) > max_bytes:
+                    raise ValueError("Upload source changed while streaming")
+                digest.update(block)
+                marker = "RUNPOD_CHUNK_" + secrets.token_hex(12).upper()
+                encoded = base64.b64encode(block).decode("ascii")
+                quoted_temporary = shlex.quote(temporary)
+                script = ("set -e\nactual=$(wc -c < " + quoted_temporary + ")\ntest \"$actual\" -eq " +
+                          str(offset) + "\nbase64 -d >> " + quoted_temporary + " <<'" + marker + "'\n" +
+                          "\n".join(encoded[index:index + 76]
+                                    for index in range(0, len(encoded), 76)) +
+                          "\n" + marker + "\nactual=$(wc -c < " + quoted_temporary +
+                          ")\ntest \"$actual\" -eq " + str(offset + len(block)))
+                check()
+                self.execute(script, timeout=min(90, self._remaining(deadline)))
+                offset += len(block)
+        if digest.hexdigest() != expected_sha256 or offset != size:
+            raise ValueError("Upload source changed while streaming")
+        check()
+        quoted_temporary, quoted_destination = (shlex.quote(temporary),
+                                                shlex.quote(remote_path))
+        finalize = ("set -e\nactual=$(wc -c < " + quoted_temporary + ")\ntest \"$actual\" -eq " +
+                    str(size) + "\nprintf '%s  %s\\n' " + shlex.quote(expected_sha256) + " " +
+                    quoted_temporary + " | sha256sum -c -\nmv -- " + quoted_temporary +
+                    " " + quoted_destination)
+        self.execute(finalize, timeout=min(90, self._remaining(deadline)))
+        check()
+        return size
 
 
 class SSHProxyFetcher:

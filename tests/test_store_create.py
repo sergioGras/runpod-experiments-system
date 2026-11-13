@@ -352,12 +352,24 @@ class StoreCreateControllerTests(unittest.TestCase):
             uploaded.append((argv, kwargs["input"]))
             return SimpleNamespace(stdout=b"", returncode=0)
 
-        self.assertEqual(upload_bundle(
-            self.client, self.store, self.attempt["attempt_id"], self.project.project_id,
-            self.root, {"worker.py": sha256_bytes(worker)}, private_key, known_hosts,
-            "/tmp/nebula", runner=upload_runner), 1)
+        with patch("runpod_experiments.upload.subprocess.run", upload_runner):
+            self.assertEqual(upload_bundle(
+                self.client, self.store, self.attempt["attempt_id"], self.project.project_id,
+                self.root, {"worker.py": sha256_bytes(worker)}, private_key, known_hosts,
+                "/tmp/nebula"), 1)
         self.assertEqual(uploaded[0][1], worker)
         self.assertIn("root@127.0.0.1", uploaded[0][0])
+
+        large_worker = bytes((index % 233 for index in range(1_000_137)))
+        (self.root / "large-worker.py").write_bytes(large_worker)
+        uploaded.clear()
+        self.assertEqual(upload_bundle(
+            self.client, self.store, self.attempt["attempt_id"], self.project.project_id,
+            self.root, {"large-worker.py": sha256_bytes(large_worker)}, private_key,
+            known_hosts, "/tmp/nebula", max_file_bytes=1_100_000,
+            max_total_bytes=1_100_000, runner=upload_runner), 1)
+        self.assertEqual(len(uploaded), 4)
+        self.assertLessEqual(max(len(item[1]) for item in uploaded), 1_000_000)
 
         launched = {}
 
@@ -416,6 +428,17 @@ class StoreCreateControllerTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIn("-tt", calls[0][0])
         self.assertIn("runpod@ssh.runpod.io", calls[0][0])
+
+        large_worker = bytes((index % 241 for index in range(1_000_137)))
+        (self.root / "large-worker.py").write_bytes(large_worker)
+        calls.clear()
+        self.assertEqual(upload_bundle(
+            self.client, self.store, self.attempt["attempt_id"], self.project.project_id,
+            self.root, {"large-worker.py": sha256_bytes(large_worker)}, private_key,
+            known_hosts, "/tmp/nebula", max_file_bytes=1_100_000,
+            max_total_bytes=1_100_000, ssh_route="proxy", runner=proxy_runner), 1)
+        self.assertEqual(len(calls), 4)
+        self.assertLess(max(len(call[1]["input"]) for call in calls), 2_000_000)
 
         class Fetcher:
             def __init__(self, host, port, username, *_args):
@@ -532,11 +555,15 @@ class StoreCreateControllerTests(unittest.TestCase):
             collector_limits.update(kwargs)
             return Collector()
 
+        def uploader(*_args, **kwargs):
+            kwargs["transfer_check"]()
+            return 1
+
         engine = SerialExecutionEngine(
             self.client, self.store, self.state_config,
             supervisor_launcher=supervisor_launcher,
             collector_launcher=collector_launcher,
-            uploader=lambda *_args, **_kwargs: 1,
+            uploader=uploader,
             process_launcher=lambda *_args, **_kwargs: SimpleNamespace(
                 returncode=0, poll=lambda: 0),
             clock=lambda: self.now, sleep=lambda _duration: None)

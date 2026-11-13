@@ -301,9 +301,10 @@ legacy ledger. Shared resolution verifies the lifecycle projection, project
 policy, selected resource/region, declared ports and live provider detail before
 opening the explicitly selected SSH endpoint. Direct remains the default. The
 new `SSHProxySession` supports finite PTY commands and framed, bounded file
-transfers; store-backed upload and collection can select this route, including
-from a detached collector. Raw binary pipes, long-lived process launch and
-interrupted large-file resume remain direct-only or open. Fake-provider coverage
+transfers; larger proxy files use digest-checked chunks and uploads publish by
+atomic rename. Store-backed upload and collection can select this route,
+including from a detached collector. Raw binary pipes, long-lived process
+launch and interrupted large-file resume remain open. Fake-provider coverage
 exercises the direct paths and proxy framing/route selection; unexpected live
 shape prevents SSH startup, and the legacy paths remain covered. The internal
 `SerialExecutionEngine` records durable stage events, passes manifest file and
@@ -329,6 +330,18 @@ session/fetcher, route endpoint, and detached collector; wheel SHA-256:
 manifest contained only package modules and standard distribution metadata.
 This validates the local artifact and fake path, not live provider proxy
 compatibility or remote shell behavior.
+
+Chunk-transfer follow-up (2026-11-13): large proxy reads now verify remote
+file identity and SHA-256 before and across bounded chunks; direct and proxy
+uploads stream reviewed sources, verify the published digest and size, and
+publish by atomic rename. Upload health checks run between chunks against the
+supervisor, collector and immutable attempt deadline. The full offline suite
+passed 190 tests with one platform-capability skip. The generated remote
+Python bodies were syntax-checked and transfer behavior used local fake SSH
+runners only. No provider account, credentials, SSH endpoint, consumer source,
+package pin, state or resource was contacted or changed. This still does not
+qualify remote shell behavior, live proxy compatibility or interrupted-transfer
+resume.
 Consumer disposition: no source, package pin, state, or live process changed.
 Hybrid's binary interactive flow and MIAP's batch orchestration remain on their
 current paths; Partition can evaluate the finite proxy transfer capability while
@@ -542,21 +555,23 @@ but the consumer cutovers still have concrete contract gaps:
   one-use approval receipt, source/host binding, credential-delivery decision,
   and scientific acceptance remain in its adapter. Approval or accounting
   state must not cross project boundaries.
-- Partition's serial path can map to the shared CPU/GPU attempt lifecycle, but
-  its proxy path uses chunked archive transfer. The current shared proxy file
-  frames do not provide interrupted large-file resume. Add and qualify a
-  bounded chunk-transfer contract before migrating that workload.
+- Partition's serial path can map to the shared CPU/GPU attempt lifecycle, and
+  the design branch now has bounded digest-checked chunk transfer over proxy
+  SSH. It still cannot resume an interrupted file transfer. Its current study
+  uses 256 KiB archive chunks and a 600-second collection window; the shared
+  collector currently defaults to 1 MiB chunks and a 30-second per-file
+  timeout. M9 must plumb and enforce the study's configured transfer limits,
+  alongside archive limits, service roles and exact cleanup, before migration.
 - Partition's two-resource dispatcher still requires M10's atomic parent/child
   caps, slot admission, and independent per-resource supervision; serial
   parity alone is not evidence for this cutover.
 
-These findings came from source inspection only. No consumer source, state,
-package pin, or provider resource was changed. The interactive interface has
-passed local fake-path coverage; complete the shared M6 contract and
-fault-injection gates, then qualify chunk transfer with local fakes before its
-consumer migration. A consumer cutover also requires exact reconciliation of
-its existing attempts, controllers, and pending accounting in that project's
-own namespace.
+These findings came from source inspection and local fake-path coverage only.
+No consumer source, state, package pin, or provider resource was changed. The
+interactive and chunk-transfer interfaces have local coverage; complete the
+shared M6 contract and fault-injection gates before consumer migration. A
+consumer cutover also requires exact reconciliation of its existing attempts,
+controllers, and pending accounting in that project's own namespace.
 
 ## M10 and M11: parallelism and completion
 

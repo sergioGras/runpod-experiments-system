@@ -1,6 +1,9 @@
 import base64
+import hashlib
+import json
 import re
 import sys
+import subprocess
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -33,6 +36,19 @@ class ProxySSHTests(unittest.TestCase):
         if match is None:
             raise AssertionError("proxy status marker missing")
         return match.group(1).decode("ascii")
+
+    @staticmethod
+    def remote_script_from_request(request):
+        lines = request.splitlines()
+        marker = re.search(rb"<<'([^']+_SCRIPT)'", request).group(1)
+        start = next(index for index, line in enumerate(lines)
+                     if b'base64 -d > "$__runpod_proxy_script"' in line)
+        encoded = []
+        for line in lines[start + 1:]:
+            if line == marker:
+                break
+            encoded.append(line)
+        return base64.b64decode(b"".join(encoded)).decode("utf-8")
 
     def test_execute_uses_pinned_pty_route_and_strict_status_frame(self):
         calls = []
@@ -68,6 +84,111 @@ class ProxySSHTests(unittest.TestCase):
         session = SSHProxySession(self.endpoint, self.key, self.known_hosts, runner=runner)
         self.assertEqual(session.read_file("/work/result.bin", max_bytes=64), payload)
         self.assertEqual(len(calls), 1)
+
+    def test_read_large_file_uses_bounded_chunks_and_checks_the_complete_digest(self):
+        payload = bytes((index % 251 for index in range(1_000_137)))
+        metadata = {
+            "size": len(payload), "mtime_ns": 123456, "device": 1, "inode": 2,
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+        calls = []
+
+        def runner(_argv, **kwargs):
+            calls.append(kwargs)
+            token = self.token_from(kwargs["input"])
+            index = len(calls) - 1
+            if index == 0:
+                chunk = json.dumps(metadata, separators=(",", ":")).encode()
+            else:
+                offset = (index - 1) * 1_000_000
+                chunk = payload[offset:offset + 1_000_000]
+            output = token + "_STATUS:0\n" + token + "_BEGIN\n"
+            output += base64.b64encode(chunk).decode() + "\n" + token + "_END\n"
+            return SimpleNamespace(stdout=output.encode(), stderr=b"", returncode=0)
+
+        session = SSHProxySession(self.endpoint, self.key, self.known_hosts, runner=runner)
+        actual = session.read_file("/work/archive.bin", max_bytes=1_100_000, timeout=30)
+
+        self.assertEqual(actual, payload)
+        self.assertEqual(len(calls), 3)  # metadata plus two bounded chunks
+        self.assertLess(max(len(call["input"]) for call in calls), 2_000_000)
+        self.assertTrue(all(b"rm -f -- /work/.runpod-" in call["input"] for call in calls))
+        for call in calls:
+            remote = self.remote_script_from_request(call["input"])
+            match = re.search(r"python3 - <<'([^']+)'\n(.*?)\n\1", remote, re.DOTALL)
+            self.assertIsNotNone(match)
+            compile(match.group(2), "<proxy-remote-chunk>", "exec")
+
+    def test_read_large_file_rejects_a_chunk_that_breaks_the_remote_digest(self):
+        payload = b"a" * 1_000_000 + b"b" * 37
+        metadata = {
+            "size": len(payload), "mtime_ns": 1, "device": 1, "inode": 1,
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+        calls = []
+
+        def runner(_argv, **kwargs):
+            calls.append(kwargs)
+            token = self.token_from(kwargs["input"])
+            if len(calls) == 1:
+                chunk = json.dumps(metadata, separators=(",", ":")).encode()
+            else:
+                offset = (len(calls) - 2) * 1_000_000
+                chunk = payload[offset:offset + 1_000_000]
+                if len(calls) == 3:
+                    chunk = b"x" + chunk[1:]
+            output = token + "_STATUS:0\n" + token + "_BEGIN\n"
+            output += base64.b64encode(chunk).decode() + "\n" + token + "_END\n"
+            return SimpleNamespace(stdout=output.encode(), stderr=b"", returncode=0)
+
+        session = SSHProxySession(self.endpoint, self.key, self.known_hosts, runner=runner)
+        with self.assertRaises(SSHProxyError):
+            session.read_file("/work/archive.bin", max_bytes=1_100_000, timeout=30)
+        self.assertEqual(len(calls), 3)
+
+    def test_chunked_upload_is_bounded_and_never_replays_an_ambiguous_chunk(self):
+        source = Path(self.temp.name) / "large-upload.bin"
+        payload = bytes((index % 239 for index in range(2_000_123)))
+        source.write_bytes(payload)
+        calls = []
+        checks = []
+
+        def runner(_argv, **kwargs):
+            calls.append(kwargs)
+            token = self.token_from(kwargs["input"])
+            return SimpleNamespace(stdout=(token + "_STATUS:0\n").encode(),
+                                   stderr=b"", returncode=0)
+
+        session = SSHProxySession(self.endpoint, self.key, self.known_hosts, runner=runner)
+        size = session.write_file_chunks(
+            source, "/work/large-upload.bin", hashlib.sha256(payload).hexdigest(),
+            max_bytes=len(payload), check=lambda: checks.append(True))
+
+        self.assertEqual(size, len(payload))
+        self.assertEqual(len(calls), 5)  # initialize, three chunks, atomic publish
+        self.assertLess(max(len(call["input"]) for call in calls), 2_000_000)
+        self.assertGreater(len(checks), 3)
+        final_script = self.remote_script_from_request(calls[-1]["input"])
+        self.assertIn("sha256sum -c -", final_script)
+        self.assertIn("mv --", final_script)
+
+        failed_calls = []
+
+        def ambiguous_runner(_argv, **kwargs):
+            failed_calls.append(kwargs)
+            token = self.token_from(kwargs["input"])
+            if len(failed_calls) == 2:
+                raise subprocess.TimeoutExpired("ssh", 1)
+            return SimpleNamespace(stdout=(token + "_STATUS:0\n").encode(),
+                                   stderr=b"", returncode=0)
+
+        ambiguous = SSHProxySession(
+            self.endpoint, self.key, self.known_hosts, runner=ambiguous_runner)
+        with self.assertRaises(SSHProxyError):
+            ambiguous.write_file_chunks(
+                source, "/work/ambiguous.bin", hashlib.sha256(payload).hexdigest(),
+                max_bytes=len(payload))
+        self.assertEqual(len(failed_calls), 2)
 
     def test_rejects_bad_status_duplicate_frame_and_oversized_payload(self):
         with self.assertRaises(SSHProxyError):
