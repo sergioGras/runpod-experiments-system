@@ -27,7 +27,7 @@ These statuses are separate; a test count alone does not establish coverage.
 | Serial engine | `tests/test_store_create.py`, `tests/test_gpu_supervision.py`: complete fake CPU/GPU attempts, finite retries, deadline failures and restart cleanup | No integrated live qualification or consumer acceptance |
 | Setup | Success before workload, timeout clamping and interrupted-stage recovery are covered in store-create tests | Dedicated nonzero-exit, configured-timeout, supervisor-loss and process-stop-failure regressions are not established by those success/restart cases |
 | Interactive I/O | `tests/test_interactive_workload.py`, `tests/test_interactive_ssh.py`, `tests/test_binary_process.py`: bounded sessions and process I/O | No consumer protocol or scientific-equivalence proof |
-| Packaging | Candidate wheel installs and imports outside checkout, with collector CLI loading from that environment | No complete wheel/sdist release inspection or full detached-host deployment qualification for this artifact |
+| Packaging | Current local wheel and sdist were inspected and installed outside checkout; wheel full suite and installed supervisor CLI passed | No actual consumer host, live transfer, provider compatibility or release qualification |
 | Consumers | Read-only source review identifies adapters and retained project responsibilities | None has adopted the new serial engine |
 
 The latest recorded full offline run passed **200 tests, with one skipped**
@@ -38,7 +38,7 @@ lock. Commit `0352544` added bounded busy/locked retry; its focused regression,
 cross-process admission test and full suite passed. Timeout exhaustion and
 SQLite error-code branches still warrant explicit adversarial coverage.
 
-Candidate wheel: `runpod_experiments_system-0.2.0.dev0-py3-none-any.whl`.
+Earlier design-snapshot wheel: `runpod_experiments_system-0.2.0.dev0-py3-none-any.whl`.
 SHA-256: `7f4b741f878af57498824033fc54be67f9c51485bf018384097073801b8a75dc`.
 During this audit, the existing isolated installation was checked from outside
 the checkout using Python `-I`: execution-store and serial-engine module paths
@@ -207,12 +207,46 @@ historical evidence, not the latest status.
 
 The focused set also passed 78 tests: direct-resume receiver (7), connections
 (14), store-create (32), host identity (5), persisted attempts/deadlines (14)
-and launch (6). This closes source-suite coverage for this candidate, but not
-installed-artifact qualification, live SSH/remote-shell behavior, proxy resume,
-provider compatibility, consumer acceptance or release review.
+and launch (6). This closes source-suite coverage for this candidate. The local
+artifact build, installed full wheel suite, sdist installation and focused
+installed process tests are recorded below; live SSH/remote-shell behavior,
+proxy resume, provider compatibility, consumer acceptance and release review
+remain open.
 
 Consumer disposition: none adopts this branch. Hybrid retains its current
 resumable uploader and pinned shared revision; MIAP and Partition require their
 own direct-route conformance checks before any pin change. Same-Pod partials do
-not survive Pod replacement. No installed artifact, live SSH test, proxy resume,
-release or consumer cutover is established.
+not survive Pod replacement.
+
+## Local candidate artifact qualification — 2026-11-13
+
+Built the source at `8d2a554` with Python 3.12.10 on Windows AMD64 using
+`setuptools` 84.2.1 and `wheel` 0.48.0. The official PyPI wheels were SHA-256
+checked against their PyPI metadata; `pip` 26.3 installed the local candidate
+with network access disabled. The artifacts and a private local qualification
+manifest are outside Git under the workstation tooling directory and are not
+published or released.
+
+- Wheel `runpod_experiments_system-0.2.0.dev0-py3-none-any.whl`, SHA-256
+  `bc5e5489a852f1d393f14828fd80262164a2bca3a96c994a842a4cafd2144cf1`.
+- Sdist `runpod_experiments_system-0.2.0.dev0.tar.gz`, SHA-256
+  `4b31880773f2d7a888910645e73851ec79f50f6e058d05df41c6b9846dabbeba`.
+
+The wheel contains package modules and distribution metadata only. The sdist
+contains package source, build metadata, README and generic tests; no consumer
+records, credentials, weights, run data or scientific outputs were present.
+The wheel installed into an isolated target with module origins asserted below
+that target. Its installed full suite ran 223 tests: 222 passed and one Windows
+symlink-capability test skipped. The installed sdist was built and installed
+offline, then passed the seven direct-resume tests and real detached-supervisor
+parent-exit test. The installed `runpod-experiment-supervisor --help` entry
+point also exited successfully. The sdist-built wheel had SHA-256
+`fbbc3bbd4618b1b8b5b6d38d6220f02579865b95eb1abfbfff086f67a9d9c232`; its
+member names and payloads matched the primary wheel although archive hashes
+differed.
+
+This is local Windows/embedded-Python packaging and process evidence, not a
+release, consumer adoption, live SSH/remote-shell test, provider compatibility
+check, proxy-resume proof or billing qualification. Hybrid remains on its old
+pin. Release still needs license/source-ownership review and a reviewed durable
+artifact destination.
