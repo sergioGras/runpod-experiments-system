@@ -25,6 +25,11 @@ from runpod_experiments.store_create import StoreCreateController
 from runpod_experiments.store_transport import load_verified_gpu_attestation
 from runpod_experiments.supervisor_process import launch_execution_store as launch_supervisor
 from runpod_experiments.upload import upload_bundle
+from runpod_experiments.transfer import (
+    DEFAULT_COLLECTION_TIMEOUT_SECONDS, DEFAULT_TRANSFER_CHUNK_BYTES,
+    DEFAULT_UPLOAD_TIMEOUT_SECONDS, validate_chunk_bytes,
+    validate_timeout_seconds,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +46,10 @@ class AttemptWorkload:
     result_names: tuple[str, ...]
     artifact_directory: Path
     ssh_route: str = "direct"
+    upload_timeout_seconds: int = DEFAULT_UPLOAD_TIMEOUT_SECONDS
+    upload_chunk_bytes: int = DEFAULT_TRANSFER_CHUNK_BYTES
+    collection_timeout_seconds: int = DEFAULT_COLLECTION_TIMEOUT_SECONDS
+    collection_chunk_bytes: int = DEFAULT_TRANSFER_CHUNK_BYTES
 
     def __post_init__(self) -> None:
         for field in ("source_root", "key_file", "known_hosts", "artifact_directory"):
@@ -62,6 +71,11 @@ class AttemptWorkload:
             raise ValueError("arguments must be an immutable tuple of strings")
         if type(self.timeout_seconds) is not int or self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be a positive integer")
+        validate_timeout_seconds(self.upload_timeout_seconds, "upload_timeout_seconds")
+        validate_chunk_bytes(self.upload_chunk_bytes, "upload_chunk_bytes")
+        validate_timeout_seconds(self.collection_timeout_seconds,
+                                 "collection_timeout_seconds")
+        validate_chunk_bytes(self.collection_chunk_bytes, "collection_chunk_bytes")
         if (not isinstance(self.result_names, tuple) or not self.result_names or
                 any(not isinstance(name, str) or not name for name in self.result_names) or
                 len(set(self.result_names)) != len(self.result_names)):
@@ -473,6 +487,7 @@ class SerialExecutionEngine:
 
             start("upload")
             upload_deadline = self.monotonic() + min(
+                workload.upload_timeout_seconds,
                 self.store.attempt_runtime_seconds(attempt_id),
                 max(0, attempt["deadline_epoch"] - self.clock()))
 
@@ -491,6 +506,8 @@ class SerialExecutionEngine:
                 max_file_bytes=plan.transfers.max_file_bytes,
                 max_total_bytes=plan.transfers.max_total_bytes,
                 ssh_route=workload.ssh_route,
+                timeout_seconds=workload.upload_timeout_seconds,
+                chunk_bytes=workload.upload_chunk_bytes,
                 transfer_check=check_upload_health)
             check_upload_health()
             succeed()
@@ -505,7 +522,9 @@ class SerialExecutionEngine:
                 per_file_limits={item.path: item.size_bytes
                                  for item in plan.transfers.files
                                  if item.direction is TransferDirection.DOWNLOAD and
-                                 item.path in workload.result_names})
+                                 item.path in workload.result_names},
+                timeout_seconds=workload.collection_timeout_seconds,
+                chunk_bytes=workload.collection_chunk_bytes)
             if not callable(getattr(collector_process, "poll", None)):
                 raise ExecutionError(FailureCategory.TRANSPORT_FAILURE,
                                      "collector_process_invalid")

@@ -10,12 +10,48 @@ from runpod_experiments.execution_store import ExecutionStore
 from runpod_experiments.proxy_ssh import SSHProxyFetcher
 from runpod_experiments.ssh import SSHFetcher
 from runpod_experiments.store_transport import resolve_store_ssh_context
+from runpod_experiments.transfer import (
+    DEFAULT_COLLECTION_TIMEOUT_SECONDS, DEFAULT_TRANSFER_CHUNK_BYTES,
+    validate_chunk_bytes, validate_timeout_seconds,
+)
+
+
+class _DeadlineBoundFetcher:
+    """Clamp each built-in SSH operation to the remaining attempt deadline."""
+
+    def __init__(self, fetcher, timeout_seconds, deadline_epoch, clock):
+        self.fetcher = fetcher
+        self.timeout_seconds = timeout_seconds
+        self.deadline_epoch = deadline_epoch
+        self.clock = clock
+
+    def _clamp(self):
+        timeout = self.timeout_seconds
+        if self.deadline_epoch is not None:
+            remaining = self.deadline_epoch - self.clock()
+            if remaining <= 0:
+                raise TimeoutError("Attempt deadline reached during collection")
+            timeout = min(timeout, remaining)
+        self.fetcher.timeout = timeout
+
+    def __call__(self, name):
+        self._clamp()
+        return self.fetcher(name)
+
+    def fetch_limited(self, name, max_bytes):
+        self._clamp()
+        return self.fetcher.fetch_limited(name, max_bytes)
 
 
 def collect_owned_once(client, ledger, attempt_id, project_id, store, names, key_file,
                        known_hosts, remote_root, previous=None, *, ssh_route="direct",
                        fetcher_type=None, max_file_bytes=10_000_000,
-                       max_total_bytes=100_000_000, per_file_limits=None):
+                       max_total_bytes=100_000_000, per_file_limits=None,
+                       timeout_seconds=DEFAULT_COLLECTION_TIMEOUT_SECONDS,
+                       chunk_bytes=DEFAULT_TRANSFER_CHUNK_BYTES,
+                       deadline_epoch=None, clock=time.time):
+    validate_timeout_seconds(timeout_seconds, "collection_timeout_seconds")
+    validate_chunk_bytes(chunk_bytes, "collection_chunk_bytes")
     if isinstance(ledger, ExecutionStore):
         target = resolve_store_ssh_context(
             client, ledger, attempt_id, project_id, route=ssh_route,
@@ -43,8 +79,12 @@ def collect_owned_once(client, ledger, attempt_id, project_id, store, names, key
         fetcher_type = (SSHProxyFetcher if isinstance(ledger, ExecutionStore) and endpoint.route == "proxy"
                         else SSHFetcher)
     if use_builtin_fetcher:
+        options = {"max_bytes": max_file_bytes, "timeout": timeout_seconds}
+        if fetcher_type is SSHProxyFetcher:
+            options["chunk_bytes"] = chunk_bytes
         fetch = fetcher_type(host, port, username, key_file, known_hosts, remote_root,
-                             max_bytes=max_file_bytes)
+                             **options)
+        fetch = _DeadlineBoundFetcher(fetch, timeout_seconds, deadline_epoch, clock)
     else:
         fetch = fetcher_type(host, port, username, key_file, known_hosts, remote_root)
     return collect_once(store, fetch, names, attempt_id, previous,
@@ -56,11 +96,15 @@ def collect_loop(client, ledger, attempt_id, project_id, store, names, key_file,
                  remote_root, control_directory, *, ssh_route="direct", interval=30,
                  sleep=time.sleep, clock=time.time, max_polls=None,
                  max_file_bytes=10_000_000, max_total_bytes=100_000_000,
-                 per_file_limits=None):
+                 per_file_limits=None,
+                 timeout_seconds=DEFAULT_COLLECTION_TIMEOUT_SECONDS,
+                 chunk_bytes=DEFAULT_TRANSFER_CHUNK_BYTES):
     """Keep collecting until collection.stop is present; then try once more."""
     if ssh_route not in ("direct", "proxy") or (
             ssh_route == "proxy" and not isinstance(ledger, ExecutionStore)):
         raise ValueError("Proxy SSH requires an execution-store attempt")
+    validate_timeout_seconds(timeout_seconds, "collection_timeout_seconds")
+    validate_chunk_bytes(chunk_bytes, "collection_chunk_bytes")
     if not isinstance(interval, (int, float)) or isinstance(interval, bool) or not 0 < interval < float("inf"):
         raise ValueError("Invalid collection interval")
     directory = Path(control_directory)
@@ -69,6 +113,7 @@ def collect_loop(client, ledger, attempt_id, project_id, store, names, key_file,
     while max_polls is None or polls < max_polls:
         stopping = (directory / "collection.stop").exists()
         terminal = False
+        attempt_deadline = None
         try:
             if isinstance(ledger, ExecutionStore):
                 ledger.verify_attempt_lifecycle_projection(attempt_id)
@@ -76,6 +121,7 @@ def collect_loop(client, ledger, attempt_id, project_id, store, names, key_file,
             else:
                 attempt = ledger.get(attempt_id)
             terminal = attempt["project_id"] == project_id and attempt["state"] in {"terminated", "cancelled"}
+            attempt_deadline = attempt.get("deadline_epoch")
             if terminal:
                 errors = {}
             else:
@@ -84,7 +130,11 @@ def collect_loop(client, ledger, attempt_id, project_id, store, names, key_file,
                                                        ssh_route=ssh_route,
                                                        max_file_bytes=max_file_bytes,
                                                        max_total_bytes=max_total_bytes,
-                                                       per_file_limits=per_file_limits)
+                                                       per_file_limits=per_file_limits,
+                                                       timeout_seconds=timeout_seconds,
+                                                       chunk_bytes=chunk_bytes,
+                                                       deadline_epoch=attempt_deadline,
+                                                       clock=clock)
         except Exception as error:
             errors = {"collection": type(error).__name__}
         polls += 1

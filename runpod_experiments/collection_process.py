@@ -13,11 +13,17 @@ from runpod_experiments.execution_store import ExecutionStore
 from runpod_experiments.run_collection import collect_loop
 from runpod_experiments.runpod import RunPodClient
 from runpod_experiments.state_config import StateStoreConfig
+from runpod_experiments.transfer import (
+    DEFAULT_COLLECTION_TIMEOUT_SECONDS, DEFAULT_TRANSFER_CHUNK_BYTES,
+    validate_chunk_bytes, validate_timeout_seconds,
+)
 
 
 def launch(ledger_path, attempt_id, project_id, directory, artifact_directory, names, key_file, known_hosts, remote_root,
            *, max_file_bytes=10_000_000, max_total_bytes=100_000_000,
-           per_file_limits=None, popen=subprocess.Popen):
+           per_file_limits=None,
+           timeout_seconds=DEFAULT_COLLECTION_TIMEOUT_SECONDS,
+           chunk_bytes=DEFAULT_TRANSFER_CHUNK_BYTES, popen=subprocess.Popen):
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=True)
     if not isinstance(names, list) or not names or any(not isinstance(n, str) or not n for n in names):
@@ -25,7 +31,7 @@ def launch(ledger_path, attempt_id, project_id, directory, artifact_directory, n
     names_path = directory / "collection-allowlist.json"
     names_path.write_text(json.dumps(names) + "\n", encoding="utf-8")
     limits = _validate_transfer_limits(names, max_file_bytes, max_total_bytes,
-                                       per_file_limits)
+                                       per_file_limits, timeout_seconds, chunk_bytes)
     limits_path = directory / "collection-limits.json"
     limits_path.write_text(json.dumps(limits, sort_keys=True, separators=(",", ":")) + "\n",
                            encoding="utf-8")
@@ -36,6 +42,7 @@ def launch(ledger_path, attempt_id, project_id, directory, artifact_directory, n
             "--names", str(names_path), "--key", str(Path(key_file).resolve()),
             "--known-hosts", str(Path(known_hosts).resolve()), "--remote-root", remote_root,
             "--max-file-bytes", str(max_file_bytes), "--max-total-bytes", str(max_total_bytes),
+            "--timeout-seconds", str(timeout_seconds), "--chunk-bytes", str(chunk_bytes),
             "--limits", str(limits_path)]
     flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW) if os.name == "nt" else 0
     with (directory / "collection-process.log").open("a", encoding="utf-8") as log:
@@ -46,7 +53,9 @@ def launch(ledger_path, attempt_id, project_id, directory, artifact_directory, n
 def launch_execution_store(state_config, attempt_id, project_id, artifact_directory, names,
                            key_file, known_hosts, remote_root, *, ssh_route="direct",
                            max_file_bytes=10_000_000, max_total_bytes=100_000_000,
-                           per_file_limits=None, popen=subprocess.Popen):
+                           per_file_limits=None,
+                           timeout_seconds=DEFAULT_COLLECTION_TIMEOUT_SECONDS,
+                           chunk_bytes=DEFAULT_TRANSFER_CHUNK_BYTES, popen=subprocess.Popen):
     """Launch an independent collector bound to one active execution-store attempt."""
     if not isinstance(state_config, StateStoreConfig):
         raise TypeError("state_config must be a StateStoreConfig")
@@ -55,7 +64,7 @@ def launch_execution_store(state_config, attempt_id, project_id, artifact_direct
     if not isinstance(names, list) or not names or any(not isinstance(n, str) or not n for n in names):
         raise ValueError("Expected a non-empty result allowlist")
     limits = _validate_transfer_limits(names, max_file_bytes, max_total_bytes,
-                                       per_file_limits)
+                                       per_file_limits, timeout_seconds, chunk_bytes)
     database_path = state_config.database_path(project_id)
     if not database_path.is_file():
         raise FileNotFoundError("Configured execution store does not exist")
@@ -117,7 +126,9 @@ def launch_execution_store(state_config, attempt_id, project_id, artifact_direct
             "--names", str(names_path), "--key", str(Path(key_file).resolve()),
             "--known-hosts", str(Path(known_hosts).resolve()), "--remote-root", remote_root,
             "--ssh-route", ssh_route, "--max-file-bytes", str(max_file_bytes),
-            "--max-total-bytes", str(max_total_bytes), "--limits", str(limits_path)]
+            "--max-total-bytes", str(max_total_bytes),
+            "--timeout-seconds", str(timeout_seconds), "--chunk-bytes", str(chunk_bytes),
+            "--limits", str(limits_path)]
     flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW) if os.name == "nt" else 0
     with (directory / "collection-process.log").open("a", encoding="utf-8") as log:
         return popen(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
@@ -134,6 +145,9 @@ def main():
     parser.add_argument("--ssh-route", choices=("direct", "proxy"), default="direct")
     parser.add_argument("--max-file-bytes", type=int, default=10_000_000)
     parser.add_argument("--max-total-bytes", type=int, default=100_000_000)
+    parser.add_argument("--timeout-seconds", type=int,
+                        default=DEFAULT_COLLECTION_TIMEOUT_SECONDS)
+    parser.add_argument("--chunk-bytes", type=int, default=DEFAULT_TRANSFER_CHUNK_BYTES)
     parser.add_argument("--limits")
     args = parser.parse_args()
     if (args.ledger is None) == (args.store_root is None):
@@ -147,14 +161,21 @@ def main():
     saved_limits = (json.loads(Path(args.limits).read_text(encoding="utf-8"))
                     if args.limits else None)
     if saved_limits is not None:
+        old_keys = {"max_file_bytes", "max_total_bytes", "per_file_limits"}
+        new_keys = old_keys | {"collection_timeout_seconds", "collection_chunk_bytes"}
         if (not isinstance(saved_limits, dict) or
                 saved_limits.get("max_file_bytes") != args.max_file_bytes or
                 saved_limits.get("max_total_bytes") != args.max_total_bytes or
-                set(saved_limits) != {"max_file_bytes", "max_total_bytes", "per_file_limits"}):
+                set(saved_limits) not in (old_keys, new_keys) or
+                saved_limits.get("collection_timeout_seconds",
+                                 DEFAULT_COLLECTION_TIMEOUT_SECONDS) != args.timeout_seconds or
+                saved_limits.get("collection_chunk_bytes",
+                                 DEFAULT_TRANSFER_CHUNK_BYTES) != args.chunk_bytes):
             raise ValueError("Collector limit file does not match its command line")
         saved_limits = saved_limits["per_file_limits"]
     limits = _validate_transfer_limits(
-        names, args.max_file_bytes, args.max_total_bytes, saved_limits)
+        names, args.max_file_bytes, args.max_total_bytes, saved_limits,
+        args.timeout_seconds, args.chunk_bytes)
     if args.ledger is not None:
         ledger = AttemptLedger(args.ledger)
         attempt = ledger.get(args.attempt)
@@ -175,14 +196,19 @@ def main():
                  ArtifactStore(args.artifact_directory), names, args.key,
                  args.known_hosts, args.remote_root, args.directory, ssh_route=args.ssh_route,
                  max_file_bytes=args.max_file_bytes, max_total_bytes=args.max_total_bytes,
-                 per_file_limits=limits["per_file_limits"])
+                 per_file_limits=limits["per_file_limits"],
+                 timeout_seconds=args.timeout_seconds, chunk_bytes=args.chunk_bytes)
 
 
-def _validate_transfer_limits(names, max_file_bytes, max_total_bytes, per_file_limits):
+def _validate_transfer_limits(names, max_file_bytes, max_total_bytes, per_file_limits,
+                              timeout_seconds=DEFAULT_COLLECTION_TIMEOUT_SECONDS,
+                              chunk_bytes=DEFAULT_TRANSFER_CHUNK_BYTES):
     if type(max_file_bytes) is not int or max_file_bytes <= 0:
         raise ValueError("max_file_bytes must be a positive integer")
     if type(max_total_bytes) is not int or max_total_bytes <= 0:
         raise ValueError("max_total_bytes must be a positive integer")
+    validate_timeout_seconds(timeout_seconds, "collection_timeout_seconds")
+    validate_chunk_bytes(chunk_bytes, "collection_chunk_bytes")
     if per_file_limits is None:
         per_file_limits = {}
     if (not isinstance(per_file_limits, dict) or
@@ -193,7 +219,9 @@ def _validate_transfer_limits(names, max_file_bytes, max_total_bytes, per_file_l
             sum(per_file_limits.values()) > max_total_bytes):
         raise ValueError("Invalid per-file result limits")
     return {"max_file_bytes": max_file_bytes, "max_total_bytes": max_total_bytes,
-            "per_file_limits": per_file_limits}
+            "per_file_limits": per_file_limits,
+            "collection_timeout_seconds": timeout_seconds,
+            "collection_chunk_bytes": chunk_bytes}
 
 
 if __name__ == "__main__":

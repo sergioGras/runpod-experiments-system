@@ -14,13 +14,16 @@ from runpod_experiments.execution_store import ExecutionStore
 from runpod_experiments.proxy_ssh import SSHProxySession, _run_bounded
 from runpod_experiments.ssh import SSHFetcher
 from runpod_experiments.store_transport import resolve_store_ssh_context
+from runpod_experiments.transfer import (
+    DEFAULT_TRANSFER_CHUNK_BYTES, DEFAULT_UPLOAD_TIMEOUT_SECONDS,
+    validate_chunk_bytes, validate_timeout_seconds,
+)
 
 
 def _upload_direct_chunks(fetcher, source, destination, expected_sha256, size,
-                          transfer_check, runner):
+                          transfer_check, runner, *, deadline, chunk_bytes):
     temporary = destination + ".tmp-" + uuid.uuid4().hex
     parent = str(PurePosixPath(destination).parent)
-    deadline = time.monotonic() + 300
 
     def execute(command, data=b""):
         transfer_check()
@@ -54,7 +57,7 @@ def _upload_direct_chunks(fetcher, source, destination, expected_sha256, size,
     with Path(source).open("rb") as stream:
         while True:
             transfer_check()
-            block = stream.read(1_000_000)
+            block = stream.read(chunk_bytes)
             if not block:
                 break
             digest.update(block)
@@ -79,8 +82,12 @@ def _upload_direct_chunks(fetcher, source, destination, expected_sha256, size,
 def upload_bundle(client, ledger, attempt_id, project_id, source_root, manifest, key_file,
                   known_hosts, remote_root, *, max_file_bytes=10_000_000,
                   max_total_bytes=None, ssh_route="direct", runner=None,
-                  transfer_check=lambda: None):
+                  transfer_check=lambda: None,
+                  timeout_seconds=DEFAULT_UPLOAD_TIMEOUT_SECONDS,
+                  chunk_bytes=DEFAULT_TRANSFER_CHUNK_BYTES):
     """Caller must approve the exact bundle and destination before invoking."""
+    validate_timeout_seconds(timeout_seconds, "upload_timeout_seconds")
+    validate_chunk_bytes(chunk_bytes, "upload_chunk_bytes")
     if isinstance(ledger, ExecutionStore):
         target = resolve_store_ssh_context(
             client, ledger, attempt_id, project_id, route=ssh_route,
@@ -155,15 +162,25 @@ def upload_bundle(client, ledger, attempt_id, project_id, source_root, manifest,
         if total_limit is not None and total_bytes > total_limit:
             raise ValueError("Reviewed bundle exceeds the total upload byte limit")
         reviewed.append((name, path, size))
+    transfer_deadline = time.monotonic() + timeout_seconds
+
+    def remaining_transfer_seconds():
+        remaining = transfer_deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("SSH upload exceeded its finite transfer window")
+        return remaining
+
     if isinstance(ledger, ExecutionStore) and endpoint.route == "proxy":
         proxy = SSHProxySession(endpoint, key_file, known_hosts, runner=runner)
-        if total_bytes > proxy.chunk_bytes:
+        effective_chunk_bytes = min(chunk_bytes, proxy.chunk_bytes)
+        if total_bytes > effective_chunk_bytes:
             for name, path, _size in reviewed:
                 transfer_check()
                 destination = str(PurePosixPath(remote_root) / PurePosixPath(name))
                 proxy.write_file_chunks(
                     path, destination, manifest[name], max_bytes=max_file_bytes,
-                    check=transfer_check)
+                    chunk_bytes=effective_chunk_bytes,
+                    timeout=remaining_transfer_seconds(), check=transfer_check)
             return len(reviewed)
         operations = []
         for name, path, size in reviewed:
@@ -188,13 +205,14 @@ def upload_bundle(client, ledger, attempt_id, project_id, source_root, manifest,
                        shlex.quote(temporary) + " | sha256sum -c -",
                        "mv -- " + shlex.quote(temporary) + " " + shlex.quote(destination)]
         transfer_check()
-        proxy.execute("\n".join(script), timeout=300)
+        proxy.execute("\n".join(script), timeout=min(300, remaining_transfer_seconds()))
         return len(reviewed)
-    if total_bytes > 1_000_000:
+    if total_bytes > chunk_bytes:
         for name, path, size in reviewed:
             destination = str(PurePosixPath(remote_root) / name)
             _upload_direct_chunks(fetcher, path, destination, manifest[name], size,
-                                  transfer_check, runner)
+                                  transfer_check, runner, deadline=transfer_deadline,
+                                  chunk_bytes=chunk_bytes)
         return len(reviewed)
     for name, path, size in reviewed:
         transfer_check()
@@ -209,7 +227,8 @@ def upload_bundle(client, ledger, attempt_id, project_id, source_root, manifest,
                 "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=yes", "-o",
                 "UserKnownHostsFile=" + fetcher.known_hosts, fetcher.username + "@" + fetcher.host, command]
         try:
-            effective_runner(argv, input=data, capture_output=True, timeout=30, check=True)
+            effective_runner(argv, input=data, capture_output=True,
+                             timeout=min(30, remaining_transfer_seconds()), check=True)
         except (subprocess.SubprocessError, OSError):
             raise RuntimeError("SSH upload failed") from None
         transfer_check()

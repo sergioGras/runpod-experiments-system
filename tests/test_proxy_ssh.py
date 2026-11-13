@@ -172,6 +172,15 @@ class ProxySSHTests(unittest.TestCase):
         self.assertIn("sha256sum -c -", final_script)
         self.assertIn("mv --", final_script)
 
+        partition_sized = SSHProxySession(
+            self.endpoint, self.key, self.known_hosts,
+            chunk_bytes=262_144, runner=runner)
+        self.assertEqual(partition_sized.chunk_bytes, 262_144)
+        capped = SSHProxySession(
+            self.endpoint, self.key, self.known_hosts, max_output_bytes=100_000,
+            chunk_bytes=262_144, runner=runner)
+        self.assertLess(capped.chunk_bytes, 262_144)
+
         failed_calls = []
 
         def ambiguous_runner(_argv, **kwargs):

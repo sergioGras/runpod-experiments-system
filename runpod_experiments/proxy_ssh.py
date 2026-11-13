@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from runpod_experiments.provider import SSHRouteEndpoint
+from runpod_experiments.transfer import validate_chunk_bytes, validate_timeout_seconds
 
 
 _ANSI = re.compile(r"\x1b\[(?:\?2004[hl]|[0-9;]*m)")
@@ -189,7 +190,8 @@ class SSHProxySession:
 
     def __init__(self, endpoint: SSHRouteEndpoint, key_file: str | Path,
                  known_hosts: str | Path, *, max_script_bytes: int = 50_000_000,
-                 max_output_bytes: int = 16_000_000, runner=None,
+                 max_output_bytes: int = 16_000_000,
+                 chunk_bytes: int | None = None, runner=None,
                  monotonic=time.monotonic):
         if (not isinstance(endpoint, SSHRouteEndpoint) or endpoint.route != "proxy" or
                 type(max_script_bytes) is not int or max_script_bytes < 2048 or
@@ -205,7 +207,11 @@ class SSHProxySession:
         self.runner = runner
         output_chunk = max(1, (max_output_bytes - 512) * 3 // 4)
         script_chunk = max(1, (max_script_bytes - 2048) * 3 // 4)
-        self.chunk_bytes = min(PROXY_CHUNK_BYTES, output_chunk, script_chunk)
+        bounded_chunk = min(PROXY_CHUNK_BYTES, output_chunk, script_chunk)
+        if chunk_bytes is not None:
+            validate_chunk_bytes(chunk_bytes)
+            bounded_chunk = min(bounded_chunk, chunk_bytes)
+        self.chunk_bytes = bounded_chunk
         self.monotonic = monotonic
 
     @staticmethod
@@ -493,16 +499,20 @@ class SSHProxyFetcher:
     """SSHFetcher-compatible bounded artifact reader for an explicit proxy route."""
 
     def __init__(self, host, port, username, key_file, known_hosts, remote_root,
-                 *, max_bytes=10_000_000, timeout=30, runner=None):
+                 *, max_bytes=10_000_000, timeout=30,
+                 chunk_bytes=PROXY_CHUNK_BYTES, runner=None):
         if (not isinstance(remote_root, str) or not remote_root.startswith("/") or
                 "\x00" in remote_root or "\\" in remote_root or
                 ".." in PurePosixPath(remote_root).parts or
                 type(max_bytes) is not int or max_bytes <= 0):
             raise ValueError("Invalid proxy collection root or byte limit")
+        validate_timeout_seconds(timeout, "collection_timeout_seconds")
+        validate_chunk_bytes(chunk_bytes, "collection_chunk_bytes")
         self.remote_root = str(PurePosixPath(remote_root))
         self.max_bytes, self.timeout = max_bytes, timeout
         endpoint = SSHRouteEndpoint(host, port, username, "proxy")
-        self.session = SSHProxySession(endpoint, key_file, known_hosts, runner=runner)
+        self.session = SSHProxySession(endpoint, key_file, known_hosts,
+                                       chunk_bytes=chunk_bytes, runner=runner)
 
     def __call__(self, name):
         return self.fetch_limited(name, self.max_bytes)

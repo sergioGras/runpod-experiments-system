@@ -179,6 +179,15 @@ path validation, per-file/total byte limits, local/remote hashes, atomic publica
 timeouts and bounded output. Interactive process framing remains workload-owned.
 Transfer resume is a later capability unless needed and separately qualified.
 
+The serial workload adapter owns finite upload and collection timeout/chunk
+settings. The library validates them against a one-hour operation ceiling and a
+one-million-byte chunk ceiling. Upload timeout bounds the complete reviewed bundle
+transfer; collection timeout bounds each file retrieval and is further clamped to
+the immutable attempt deadline. The detached collector records its effective byte,
+timeout and chunk settings in attempt-local state and rejects a relaunch whose
+settings differ. Project values such as Partition's 256 KiB chunks and 600-second
+collection timeout remain caller configuration rather than shared defaults.
+
 Host-key trust is explicit policy. Approved model credentials use an ephemeral
 delivery channel and never enter plan serialization, argument logs, diagnostics,
 manifests or returned artifacts. Journals/results are private by default with

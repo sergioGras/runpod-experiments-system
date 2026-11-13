@@ -371,6 +371,16 @@ class StoreCreateControllerTests(unittest.TestCase):
         self.assertEqual(len(uploaded), 4)
         self.assertLessEqual(max(len(item[1]) for item in uploaded), 1_000_000)
 
+        uploaded.clear()
+        self.assertEqual(upload_bundle(
+            self.client, self.store, self.attempt["attempt_id"], self.project.project_id,
+            self.root, {"large-worker.py": sha256_bytes(large_worker)}, private_key,
+            known_hosts, "/tmp/nebula", max_file_bytes=1_100_000,
+            max_total_bytes=1_100_000, runner=upload_runner,
+            timeout_seconds=1200, chunk_bytes=262_144), 1)
+        self.assertEqual(len(uploaded), 6)  # initialize, four chunks and atomic publish
+        self.assertTrue(all(len(item[1]) <= 262_144 for item in uploaded[1:-1]))
+
         launched = {}
 
         def popen(argv, **kwargs):
@@ -400,6 +410,20 @@ class StoreCreateControllerTests(unittest.TestCase):
         self.assertEqual(errors, {})
         self.assertEqual(previous["results/out.bin"], sha256_bytes(b"synthetic result"))
 
+        from runpod_experiments.ssh import SSHFetcher
+        operation_timeouts = []
+        with patch.object(
+                SSHFetcher, "fetch_limited", autospec=True,
+                side_effect=lambda fetcher, _name, _limit:
+                    (operation_timeouts.append(fetcher.timeout) or b"deadline result")):
+            _previous, errors = collect_owned_once(
+                self.client, self.store, self.attempt["attempt_id"],
+                self.project.project_id, ArtifactStore(self.root / "deadline-artifacts"),
+                ["results/deadline.bin"], private_key, known_hosts, "/tmp/nebula",
+                timeout_seconds=600, deadline_epoch=NOW + 7, clock=lambda: NOW)
+        self.assertEqual(errors, {})
+        self.assertEqual(operation_timeouts, [7])
+
     def test_chunked_direct_upload_stops_when_transfer_health_check_fails(self):
         receipt = self.create()
         self.set_live_cpu_detail(receipt)
@@ -428,12 +452,13 @@ class StoreCreateControllerTests(unittest.TestCase):
                 {"worker.bin": sha256_bytes(payload)}, private_key, known_hosts,
                 "/tmp/nebula", max_file_bytes=2_100_000,
                 max_total_bytes=2_100_000, runner=upload_runner,
-                transfer_check=transfer_check)
+                transfer_check=transfer_check, chunk_bytes=262_144,
+                timeout_seconds=1200)
 
         # Initialization and one data chunk ran; the failed health check prevented
         # another chunk and the final atomic publish command.
         self.assertEqual(len(calls), 2)
-        self.assertEqual(len(calls[1][1]["input"]), 1_000_000)
+        self.assertEqual(len(calls[1][1]["input"]), 262_144)
         self.assertTrue(all("mv --" not in call[0][-1] for call in calls))
 
     def test_store_proxy_route_supports_bounded_upload_and_collection_resolution(self):
@@ -490,6 +515,26 @@ class StoreCreateControllerTests(unittest.TestCase):
             fetcher_type=Fetcher)
         self.assertEqual(errors, {})
         self.assertEqual(previous["results/out.bin"], sha256_bytes(b"proxy-result"))
+
+        from runpod_experiments.proxy_ssh import SSHProxySession
+        proxy_settings = []
+
+        def read_proxy_file(session, _remote, *, max_bytes, timeout):
+            proxy_settings.append((session.chunk_bytes, timeout))
+            return b"configured proxy result"
+
+        with patch.object(SSHProxySession, "read_file", autospec=True,
+                          side_effect=read_proxy_file):
+            previous, errors = collect_owned_once(
+                self.client, self.store, self.attempt["attempt_id"],
+                self.project.project_id, ArtifactStore(self.root / "configured-proxy"),
+                ["results/configured.bin"], private_key, known_hosts, "/tmp/nebula",
+                ssh_route="proxy", timeout_seconds=600, chunk_bytes=262_144,
+                deadline_epoch=NOW + 5, clock=lambda: NOW)
+        self.assertEqual(errors, {})
+        self.assertEqual(previous["results/configured.bin"],
+                         sha256_bytes(b"configured proxy result"))
+        self.assertEqual(proxy_settings, [(262_144, 5)])
 
         launched = {}
 
@@ -591,7 +636,10 @@ class StoreCreateControllerTests(unittest.TestCase):
             collector_limits.update(kwargs)
             return Collector()
 
+        upload_limits = {}
+
         def uploader(*_args, **kwargs):
+            upload_limits.update(kwargs)
             kwargs["transfer_check"]()
             self.now = attempt["deadline_epoch"] - 5
             return 1
@@ -612,7 +660,9 @@ class StoreCreateControllerTests(unittest.TestCase):
         workload = AttemptWorkload(
             source_root, self.root / "id_ed25519", self.root / "known_hosts",
             "/tmp/nebula", "worker.py", (), 30, ("results.json",),
-            self.root / "serial-artifacts")
+            self.root / "serial-artifacts", upload_timeout_seconds=1200,
+            upload_chunk_bytes=262_144, collection_timeout_seconds=600,
+            collection_chunk_bytes=262_144)
         self.assertTrue(self.key_path.is_file())
         (self.root / "id_ed25519").write_bytes(b"private-key-fixture")
         (self.root / "known_hosts").write_text(
@@ -635,7 +685,25 @@ class StoreCreateControllerTests(unittest.TestCase):
         self.assertEqual(collector_limits["max_file_bytes"], plan.transfers.max_file_bytes)
         self.assertEqual(collector_limits["max_total_bytes"], plan.transfers.max_total_bytes)
         self.assertEqual(collector_limits["per_file_limits"], {"results.json": 0})
+        self.assertEqual(upload_limits["timeout_seconds"], 1200)
+        self.assertEqual(upload_limits["chunk_bytes"], 262_144)
+        self.assertEqual(collector_limits["timeout_seconds"], 600)
+        self.assertEqual(collector_limits["chunk_bytes"], 262_144)
         self.assertEqual(workload_timeouts, [5])
+
+    def test_serial_workload_transfer_settings_are_finite_and_bounded(self):
+        root = self.root
+        kwargs = dict(
+            source_root=root, key_file=root / "key", known_hosts=root / "hosts",
+            remote_root="/work", script="worker.py", arguments=(),
+            timeout_seconds=30, result_names=("result.json",),
+            artifact_directory=root / "artifacts")
+        for field, value in (("upload_timeout_seconds", 3601),
+                             ("collection_timeout_seconds", 0),
+                             ("upload_chunk_bytes", 1_000_001),
+                             ("collection_chunk_bytes", True)):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                AttemptWorkload(**kwargs, **{field: value})
 
     def test_serial_engine_stops_before_workload_when_supervisor_exits_during_upload(self):
         self.store.cancel_uncreated(self.attempt["attempt_id"])
@@ -1393,7 +1461,8 @@ class StoreCreateControllerTests(unittest.TestCase):
             self.state_config, self.attempt["attempt_id"], self.project.project_id,
             artifact_directory, names, private_key, known_hosts, "/tmp/nebula",
             max_file_bytes=64, max_total_bytes=96,
-            per_file_limits={"results/out.bin": 32}, popen=popen)
+            per_file_limits={"results/out.bin": 32}, timeout_seconds=600,
+            chunk_bytes=262_144, popen=popen)
         self.assertEqual(process.pid, 6060)
         self.assertIn("--store-root", launched["argv"])
         collector_directory = (self.state_config.state_root / self.project.project_id /
@@ -1403,7 +1472,9 @@ class StoreCreateControllerTests(unittest.TestCase):
         limits_path = collector_directory / "collection-limits.json"
         self.assertEqual(json.loads(limits_path.read_text(encoding="utf-8")), {
             "max_file_bytes": 64, "max_total_bytes": 96,
-            "per_file_limits": {"results/out.bin": 32}})
+            "per_file_limits": {"results/out.bin": 32},
+            "collection_timeout_seconds": 600,
+            "collection_chunk_bytes": 262_144})
         with self.assertRaises(ValueError):
             launch_execution_store(
                 self.state_config, self.attempt["attempt_id"], self.project.project_id,
@@ -1415,8 +1486,10 @@ class StoreCreateControllerTests(unittest.TestCase):
         argv = launched["argv"]
         cli = ["collector", *argv[argv.index("--store-root"):]]
         original_collect_loop = entry.collect_loop
+        collected_settings = {}
 
         def one_collection(*args, **kwargs):
+            collected_settings.update(kwargs)
             return original_collect_loop(*args, max_polls=1, **kwargs)
 
         with patch.object(entry.RunPodClient, "from_config", return_value=self.client), \
@@ -1428,6 +1501,8 @@ class StoreCreateControllerTests(unittest.TestCase):
         self.assertTrue(manifest.is_file())
         self.assertEqual(json.loads(manifest.read_text(encoding="utf-8").splitlines()[0])["name"],
                          "results/out.bin")
+        self.assertEqual(collected_settings["timeout_seconds"], 600)
+        self.assertEqual(collected_settings["chunk_bytes"], 262_144)
 
     def test_missing_region_or_changed_quote_blocks_create(self):
         self.client.cpu_offer = lambda *_args: {

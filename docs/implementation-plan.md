@@ -477,6 +477,25 @@ upload/collector stages remains open. This remains M6 local test work before
 any consumer pin changes; package artifact import and CLI checks have passed
 for the current internal wheel, while stable API review remains open.
 
+Project-owned transfer settings (2026-11-13): `AttemptWorkload` now carries
+bounded `upload_timeout_seconds`, `upload_chunk_bytes`,
+`collection_timeout_seconds`, and `collection_chunk_bytes`. Timeouts are capped
+at 3600 seconds and chunks at 1,000,000 bytes. The upload timeout bounds one
+reviewed bundle transfer; the collection timeout bounds each file retrieval and
+is clamped to the immutable attempt deadline. Detached collector settings are
+persisted alongside byte limits and checked against its launch arguments. This
+allows Partition to supply its existing 1200/600-second windows and 256 KiB
+chunks without changing common defaults. Focused upload/proxy/collector/engine
+tests passed (31 tests); the full suite passed 196 tests with one existing
+platform-capability skip. A fresh isolated wheel installed and imported the
+transfer settings, serial engine and collector, and its collector CLI displayed
+the new options. Wheel `0.2.0.dev0` SHA-256:
+`285cc8eedd1b78d687a33762cb6982a5691a360075cc21bfec1f5fc9a8d4fc6b`.
+No consumer source, pin, state, provider account, credential, SSH endpoint or
+resource was touched. M9 still needs consumer archive-contract, service-role,
+cleanup and CPU/GPU acceptance; this adapter contract alone does not qualify
+Partition for cutover.
+
 ### Store-backed one-shot create slice (internal; qualification remains open)
 
 The current planning slice advances the canonical contract envelope to v3 and
@@ -579,10 +598,13 @@ but the consumer cutovers still have concrete contract gaps:
 - Partition's serial path can map to the shared CPU/GPU attempt lifecycle, and
   the design branch now has bounded digest-checked chunk transfer over proxy
   SSH. It still cannot resume an interrupted file transfer. Its current study
-  uses 256 KiB archive chunks and a 600-second collection window; the shared
-  collector currently defaults to 1 MiB chunks and a 30-second per-file
-  timeout. M9 must plumb and enforce the study's configured transfer limits,
-  alongside archive limits, service roles and exact cleanup, before migration.
+  uses 256 KiB archive chunks and a 600-second collection window. The serial
+  workload adapter now accepts bounded project-owned upload/collection timeouts
+  and chunk sizes, and the detached collector persists those settings and clamps
+  each fetch to the immutable attempt deadline. This closes the generic
+  parameter-plumbing gap; M9 still needs Partition conformance for its archive
+  contract, service roles, exact cleanup and full CPU/GPU acceptance before
+  migration.
 - Partition's two-resource dispatcher still requires M10's atomic parent/child
   caps, slot admission, and independent per-resource supervision; serial
   parity alone is not evidence for this cutover.
