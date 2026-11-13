@@ -403,6 +403,46 @@ security boundary against a hostile local account.
 No consumer code, pin or private run state changed in this foundation slice;
 Hybrid's current flow is unchanged, and MIAP and Partition remain unintegrated.
 
+### M6.3: supervisor-owned GPU evidence path (implementation slice)
+
+The detached store supervisor now runs a fixed, bounded, read-only direct SSH
+probe for GPU attempts. SSH config and forwarding are disabled, host-key checks
+are strict, local output is capped, both local and remote commands have finite
+timeouts, and only the key-file path is passed to the supervisor process. The
+query, time bounds, selected profile, immutable plan/attempt, exact Pod and
+known-hosts policy digest are included in the evidence contract. No raw GPU
+output or SSH diagnostics are persisted.
+
+The first valid RUNNING observation starts a durable 300-second proof window,
+capped by the attempt deadline. A restart reuses that timestamp. Unavailable
+SSH waits only inside the window; malformed evidence, profile mismatch, changed
+host-key policy, corrupt sidecar or event-chain mismatch fails closed and asks
+the supervisor to clean up the exact attempt. The sidecar is atomically written
+under the attempt's supervisor directory and its digest is bound into the
+store's stage-event chain. Store-backed upload, workload, interactive SSH and
+collection paths recheck the attestation and current known-hosts digest before
+resolving a GPU endpoint. `SerialExecutionEngine` waits for that evidence before
+upload, checks the live supervisor heartbeat, and passes only credential paths
+again if cleanup needs one supervisor restart. CPU behavior is unchanged.
+
+Synthetic tests cover the complete fake GPU attempt, success, low VRAM, timeout
+and restart handling, host-key changes, tampered evidence, strict SSH command
+construction, and the pre-upload engine gate. This evidence does not qualify a
+real RunPod image, SSH endpoint, provider billing behavior, or actual hardware;
+the local hash chain is not provider-signed or resistant to a hostile local
+account. The API remains internal and unreleased. Hybrid, MIAP and Partition
+source, pins and state were not changed; all three remain unintegrated and must
+run their own acceptance gates before cutover. M6 as a whole remains open for
+failure/restart matrix completion, API/package review and consumer acceptance.
+
+On Windows with Python 3.12.14, the full offline suite passed 181 tests with one
+existing directory-symlink capability skip; the final focused GPU probe/runtime/
+supervision suite passed 23 tests. A fresh offline venv installed the 41-entry
+candidate wheel and imported the GPU probe, serial engine and supervisor from
+outside the checkout; the installed supervisor CLI displayed its options. Wheel
+SHA-256: `8082e431168b76709884c38063bdac02ddc74dbb3e6da4e962c56071e9dc15ed`.
+These checks validate only local package contents and synthetic behavior.
+
 ### Store-backed one-shot create slice (internal; qualification remains open)
 
 The current planning slice advances the canonical contract envelope to v3 and

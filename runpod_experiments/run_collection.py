@@ -17,7 +17,9 @@ def collect_owned_once(client, ledger, attempt_id, project_id, store, names, key
                        fetcher_type=None, max_file_bytes=10_000_000,
                        max_total_bytes=100_000_000, per_file_limits=None):
     if isinstance(ledger, ExecutionStore):
-        target = resolve_store_ssh_context(client, ledger, attempt_id, project_id, route=ssh_route)
+        target = resolve_store_ssh_context(
+            client, ledger, attempt_id, project_id, route=ssh_route,
+            known_hosts=known_hosts)
         endpoint = target.endpoint
         host, port, username = endpoint.host, endpoint.port, endpoint.username
     else:

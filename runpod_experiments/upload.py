@@ -19,7 +19,9 @@ def upload_bundle(client, ledger, attempt_id, project_id, source_root, manifest,
                   max_total_bytes=None, ssh_route="direct", runner=None):
     """Caller must approve the exact bundle and destination before invoking."""
     if isinstance(ledger, ExecutionStore):
-        target = resolve_store_ssh_context(client, ledger, attempt_id, project_id, route=ssh_route)
+        target = resolve_store_ssh_context(
+            client, ledger, attempt_id, project_id, route=ssh_route,
+            known_hosts=known_hosts)
         endpoint = target.endpoint
         host, port, username = endpoint.host, endpoint.port, endpoint.username
     else:

@@ -25,7 +25,8 @@ class SSHInteractiveProcess(BinaryProcess):
                  remote_root, script, arguments, timeout_seconds, log_path, *,
                  popen=subprocess.Popen, output_chunk_bytes=65536, queued_chunks=32):
         if isinstance(ledger, ExecutionStore):
-            target = resolve_store_ssh_context(client, ledger, attempt_id, project_id)
+            target = resolve_store_ssh_context(
+                client, ledger, attempt_id, project_id, known_hosts=known_hosts)
             endpoint = target.endpoint
             host, port, username = endpoint.host, endpoint.port, endpoint.username
         else:

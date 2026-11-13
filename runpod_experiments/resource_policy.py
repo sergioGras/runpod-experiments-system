@@ -23,15 +23,8 @@ def request_hash(request):
     return hashlib.sha256(raw).hexdigest()
 
 
-def resource_profile_violation(pod, profile, selected_region):
-    """Check normalized store-plan requirements against a live Pod detail.
-
-    The M3 profile currently describes Secure CPU/GPU Pods without persistent
-    mounts. Shape checks run once the provider reports RUNNING; price and status
-    checks apply throughout provisioning. REST v2 GPU memory reports host system
-    RAM, not VRAM, so GPU profiles still fail closed without independent GPU
-    runtime telemetry.
-    """
+def resource_profile_static_violation(pod, profile, selected_region):
+    """Check the provider-visible profile fields, excluding per-card GPU evidence."""
     if not isinstance(profile, ResourceProfile) or not isinstance(pod, dict):
         return "invalid_or_unknown_resource_profile"
     if not isinstance(selected_region, str) or selected_region not in profile.region_ids:
@@ -82,6 +75,19 @@ def resource_profile_violation(pod, profile, selected_region):
             minimum_cuda = tuple(int(part) for part in profile.minimum_cuda.split("."))
             if actual_cuda < minimum_cuda:
                 return "unexpected_resource_shape"
+    return None
+
+
+def resource_profile_violation(pod, profile, selected_region):
+    """Check provider-visible shape and keep GPU access fail-closed by default.
+
+    REST v2 GPU memory reports host system RAM, not per-card VRAM. Callers must
+    use an exact-attempt attestation path before treating a GPU as verified.
+    """
+    violation = resource_profile_static_violation(pod, profile, selected_region)
+    if violation is not None:
+        return violation
+    if profile.kind is ResourceKind.GPU and pod.get("status") == "RUNNING":
         return "unverifiable_gpu_profile"
     return None
 

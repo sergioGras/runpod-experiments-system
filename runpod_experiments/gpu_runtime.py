@@ -1,8 +1,8 @@
 """Parse and validate bounded NVIDIA runtime evidence.
 
-This module defines a local evidence contract only. It does not launch SSH,
-authorize workload access, or weaken the provider's fail-closed GPU guard. The
-independent supervisor integration remains a separate acceptance requirement.
+This module defines a local evidence contract only. The fixed SSH probe lives
+in `gpu_probe`; an observation authorizes nothing until the store-backed
+supervisor binds it to the exact attempt and transport callers verify that proof.
 """
 from __future__ import annotations
 
@@ -13,26 +13,37 @@ import io
 import re
 
 from runpod_experiments.contracts import (
-    ResourceKind, ResourceProfile, canonical_json_bytes, encode_document, sha256_bytes,
+    ContractError, ResourceKind, ResourceProfile, canonical_json_bytes,
+    decode_document, encode_document, sha256_bytes,
 )
 
 
-_MAX_PROBE_OUTPUT_BYTES = 16_384
+_MAX_PROBE_OUTPUT_BYTES = 32_768
 _MAX_GPU_ROWS = 64
+GPU_RUNTIME_ATTESTATION_GRACE_SECONDS = 300
+GPU_PROBE_LOCAL_TIMEOUT_SECONDS = 20
+GPU_PROBE_REMOTE_TIMEOUT_SECONDS = 15
 _DRIVER_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}\Z")
 _CUDA_VERSION = re.compile(r"[0-9]{1,3}\.[0-9]{1,3}\Z")
 _SAFE_LABEL = re.compile(r"[^\x00-\x1f\x7f]{1,128}\Z")
 
-# The eventual remote adapter must execute only these fixed, read-only queries.
+# The remote adapter executes only these fixed, read-only queries.
 # `nounits` leaves memory.total as an integer in MiB according to nvidia-smi's
 # documented memory-field units. No caller-supplied shell fragments are used.
 GPU_QUERY_FIELDS = "uuid,name,memory.total"
 GPU_QUERY_FORMAT = "csv,noheader,nounits"
-GPU_DRIVER_QUERY = "-q"
+GPU_DRIVER_QUERY = "nvidia-smi | head -n 1"
+GPU_REMOTE_QUERY = (
+    "printf '%s\\n' '__RPE_DRIVER_BEGIN__'; " + GPU_DRIVER_QUERY +
+    "; printf '%s\\n' '__RPE_GPU_BEGIN__'; "
+    "nvidia-smi --query-gpu=" + GPU_QUERY_FIELDS + " --format=" + GPU_QUERY_FORMAT
+)
 GPU_PROBE_SPEC_SHA256 = hashlib.sha256(canonical_json_bytes({
+    "remote_query": GPU_REMOTE_QUERY,
+    "remote_timeout_seconds": GPU_PROBE_REMOTE_TIMEOUT_SECONDS,
+    "local_timeout_seconds": GPU_PROBE_LOCAL_TIMEOUT_SECONDS,
     "gpu_query_fields": GPU_QUERY_FIELDS,
     "gpu_query_format": GPU_QUERY_FORMAT,
-    "driver_query": GPU_DRIVER_QUERY,
     "schema": 1,
 })).hexdigest()
 
@@ -91,9 +102,9 @@ class GPURuntimeObservation:
 class GPUAttestation:
     """Normalized evidence bound to one exact immutable store attempt.
 
-    This record is not a cryptographic hardware attestation. It is intended to
-    be produced by a strict-SSH verifier and bound to the store's append-only
-    stage hash chain by the later supervisor integration.
+    This record is not a cryptographic hardware attestation. The strict-SSH
+    supervisor verifier produces it and binds its digest to the store's
+    append-only stage hash chain.
     """
 
     project_id: str
@@ -124,6 +135,57 @@ class GPUAttestation:
             raise GPURuntimeEvidenceError("invalid_attestation_observation")
         if type(self.schema_version) is not int or self.schema_version != 1:
             raise GPURuntimeEvidenceError("unsupported_attestation_schema")
+
+
+def gpu_profile_sha256(profile: ResourceProfile) -> str:
+    if not isinstance(profile, ResourceProfile):
+        raise GPURuntimeEvidenceError("gpu_profile_required")
+    return sha256_bytes(encode_document("resource_profile", profile))
+
+
+def encode_gpu_attestation(attestation: GPUAttestation) -> bytes:
+    if not isinstance(attestation, GPUAttestation):
+        raise GPURuntimeEvidenceError("gpu_attestation_required")
+    return encode_document("gpu_attestation", attestation)
+
+
+def decode_gpu_attestation(raw: bytes) -> GPUAttestation:
+    """Decode the exact bounded sidecar schema; unknown fields fail closed."""
+    if not isinstance(raw, bytes) or len(raw) > 65_536:
+        raise GPURuntimeEvidenceError("gpu_attestation_out_of_bounds")
+    try:
+        payload = decode_document(raw, expected_kind="gpu_attestation")
+        required = {
+            "project_id", "job_id", "attempt_id", "attempt_sha256", "plan_sha256",
+            "pod_id", "pod_name", "profile_sha256", "host_key_policy_sha256",
+            "probe_sha256", "observation", "schema_version",
+        }
+        if set(payload) != required or not isinstance(payload.get("observation"), dict):
+            raise ContractError("GPU attestation fields are invalid")
+        observation = payload["observation"]
+        if set(observation) != {
+                "devices", "driver_version", "cuda_umd_version", "observed_epoch",
+                "output_sha256"} or not isinstance(observation.get("devices"), list):
+            raise ContractError("GPU observation fields are invalid")
+        devices = []
+        for device in observation["devices"]:
+            if not isinstance(device, dict) or set(device) != {"uuid", "name", "memory_mib"}:
+                raise ContractError("GPU device fields are invalid")
+            devices.append(GPUDeviceObservation(
+                device["uuid"], device["name"], device["memory_mib"]))
+        runtime = GPURuntimeObservation(
+            tuple(devices), observation["driver_version"], observation["cuda_umd_version"],
+            observation["observed_epoch"], observation["output_sha256"])
+        return GPUAttestation(
+            project_id=payload["project_id"], job_id=payload["job_id"],
+            attempt_id=payload["attempt_id"], attempt_sha256=payload["attempt_sha256"],
+            plan_sha256=payload["plan_sha256"], pod_id=payload["pod_id"],
+            pod_name=payload["pod_name"], profile_sha256=payload["profile_sha256"],
+            host_key_policy_sha256=payload["host_key_policy_sha256"],
+            probe_sha256=payload["probe_sha256"], observation=runtime,
+            schema_version=payload["schema_version"])
+    except (ContractError, KeyError, TypeError, ValueError):
+        raise GPURuntimeEvidenceError("gpu_attestation_malformed") from None
 
 
 def parse_nvidia_smi(gpu_csv: bytes, driver_report: bytes, *,
@@ -158,6 +220,10 @@ def parse_nvidia_smi(gpu_csv: bytes, driver_report: bytes, *,
     except (OverflowError, GPURuntimeEvidenceError):
         raise
 
+    header = re.findall(
+        r"^\s*NVIDIA-SMI\s+[^\s]+\s+Driver Version:\s*([^\s]+)\s+"
+        r"CUDA Version:\s*([0-9]{1,3}\.[0-9]{1,3})\s*$",
+        driver_text, flags=re.MULTILINE)
     version_fields = {}
     for label, value in re.findall(
             r"^\s*(KMD Version|Driver Version|CUDA UMD Version|CUDA Version)\s*:\s*([^\r\n]+?)\s*$",
@@ -165,7 +231,9 @@ def parse_nvidia_smi(gpu_csv: bytes, driver_report: bytes, *,
         version_fields.setdefault(label, []).append(value)
     driver_values = version_fields.get("KMD Version") or version_fields.get("Driver Version") or []
     cuda_values = version_fields.get("CUDA UMD Version") or version_fields.get("CUDA Version") or []
-    if (len(driver_values) != 1 or len(cuda_values) != 1 or
+    if header and not driver_values and not cuda_values:
+        driver_values, cuda_values = [header[0][0]], [header[0][1]]
+    if (len(header) > 1 or len(driver_values) != 1 or len(cuda_values) != 1 or
             not _DRIVER_VERSION.fullmatch(driver_values[0]) or
             not _CUDA_VERSION.fullmatch(cuda_values[0])):
         raise GPURuntimeEvidenceError("driver_report_incomplete")
@@ -205,7 +273,7 @@ def validate_gpu_attestation(attestation: GPUAttestation, *, profile: ResourcePr
     if (not isinstance(attestation, GPUAttestation) or
             not isinstance(profile, ResourceProfile) or not isinstance(expected, dict)):
         raise GPURuntimeEvidenceError("gpu_attestation_required")
-    profile_digest = sha256_bytes(encode_document("resource_profile", profile))
+    profile_digest = gpu_profile_sha256(profile)
     required = {
         "project_id": expected.get("project_id"),
         "job_id": expected.get("job_id"),

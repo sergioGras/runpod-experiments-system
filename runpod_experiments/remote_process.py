@@ -12,7 +12,8 @@ from runpod_experiments.store_transport import resolve_store_ssh_context
 def start_python(client, ledger, attempt_id, project_id, key_file, known_hosts, remote_root,
                  script, arguments, timeout_seconds, log_path, *, popen=subprocess.Popen):
     if isinstance(ledger, ExecutionStore):
-        target = resolve_store_ssh_context(client, ledger, attempt_id, project_id)
+        target = resolve_store_ssh_context(
+            client, ledger, attempt_id, project_id, known_hosts=known_hosts)
         endpoint = target.endpoint
         host, port, username = endpoint.host, endpoint.port, endpoint.username
     else:

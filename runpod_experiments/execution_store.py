@@ -898,6 +898,21 @@ class ExecutionStore:
             raise ExecutionError(FailureCategory.CONFIGURATION, "unknown_attempt")
         return dict(row)
 
+    def plan_sha256_for_attempt(self, attempt_id: str) -> str:
+        """Return the verified immutable execution-plan digest for one attempt."""
+        self.verify_attempt_lifecycle_projection(attempt_id)
+        with closing(self._connect()) as db:
+            row = db.execute("""SELECT a.plan_sha256,p.document FROM execution_attempts a
+                JOIN execution_plans p ON p.plan_sha256=a.plan_sha256
+                WHERE a.attempt_id=? AND a.project_id=?""",
+                (attempt_id, self.project_id)).fetchone()
+        if row is None:
+            raise ExecutionError(FailureCategory.CONFIGURATION, "unknown_attempt")
+        if sha256_bytes(bytes(row["document"])) != row["plan_sha256"]:
+            raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                 "execution_plan_digest_mismatch")
+        return row["plan_sha256"]
+
     def verify_execution_plan(self, attempt_id: str, plan: ExecutionPlan) -> bool:
         """Require a supplied typed plan to match the attempt's immutable document."""
         if not isinstance(plan, ExecutionPlan):

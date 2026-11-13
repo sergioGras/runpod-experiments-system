@@ -8,14 +8,17 @@ from typing import Protocol
 from runpod_experiments.billing import billing_query_bounds, normalize_pod_billing
 from runpod_experiments.contracts import (
     BillingObservation, ContractError, FailureCategory, ProjectPolicy, QuoteObservation,
-    ResourceProfile,
+    ResourceKind, ResourceProfile,
 )
 from runpod_experiments.errors import (
     ExecutionError, ProviderOperation, normalize_provider_error,
 )
 from runpod_experiments.runpod import ProviderError
 from runpod_experiments.quotes import normalize_cpu_quote, normalize_gpu_quote
-from runpod_experiments.resource_policy import resource_profile_violation
+from runpod_experiments.resource_policy import (
+    resource_profile_static_violation, resource_profile_violation,
+)
+from runpod_experiments.gpu_runtime import validate_gpu_observation
 
 
 _POD_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
@@ -141,7 +144,8 @@ class ProviderAdapter:
 
     def _read_attempt_detail(self, pod_id: str, pod_name: str, policy: ProjectPolicy, *,
                              resource_profile: ResourceProfile | None = None,
-                             selected_region: str | None = None) -> tuple[dict, PodObservation]:
+                             selected_region: str | None = None,
+                             gpu_probe_only: bool = False) -> tuple[dict, PodObservation]:
         if not isinstance(policy, ProjectPolicy):
             raise ContractError("policy must be a ProjectPolicy")
         if (not isinstance(pod_name, str) or not any(
@@ -163,8 +167,12 @@ class ProviderAdapter:
             if ((resource_profile is None) != (selected_region is None) or
                     (resource_profile is not None and not isinstance(resource_profile, ResourceProfile))):
                 raise ContractError("resource profile and selected region must be supplied together")
-            violation = (resource_profile_violation(raw, resource_profile, selected_region)
-                         if resource_profile is not None else None)
+            if type(gpu_probe_only) is not bool or (gpu_probe_only and (
+                    resource_profile is None or resource_profile.kind is not ResourceKind.GPU)):
+                raise ContractError("GPU probe access requires a GPU profile")
+            checker = (resource_profile_static_violation if gpu_probe_only else
+                       resource_profile_violation)
+            violation = checker(raw, resource_profile, selected_region) if resource_profile else None
             observation = PodObservation(raw.get("id"), raw.get("name"), raw.get("status"), violation)
         except ContractError:
             raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
@@ -236,6 +244,73 @@ class ProviderAdapter:
         except ContractError:
             raise ExecutionError(FailureCategory.RESOURCE_MISMATCH,
                                  f"{route}_ssh_endpoint_invalid") from None
+
+    @staticmethod
+    def _endpoint_from_raw(raw: dict, route: str,
+                           expected_ports: tuple[str, ...]) -> SSHRouteEndpoint:
+        if (not isinstance(expected_ports, tuple) or not expected_ports or
+                any(not isinstance(port, str) for port in expected_ports) or
+                len(expected_ports) != len(set(expected_ports))):
+            raise ContractError("expected_ports must be a non-empty immutable tuple")
+        ports = raw.get("ports")
+        if (not isinstance(ports, list) or any(not isinstance(port, str) for port in ports) or
+                len(ports) != len(set(ports)) or set(ports) != set(expected_ports)):
+            raise ExecutionError(FailureCategory.RESOURCE_MISMATCH,
+                                 "attempt_ports_unverified")
+        ssh = raw.get("ssh")
+        selected = ssh.get(route) if isinstance(ssh, dict) else None
+        if not isinstance(selected, dict):
+            raise ExecutionError(FailureCategory.TRANSPORT_FAILURE,
+                                 f"{route}_ssh_endpoint_unavailable")
+        try:
+            return SSHRouteEndpoint(selected.get("host"), selected.get("port"),
+                                    selected.get("username"), route)
+        except ContractError:
+            raise ExecutionError(FailureCategory.RESOURCE_MISMATCH,
+                                 f"{route}_ssh_endpoint_invalid") from None
+
+    def _get_attempt_gpu_probe_endpoint(self, pod_id: str, pod_name: str,
+                                        policy: ProjectPolicy, *,
+                                        resource_profile: ResourceProfile,
+                                        selected_region: str,
+                                        expected_ports: tuple[str, ...]) -> SSHRouteEndpoint:
+        """Direct endpoint for the fixed read-only verifier; never workload code."""
+        if resource_profile.kind is not ResourceKind.GPU:
+            raise ExecutionError(FailureCategory.AUTHORIZATION,
+                                 "gpu_probe_requires_gpu_profile")
+        raw, observation = self._read_attempt_detail(
+            pod_id, pod_name, policy, resource_profile=resource_profile,
+            selected_region=selected_region, gpu_probe_only=True)
+        if observation.status != "RUNNING":
+            raise ExecutionError(FailureCategory.TRANSIENT_READ, "attempt_pod_not_running")
+        if observation.resource_violation is not None:
+            raise ExecutionError(FailureCategory.RESOURCE_MISMATCH,
+                                 "attempt_resource_shape_unverified")
+        return self._endpoint_from_raw(raw, "direct", expected_ports)
+
+    def _get_attempt_ssh_endpoint_after_gpu_attestation(
+            self, pod_id: str, pod_name: str, policy: ProjectPolicy, *,
+            resource_profile: ResourceProfile, selected_region: str,
+            expected_ports: tuple[str, ...], gpu_observation,
+            route: str) -> SSHRouteEndpoint:
+        """Internal path; caller verifies this observation's attempt-bound sidecar."""
+        if route not in ("direct", "proxy") or resource_profile.kind is not ResourceKind.GPU:
+            raise ExecutionError(FailureCategory.AUTHORIZATION,
+                                 "gpu_attestation_route_invalid")
+        try:
+            validate_gpu_observation(gpu_observation, resource_profile)
+        except (TypeError, ValueError):
+            raise ExecutionError(FailureCategory.RESOURCE_MISMATCH,
+                                 "gpu_runtime_evidence_invalid") from None
+        raw, observation = self._read_attempt_detail(
+            pod_id, pod_name, policy, resource_profile=resource_profile,
+            selected_region=selected_region, gpu_probe_only=True)
+        if observation.status != "RUNNING":
+            raise ExecutionError(FailureCategory.TRANSIENT_READ, "attempt_pod_not_running")
+        if observation.resource_violation is not None:
+            raise ExecutionError(FailureCategory.RESOURCE_MISMATCH,
+                                 "attempt_resource_shape_unverified")
+        return self._endpoint_from_raw(raw, route, expected_ports)
 
     def quote_cpu(self, resource_id: str, vcpu_count: int, *, observed_epoch: int,
                   storage_hourly_usd: str | int | float = "0") -> QuoteObservation:

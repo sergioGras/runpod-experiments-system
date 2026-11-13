@@ -7,6 +7,7 @@ import ctypes
 from pathlib import Path
 
 from runpod_experiments.attempts import AttemptLedger
+from runpod_experiments.contracts import ResourceKind
 from runpod_experiments.execution_store import ExecutionStore
 from runpod_experiments.runpod import RunPodClient
 from runpod_experiments.resource_policy import ResourcePolicy
@@ -48,8 +49,12 @@ def launch(ledger_path, attempt_id, project_id, directory, deadline_epoch, polic
     return _launch(_bootstrap_argv(arguments), directory, popen=popen)
 
 
-def launch_execution_store(state_config, attempt_id, project_id, directory, *, popen=subprocess.Popen):
+def launch_execution_store(state_config, attempt_id, project_id, directory, *,
+                           gpu_ssh_key_file=None, gpu_known_hosts=None,
+                           popen=subprocess.Popen):
     """Launch a supervisor for an existing, hash-verified execution-store attempt."""
+    if (gpu_ssh_key_file is None) != (gpu_known_hosts is None):
+        raise ValueError("GPU probe key and known-hosts paths must be supplied together")
     if not isinstance(state_config, StateStoreConfig):
         raise TypeError("state_config must be a StateStoreConfig")
     path = state_config.database_path(project_id)
@@ -59,15 +64,28 @@ def launch_execution_store(state_config, attempt_id, project_id, directory, *, p
                            controller_host=state_config.controller_host)
     store.verify_attempt_lifecycle_projection(attempt_id)
     store.project_policy_for_attempt(attempt_id)
-    store.selected_resource_for_attempt(attempt_id)
+    profile, _region = store.selected_resource_for_attempt(attempt_id)
+    if gpu_ssh_key_file is not None and profile.kind is not ResourceKind.GPU:
+        raise ValueError("GPU probe credentials require a GPU attempt")
     attempt = store.get_attempt(attempt_id)
     if attempt["state"] in ("cancelled", "terminated"):
         raise ValueError("Cannot launch supervision for a terminal attempt")
-    directory = Path(directory).resolve()
+    directory = Path(directory).absolute()
+    if gpu_ssh_key_file is not None:
+        expected_directory = (state_config.state_root / project_id / attempt_id / "supervisor")
+        if (any(path.is_symlink() for path in (
+                state_config.state_root, expected_directory.parent.parent,
+                expected_directory.parent, expected_directory)) or
+                directory != expected_directory.absolute()):
+            raise ValueError("GPU supervisor directory does not match the attempt state path")
+    directory = directory.resolve()
     arguments = ["--store-root", str(state_config.state_root),
         "--controller-host", state_config.controller_host, "--attempt", attempt_id,
         "--project", project_id, "--directory", str(directory),
         "--deadline", str(attempt["deadline_epoch"])]
+    if gpu_ssh_key_file is not None:
+        arguments.extend(["--gpu-ssh-key-file", os.path.abspath(os.fspath(gpu_ssh_key_file)),
+                          "--gpu-known-hosts", os.path.abspath(os.fspath(gpu_known_hosts))])
     return _launch(_bootstrap_argv(arguments), directory, popen=popen)
 
 
@@ -81,10 +99,16 @@ def main():
     parser.add_argument("--deadline", type=float, required=True)
     parser.add_argument("--policy")
     parser.add_argument("--controller-host")
+    parser.add_argument("--gpu-ssh-key-file")
+    parser.add_argument("--gpu-known-hosts")
     args = parser.parse_args()
+    if (args.gpu_ssh_key_file is None) != (args.gpu_known_hosts is None):
+        parser.error("GPU probe requires both --gpu-ssh-key-file and --gpu-known-hosts")
     if (args.ledger is None) == (args.store_root is None):
         parser.error("select exactly one of --ledger or --store-root")
     if args.ledger is not None:
+        if args.gpu_ssh_key_file is not None:
+            parser.error("GPU probe credentials are only valid in --store-root mode")
         if args.policy is None or args.controller_host is not None:
             parser.error("legacy --ledger mode requires --policy and does not accept --controller-host")
         ledger = AttemptLedger(args.ledger)
@@ -104,12 +128,22 @@ def main():
                                controller_host=state_config.controller_host)
         store.verify_attempt_lifecycle_projection(args.attempt)
         store.project_policy_for_attempt(args.attempt)
-        store.selected_resource_for_attempt(args.attempt)
+        profile, _region = store.selected_resource_for_attempt(args.attempt)
         attempt = store.get_attempt(args.attempt)
         if attempt["deadline_epoch"] != args.deadline:
             raise ValueError("Supervisor deadline does not match stored attempt")
+        if args.gpu_ssh_key_file is not None and profile.kind is not ResourceKind.GPU:
+            parser.error("GPU probe credentials require a GPU attempt")
+        if args.gpu_ssh_key_file is not None:
+            expected_directory = (state_config.state_root / args.project /
+                                  args.attempt / "supervisor").resolve(strict=False)
+            if Path(args.directory).resolve(strict=False) != expected_directory:
+                raise ValueError("GPU supervisor directory does not match the attempt state path")
         monitor_factory = lambda client: StoreCleanupMonitor(
-            client, store, args.attempt, args.project)
+            client, store, args.attempt, args.project,
+            gpu_ssh_key_file=args.gpu_ssh_key_file,
+            gpu_known_hosts=args.gpu_known_hosts,
+            supervisor_directory=args.directory)
     client = RunPodClient.from_config()
     monitor = monitor_factory(client)
     if os.name == "nt":

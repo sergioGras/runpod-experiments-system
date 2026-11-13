@@ -3,7 +3,8 @@ import unittest
 from runpod_experiments.contracts import ResourceKind, ResourceProfile, encode_document, sha256_bytes
 from runpod_experiments.gpu_runtime import (
     GPUAttestation, GPU_PROBE_SPEC_SHA256, GPURuntimeEvidenceError,
-    parse_nvidia_smi, validate_gpu_attestation, validate_gpu_observation,
+    decode_gpu_attestation, encode_gpu_attestation, parse_nvidia_smi,
+    validate_gpu_attestation, validate_gpu_observation,
 )
 
 
@@ -35,6 +36,11 @@ class GPURuntimeEvidenceTests(unittest.TestCase):
         self.assertEqual(value.observed_epoch, 1_900_000_000)
         self.assertRegex(value.output_sha256, r"^[0-9a-f]{64}$")
 
+    def test_parses_nvidia_smi_summary_header(self):
+        value = self.observation(
+            driver=b"NVIDIA-SMI 550.54.14 Driver Version: 550.54.14 CUDA Version: 12.8\n")
+        self.assertEqual((value.driver_version, value.cuda_umd_version), ("550.54.14", "12.8"))
+
     def test_accepts_nominal_48_decimal_gb_card_reported_in_mib(self):
         value = self.observation()
         validate_gpu_observation(value, profile())
@@ -62,7 +68,7 @@ class GPURuntimeEvidenceTests(unittest.TestCase):
             with self.subTest(row=row), self.assertRaises(GPURuntimeEvidenceError):
                 self.observation(rows=row)
         with self.assertRaises(GPURuntimeEvidenceError):
-            self.observation(rows=b"x" * 16_385)
+            self.observation(rows=b"x" * 32_769)
 
     def test_requires_per_card_count_vram_and_driver_floor(self):
         value = self.observation()
@@ -91,6 +97,7 @@ class GPURuntimeEvidenceTests(unittest.TestCase):
         )
         validate_gpu_attestation(attestation, profile=selected,
                                  expected=expected, now_epoch=observation.observed_epoch)
+        self.assertEqual(decode_gpu_attestation(encode_gpu_attestation(attestation)), attestation)
         with self.assertRaisesRegex(GPURuntimeEvidenceError,
                                     "gpu_attestation_identity_mismatch"):
             validate_gpu_attestation(

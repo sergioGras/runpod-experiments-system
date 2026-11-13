@@ -12,7 +12,7 @@ from typing import Callable
 from runpod_experiments.collection_process import launch_execution_store
 from runpod_experiments.contracts import (
     BillingStatus, CleanupStatus, ExecutionOutcome, ExecutionPlan,
-    FailureCategory, OperationalStatus, ScientificVerdict, StageEvent, StageStatus,
+    FailureCategory, OperationalStatus, ResourceKind, ScientificVerdict, StageEvent, StageStatus,
     TransferDirection, encode_document, sha256_bytes, strict_json_loads,
 )
 from runpod_experiments.errors import ExecutionError
@@ -20,6 +20,7 @@ from runpod_experiments.execution_store import ExecutionStore
 from runpod_experiments.remote_process import start_python
 from runpod_experiments.state_config import StateStoreConfig
 from runpod_experiments.store_create import StoreCreateController
+from runpod_experiments.store_transport import load_verified_gpu_attestation
 from runpod_experiments.supervisor_process import launch_execution_store as launch_supervisor
 from runpod_experiments.upload import upload_bundle
 
@@ -237,6 +238,32 @@ class SerialExecutionEngine:
             raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
                                  "supervisor_heartbeat_stale")
 
+    def _wait_for_gpu_attestation(self, process, directory: Path, attempt: dict,
+                                  policy_sha256: str, known_hosts: Path) -> None:
+        """Wait for supervisor evidence, bounded by the immutable attempt deadline."""
+        end = self.monotonic() + max(0, attempt["deadline_epoch"] - self.clock())
+        while self.monotonic() < end and self.clock() < attempt["deadline_epoch"]:
+            self._check_supervisor(process, directory, attempt, policy_sha256)
+            try:
+                events = self.store.get_stage_events(attempt["attempt_id"])
+            except ExecutionError:
+                raise
+            attestation_events = [event for event in events
+                                  if event.stage == "gpu_runtime_attestation"]
+            if attestation_events:
+                latest = attestation_events[-1]
+                if latest.status is StageStatus.FAILED:
+                    raise ExecutionError(FailureCategory.RESOURCE_MISMATCH,
+                                         "gpu_runtime_attestation_rejected")
+                if latest.status is StageStatus.SUCCEEDED:
+                    load_verified_gpu_attestation(
+                        self.store, attempt["attempt_id"], known_hosts,
+                        now_epoch=int(self.clock()))
+                    return
+            self.sleep(min(0.25, max(0, end - self.monotonic())))
+        raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                             "gpu_runtime_attestation_timeout")
+
     def _prepare_attempt_directory(self, attempt_id: str) -> tuple[Path, Path]:
         root = self.state_config.state_root
         project = root / self.store.project_id
@@ -272,7 +299,8 @@ class SerialExecutionEngine:
 
     def _cleanup(self, attempt: dict, supervisor_directory: Path,
                  supervisor_process, collector_process, workload_process,
-                 cleanup_timeout_seconds: int) -> CleanupStatus:
+                 cleanup_timeout_seconds: int, *, gpu_ssh_key_file=None,
+                 gpu_known_hosts=None) -> CleanupStatus:
         attempt_id = attempt["attempt_id"]
         if workload_process is not None and workload_process.poll() is None:
             try:
@@ -315,12 +343,25 @@ class SerialExecutionEngine:
             if current["state"] in ("terminated", "cancelled"):
                 return CleanupStatus.CONFIRMED if current["state"] == "terminated" else CleanupStatus.NOT_REQUIRED
             if supervisor_process is None or supervisor_process.poll() is not None:
+                # The poll may itself have completed the final absence check and
+                # persisted termination. Re-read lifecycle state before deciding
+                # that an exited supervisor needs a restart.
+                current = self.store.get_attempt(attempt_id)
+                if current["state"] in ("terminated", "cancelled"):
+                    return (CleanupStatus.CONFIRMED if current["state"] == "terminated"
+                            else CleanupStatus.NOT_REQUIRED)
                 if restarts >= 1:
                     return CleanupStatus.FAILED
                 try:
-                    supervisor_process = self.supervisor_launcher(
-                        self.state_config, attempt_id, self.store.project_id,
-                        supervisor_directory)
+                    if gpu_ssh_key_file is not None:
+                        supervisor_process = self.supervisor_launcher(
+                            self.state_config, attempt_id, self.store.project_id,
+                            supervisor_directory, gpu_ssh_key_file=gpu_ssh_key_file,
+                            gpu_known_hosts=gpu_known_hosts)
+                    else:
+                        supervisor_process = self.supervisor_launcher(
+                            self.state_config, attempt_id, self.store.project_id,
+                            supervisor_directory)
                     restarts += 1
                 except Exception:
                     return CleanupStatus.FAILED
@@ -355,6 +396,8 @@ class SerialExecutionEngine:
                 pass
             raise
         project = self.store.project_id
+        resource_profile, _ = self.store.selected_resource_for_attempt(attempt_id)
+        gpu_attempt = resource_profile.kind is ResourceKind.GPU
         supervisor_process = None
         collector_process = None
         workload_process = None
@@ -388,8 +431,14 @@ class SerialExecutionEngine:
 
         try:
             start("supervisor")
-            supervisor_process = self.supervisor_launcher(
-                self.state_config, attempt_id, project, supervisor_directory)
+            if gpu_attempt:
+                supervisor_process = self.supervisor_launcher(
+                    self.state_config, attempt_id, project, supervisor_directory,
+                    gpu_ssh_key_file=workload.key_file,
+                    gpu_known_hosts=workload.known_hosts)
+            else:
+                supervisor_process = self.supervisor_launcher(
+                    self.state_config, attempt_id, project, supervisor_directory)
             if (not callable(getattr(supervisor_process, "poll", None)) or
                     type(getattr(supervisor_process, "pid", None)) is not int or
                     supervisor_process.pid <= 0):
@@ -403,6 +452,11 @@ class SerialExecutionEngine:
             succeed()
             self._check_supervisor(supervisor_process, supervisor_directory,
                                    attempt, policy_sha256)
+
+            if gpu_attempt:
+                self._wait_for_gpu_attestation(
+                    supervisor_process, supervisor_directory, attempt,
+                    policy_sha256, workload.known_hosts)
 
             start("upload")
             self.uploader(
@@ -485,7 +539,9 @@ class SerialExecutionEngine:
                 try:
                     cleanup_status = self._cleanup(
                         attempt, supervisor_directory, supervisor_process,
-                        collector_process, workload_process, cleanup_timeout_seconds)
+                        collector_process, workload_process, cleanup_timeout_seconds,
+                        gpu_ssh_key_file=workload.key_file if gpu_attempt else None,
+                        gpu_known_hosts=workload.known_hosts if gpu_attempt else None)
                 except Exception:
                     cleanup_status = CleanupStatus.FAILED
                 try:
