@@ -336,7 +336,7 @@ file identity and SHA-256 before and across bounded chunks; direct and proxy
 uploads stream reviewed sources, verify the published digest and size, and
 publish by atomic rename. Upload health checks run between chunks against the
 supervisor and immutable attempt deadline. The full offline suite
-passed 193 tests with one platform-capability skip, including regressions
+passed 194 tests with one platform-capability skip, including regressions
 that abort chunked direct upload when its health check fails, stop the serial
 engine before workload launch when supervision exits during upload, and stop
 the workload when its collector exits. The supervisor-loss case restarts
@@ -470,12 +470,12 @@ These checks validate only local package contents and synthetic behavior.
 
 M6 fault-matrix review (2026-11-13): upload health-check abort, supervisor exit
 during upload, collector exit during workload, and remaining-time clamping now
-have regression coverage. Explicit attempt-deadline expiry injections at upload
-and workload boundaries remain open. Controller-restart recovery is covered
-after a started workload, but not after every intermediate stage. These remain
-M6 local test work before any consumer pin changes; package artifact import and
-CLI checks have passed for the current internal wheel, while stable API review
-remains open.
+have regression coverage. An uploader returning after its attempt deadline is
+also rejected before collection or workload launch. Explicit workload-deadline
+expiry and controller restart from intermediate upload/collector stages remain
+open. These remain M6 local test work before any consumer pin changes; package
+artifact import and CLI checks have passed for the current internal wheel,
+while stable API review remains open.
 
 ### Store-backed one-shot create slice (internal; qualification remains open)
 
