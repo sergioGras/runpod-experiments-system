@@ -197,10 +197,10 @@ model transfer was performed. The runtime configuration was restored.
 The test now injects the narrow fake provider module explicitly through the
 existing `popen` seam and checks that the generated supervisor bootstrap is the
 expected one. Production launch code is unchanged. The exact detached-process
-test passed, then the full unfiltered suite on the rebased candidate passed 223
-tests with one platform-capability skip on Python 3.12.10. Because child tests
-also need the shared source path, that path was temporarily added to the
-workstation's embeddable `python312._pth` for this run; its original bytes were
+test passed, then the full unfiltered suite on the rebased candidate ran 223
+tests: 222 passed and one platform-capability test skipped, on Python 3.12.10.
+Because child tests also need the shared source path, it was temporarily added
+to the workstation's embeddable `python312._pth` for this run; its original bytes were
 restored afterward. The suite used local synthetic providers and no SSH or
 cloud resources. The earlier filtered run's 222/223 result is retained as
 historical evidence, not the latest status.
