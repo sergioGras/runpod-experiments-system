@@ -336,12 +336,20 @@ file identity and SHA-256 before and across bounded chunks; direct and proxy
 uploads stream reviewed sources, verify the published digest and size, and
 publish by atomic rename. Upload health checks run between chunks against the
 supervisor, collector and immutable attempt deadline. The full offline suite
-passed 190 tests with one platform-capability skip. The generated remote
+passed 192 tests with one platform-capability skip, including regressions
+that abort chunked direct upload when its health check fails and stop the
+serial engine before workload launch when supervision exits during upload.
+That failure case restarts supervision once for cleanup and confirms exact
+fake-Pod termination. The generated remote
 Python bodies were syntax-checked and transfer behavior used local fake SSH
 runners only. No provider account, credentials, SSH endpoint, consumer source,
 package pin, state or resource was contacted or changed. This still does not
 qualify remote shell behavior, live proxy compatibility or interrupted-transfer
-resume.
+resume. Wheel `0.2.0.dev0` built from commit `c0f9e64` installed in a fresh
+temporary venv outside the checkout; proxy session/fetcher, serial engine and
+uploader imports succeeded, and the installed supervisor CLI displayed its
+options. Wheel SHA-256:
+`e8a8ea28a8267ccdc829e4f935593a48baae02622d662365918bd6e17628ea78`.
 Consumer disposition: no source, package pin, state, or live process changed.
 Hybrid's binary interactive flow and MIAP's batch orchestration remain on their
 current paths; Partition can evaluate the finite proxy transfer capability while
@@ -455,6 +463,15 @@ candidate wheel and imported the GPU probe, serial engine and supervisor from
 outside the checkout; the installed supervisor CLI displayed its options. Wheel
 SHA-256: `8082e431168b76709884c38063bdac02ddc74dbb3e6da4e962c56071e9dc15ed`.
 These checks validate only local package contents and synthetic behavior.
+
+M6 fault-matrix review (2026-11-13): upload health-check abort and supervisor
+exit during upload now have local regression coverage. The test inventory
+still lacks integrated assertions for collector exit during upload/workload and
+the serial engine's attempt-deadline failures at upload or workload boundaries.
+Controller-restart recovery is covered after a started workload, but not after
+every intermediate stage. These remain M6 local test work before any consumer
+pin changes; package artifact import and CLI checks have passed for the current
+internal wheel, while stable API review remains open.
 
 ### Store-backed one-shot create slice (internal; qualification remains open)
 
