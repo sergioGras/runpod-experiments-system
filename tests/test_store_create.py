@@ -1381,6 +1381,88 @@ class StoreCreateControllerTests(unittest.TestCase):
         self.assertEqual(len(result.attempt_results), 2)
         self.assertEqual(self.store.get_attempt("attempt-retry-2")["state"], "cancelled")
 
+    def _recover_with_interrupted_stage(self, interrupted_stage):
+        receipt = self.create()
+        self.set_live_cpu_detail(receipt)
+        self.client.inventory = [{"id": receipt.pod_id, "name": receipt.pod_name,
+                                  "status": "RUNNING"}]
+
+        def delete_pod(pod_id):
+            self.assertEqual(pod_id, receipt.pod_id)
+            self.client.inventory = []
+            self.client.detail["status"] = "TERMINATED"
+            return {"deleted": True}
+
+        self.client._delete_pod = delete_pod
+        attempt_id = self.attempt["attempt_id"]
+        completed_before = ("supervisor", "create")
+        if interrupted_stage == "collector":
+            completed_before += ("upload",)
+        for stage in completed_before:
+            self.store.append_stage_event(attempt_id, stage, StageStatus.STARTED)
+            self.store.append_stage_event(attempt_id, stage, StageStatus.SUCCEEDED)
+        self.store.append_stage_event(attempt_id, interrupted_stage, StageStatus.STARTED)
+
+        attempt_directory = (self.state_config.state_root / self.project.project_id / attempt_id)
+        supervisor_directory = attempt_directory / "supervisor"
+        stop_path = supervisor_directory / "stop.request"
+        collector_directory = attempt_directory / "collector"
+        collector_log = collector_directory / "collection-process.log"
+        if interrupted_stage == "collector":
+            collector_directory.mkdir(parents=True, exist_ok=True)
+            collector_log.touch()
+
+        monitor = StoreCleanupMonitor(
+            self.client, self.store, attempt_id, self.project.project_id,
+            clock=lambda: self.now)
+        ticks = [0.0]
+
+        def recovery_sleep(duration):
+            ticks[0] += duration
+            self.now += 1
+            if interrupted_stage == "collector" and (collector_directory / "collection.stop").exists():
+                (collector_directory / "collection.json").write_text(json.dumps({
+                    "attempt_id": attempt_id, "stopping": True,
+                }) + "\n", encoding="utf-8")
+            observation = monitor.observe(stop=stop_path.exists())
+            current = self.store.get_attempt(attempt_id)
+            state = {
+                "ready": True, "stopping": monitor.stopping,
+                "terminated": observation == "terminated", "pid": self.process.pid,
+                "attempt_id": attempt_id, "project_id": self.project.project_id,
+                "deadline_epoch": current["deadline_epoch"],
+                "attempt_sha256": current["attempt_sha256"],
+                "policy_sha256": monitor.policy_sha256,
+                "heartbeat_epoch": self.now,
+            }
+            (supervisor_directory / "supervisor.json").write_text(
+                json.dumps(state) + "\n", encoding="utf-8")
+
+        engine = SerialExecutionEngine(
+            self.client, self.store, self.state_config, clock=lambda: self.now,
+            monotonic=lambda: ticks[0], sleep=recovery_sleep)
+        result = engine.recover_attempt(
+            self.plan, attempt_id, cleanup_timeout_seconds=10,
+            collector_timeout_seconds=1)
+        self.assertEqual(self.store.get_attempt(attempt_id)["state"], "terminated")
+        self.assertEqual(result.outcome.cleanup_status.value, "confirmed")
+        failed_event = next(
+            event for event in result.stage_events
+            if event.stage == interrupted_stage and event.status is StageStatus.FAILED)
+        self.assertEqual(failed_event.error_code, "controller_restarted_stage_not_replayed")
+        self.assertEqual(len(self.client.create_calls), 1)
+        self.assertFalse(any(event.stage == "workload" for event in result.stage_events))
+        self.assertTrue(self.store.verify_attempt_lifecycle_projection(attempt_id))
+        return result
+
+    def test_controller_restart_during_upload_closes_stage_and_does_not_replay(self):
+        result = self._recover_with_interrupted_stage("upload")
+        self.assertEqual(result.outcome.operational_status.value, "reconciliation_required")
+
+    def test_controller_restart_during_collector_waits_for_stop_and_does_not_replay(self):
+        result = self._recover_with_interrupted_stage("collector")
+        self.assertEqual(result.outcome.operational_status.value, "reconciliation_required")
+
     def test_controller_restart_recovery_stops_without_replaying_workload(self):
         receipt = self.create()
         self.set_live_cpu_detail(receipt)

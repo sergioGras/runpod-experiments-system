@@ -473,9 +473,10 @@ during upload, collector exit during workload, and remaining-time clamping now
 have regression coverage. An uploader returning after its attempt deadline is
 rejected before collection or workload launch, and a running workload is
 stopped when the attempt deadline expires. Controller restart from intermediate
-upload/collector stages remains open. This remains M6 local test work before
-any consumer pin changes; package artifact import and CLI checks have passed
-for the current internal wheel, while stable API review remains open.
+upload and collector stages now has fake-path coverage below. Recovery that lacks
+a live independent supervisor remains manual reconciliation. This remains M6
+local test work before any consumer pin changes; stable API review and consumer
+acceptance remain open.
 
 Project-owned transfer settings (2026-11-13): `AttemptWorkload` now carries
 bounded `upload_timeout_seconds`, `upload_chunk_bytes`,
@@ -495,6 +496,18 @@ No consumer source, pin, state, provider account, credential, SSH endpoint or
 resource was touched. M9 still needs consumer archive-contract, service-role,
 cleanup and CPU/GPU acceptance; this adapter contract alone does not qualify
 Partition for cutover.
+
+Restart recovery follow-up (2026-11-13): tests now interrupt upload before
+collector launch and interrupt the detached collector after launch. Recovery
+marks the open stage as not replayed, requests the collector stop handshake when
+needed, and confirms cleanup of the exact fake Pod without creating or starting
+workload code again. The full offline suite passed 198 tests with one existing
+platform-capability skip. A fresh isolated venv installed the candidate wheel;
+transfer, serial-engine and collector imports succeeded and the collector CLI
+displayed its options. Wheel `0.2.0.dev0` SHA-256:
+`0f29d8fce43afdd712c69f74ff49b82e7546dbfa90984e1620efee0e0bf827a`. No provider,
+consumer source, pin or state was touched. This is synthetic recovery evidence;
+it does not establish recovery if the independent supervisor has died.
 
 ### Store-backed one-shot create slice (internal; qualification remains open)
 
