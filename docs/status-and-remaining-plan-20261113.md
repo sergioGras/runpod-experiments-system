@@ -31,24 +31,35 @@ These statuses are separate; a test count alone does not establish coverage.
 | Packaging | Candidate wheel and sdist install outside checkout; the wheel suite passes from site-packages; detached supervisor/collector import policy-bound consumer factories; archive contents were reviewed | Temporary candidates are not release assets; supported-host, ACL, and live provider qualification remain open |
 | Consumers | Isolated opt-in adapters in Hybrid, MIAP, and Partition pass focused offline suites against the installed sdist | No active entrypoint or dependency pin adopts the engine; complete consumer lifecycle/batch/service acceptance remains open |
 
-The latest recorded full offline run passed **226 tests, with one skipped**
-Windows directory-symlink capability case, on the installed wheel from outside
-the source checkout. The installed package modules resolved under
-`site-packages`; targeted detached supervisor and collector processes also
-loaded consumer factories from policy-bound module roots. The MIAP, Partition,
-and Hybrid adapter slices passed 72, 42, and 13 tests respectively against the
-installed sdist. These results supersede the earlier 200-test snapshot below.
+The earlier candidate passed 226 tests with one Windows directory-symlink
+capability skip. It also passed the focused MIAP, Partition, and Hybrid slices
+of 72, 42, and 13 tests against the earlier installed sdist. Those counts
+predate the resource-kind contract below.
 
-Candidate wheel: `runpod_experiments_system-0.2.0.dev0-py3-none-any.whl`,
-125,182 bytes, SHA-256
-`7f8f5be5a2f6aade5944ca9197509b4f1f6227f53af76378c707b5e844d457fa`.
-Candidate sdist: `runpod_experiments_system-0.2.0.dev0.tar.gz`, 172,300 bytes,
-SHA-256 `49f88c1717133914d52caaf066edf24dfa8242f9761ff5516aab7a635b56078a`.
-Both artifacts were installed in isolated environments. The wheel's full
-synthetic suite passed outside the checkout, and the installed supervisor CLI
-loaded. The wheel/sdist archive audit found only shared package source, build
-metadata, README, and generic synthetic tests. Temporary local artifact
-storage is not a durable release asset or a published release.
+Current CPU/GPU contract candidate (`0.2.0.dev0`; temporary local artifacts,
+not release assets):
+
+- Wheel: 125,370 bytes; SHA-256
+  `f8be6aac7bdf09efa27f21a7026226050db7b776dd97954884cf9bb018d19b7d`.
+- Sdist: 172,813 bytes; SHA-256
+  `50a0720cba8972f8d71e0b3ff39094c350c4425eb9dfedbd6ef7cb460eefb22a`.
+
+The full source and installed-wheel suites passed **227 tests, with one
+Windows directory-symlink capability skip**. The final wheel rebuild has the
+same 46 archive entry names and contents as the fully tested wheel; its archive
+hash differs because build metadata is timestamped. The final wheel and the
+installed final sdist each passed all 27 contract tests. The final sdist install
+also loaded the supervisor CLI. Against the installed final sdist, MIAP and
+Partition each passed three adapter tests, and Hybrid passed all 14
+protocol/watchdog tests. The archive audit found 46 wheel and 77 sdist entries,
+with no consumer repositories or private run artifacts. These remain local
+development candidates, not published releases.
+
+The CPU/GPU rule adds no serialized field or schema change. It does change
+validation semantics: previously stored plans that mix CPU and GPU options
+must be reviewed and split into separate plans before using this candidate.
+CPU-only and GPU-only plans retain their existing representations. No active
+consumer currently pins this package.
 
 An older production-library smoke or a successful consumer experiment validates
 its recorded source and scope. It does not qualify this new engine or transfer
@@ -63,7 +74,7 @@ approval to another project.
 | M3 | Serial transactional core verified; deployment/migration open | Canonical state root/actual-host/ACL checks and explicit legacy-state handling |
 | M4 | Detached process and supervision components verified; host qualification open | Exact installed candidate survives foreground exit on every supported controlling host; failure/reboot behavior recorded |
 | M5–M6 | Internal serial CPU/GPU/interactive implementation and enumerated setup/WAL fault paths verified offline; installed wheel/sdist reviewed | Public API/schema, credential-delivery and supported-host review; complete consumer lifecycle acceptance; then authorized live qualification |
-| M7–M9 | Isolated adapters exist for Hybrid, MIAP, and Partition; Hybrid's successful interactive path now runs through the serial engine; no consumer adopts an adapter from an active entrypoint or pin | Complete Hybrid failure/integrity and guarded-provider acceptance, MIAP interrupted-batch/finalizer, and Partition service/archive acceptance; reconcile each consumer before cutover |
+| M7–M9 | Isolated adapters exist for Hybrid, MIAP, and Partition; Hybrid's successful interactive path runs through the serial engine; plans now reject mixed CPU/GPU options; no consumer adopts an adapter from an active entrypoint or pin | Complete project-side GPU-need evidence, Hybrid failure/integrity and guarded-provider acceptance, MIAP interrupted-batch/finalizer, and Partition service/archive acceptance; reconcile each consumer before cutover |
 | M10 | Hierarchical parallel admission not delivered by the serial store | Atomic parent/child caps, two-slot process races and independent resource cleanup |
 | M11 | Open | Integrated acceptance, duplication retirement, rollback and release evidence |
 
@@ -230,13 +241,17 @@ or persisted run state was modified, and no provider call, resource creation,
 paid run, upload or disclosure occurred. Live qualification, consumer parity,
 deployment checks and release remain open.
 
-Follow-up installed-wheel checks (2026-11-13): MIAP and Partition each passed
+Earlier installed-wheel checks (2026-11-13): MIAP and Partition each passed
 all three tests in `tests.test_shared_runpod_adapter`. In addition to factory
 construction, these exercise the policy-loaded consumer factory and the
 consumer's own `ProjectPodApi` with a synthetic durable create claim, denial
 before claim, exact Pod deletion after stop, and lifecycle-projection check.
-Hybrid's 14 protocol/watchdog tests passed against the installed wheel; one
-runs the real Hybrid bridge through `SerialExecutionEngine` with fake setup,
-interactive transport and cleanup. These targeted checks still do not
-constitute MIAP batch or Partition service/archive acceptance, nor live
-qualification.
+Hybrid's 14 protocol/watchdog tests passed against the earlier installed wheel;
+one runs the real Hybrid bridge through `SerialExecutionEngine` with fake setup,
+interactive transport and cleanup.
+
+The current candidate was then installed from the sdist. MIAP and Partition
+again passed three adapter tests each, Hybrid passed 14 protocol/watchdog tests,
+and all use CPU-only plans. None of these tests maps production GPU need or
+replaces consumer-owned approval evidence. They still do not constitute MIAP
+batch or Partition service/archive acceptance, nor live qualification.

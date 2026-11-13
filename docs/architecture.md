@@ -60,7 +60,7 @@ explicitly before exposing the facade. The names below are design proposals.
 | --- | --- |
 | `ProjectPolicy` | Project ID, namespace registry digest, allowed host, provider-factory identity, state root and configured ceilings |
 | `ApprovalScope` | Validated approval evidence, stable objective/disclosure digests, cumulative limits and any owner-imposed deadline |
-| `ExecutionPlan` | Immutable job recipe: approved resource constraints, source/package/config digests, transfer manifests and finite retry policy |
+| `ExecutionPlan` | Immutable job recipe: approved CPU-only or GPU-only resource choices, source/package/config digests, transfer manifests and finite retry policy |
 | `Workload` | Bounded prepare/start/observe/collect/verify stages using an attempt context |
 | `Engine` | Preflight, finite execution, inspection and reconciliation |
 | `ExecutionOutcome` | Operational outcome, scientific verdict, cleanup state, billing state and private evidence references |
@@ -81,6 +81,15 @@ digests, technical window and cleanup reserve. A retry can select another eligib
 offer within the same approved constraints and produces a new AttemptPlan. A source
 correction requires a newly validated ExecutionPlan under the same applicable
 ApprovalScope; the engine never edits a frozen attempt or changes source itself.
+
+Treat the resource kind as a workload requirement, not a price or availability
+fallback. When CPU satisfies the workload, the plan contains CPU profiles only.
+Include GPU profiles only when the approved workload requires an accelerator;
+that plan contains GPU profiles only. A new CPU/GPU requirement needs a new
+immutable plan and applicable approval. Retries may choose among eligible
+profiles of that same kind. The core validates this single-kind rule; each
+project's approval adapter must validate and bind why its workload requires a
+GPU, since the shared library cannot infer scientific or application needs.
 
 An approval adapter validates project-owned evidence before the library receives
 the common scope. The engine independently enforces its generic fields. A string

@@ -75,6 +75,10 @@ Resource requirements belong in configuration: CPU count/RAM, GPU memory and
 capabilities, CUDA/image compatibility, region preference/allowlist, disk, mounts,
 ports and finite cost limits. Eligibility rules such as excluding a GPU partition
 for a particular workload must not become global bans or project IDs in the core.
+Each immutable plan contains alternatives of one resource kind: CPU when CPU is
+sufficient, GPU only when the approved workload requires an accelerator. A retry
+may choose another compatible profile within that same kind, never silently
+escalate a CPU-sufficient workload to a GPU.
 
 ### Durable attempts and accounting
 

@@ -433,6 +433,13 @@ class PodProvisioningSpec:
 
 @dataclass(frozen=True, slots=True)
 class ExecutionPlan:
+    """Immutable workload plan with alternatives for one resource requirement.
+
+    CPU profiles are for workloads that do not require an accelerator. GPU
+    profiles are for workloads whose approved requirements need one; the two
+    kinds cannot be mixed as fallbacks in a single plan.
+    """
+
     job_id: str
     project: ProjectPolicy
     approval: ApprovalScope
@@ -466,6 +473,10 @@ class ExecutionPlan:
             raise ContractError("resource_options must be a non-empty immutable tuple")
         if len(set(self.resource_options)) != len(self.resource_options):
             raise ContractError("resource_options must be unique")
+        resource_kind = self.resource_options[0].kind
+        if any(option.kind is not resource_kind for option in self.resource_options[1:]):
+            raise ContractError(
+                "an execution plan must contain only CPU or only GPU resource options")
         if not isinstance(self.provisioning, PodProvisioningSpec):
             raise ContractError("provisioning must be a PodProvisioningSpec")
         image_digest = re.search(r"sha256:[0-9a-f]{64}\Z", self.provisioning.image_ref)

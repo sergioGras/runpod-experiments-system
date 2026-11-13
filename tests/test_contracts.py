@@ -183,6 +183,18 @@ class ExecutionContractTests(unittest.TestCase):
         with self.assertRaises(ContractError):
             execution_plan(retry=RetryPolicy(1, 3601, ()))
 
+    def test_plan_cannot_fallback_between_cpu_and_gpu(self):
+        cpu = cpu_profile()
+        gpu = cpu_profile(
+            kind=ResourceKind.GPU, resource_id="gpu-large",
+            hourly_micro_usd=400_000, gpu_count=1, gpu_memory_gb=24,
+            minimum_cuda="12.8")
+        with self.assertRaisesRegex(ContractError, "only CPU or only GPU"):
+            execution_plan(resource_options=(cpu, gpu))
+        self.assertEqual(execution_plan(resource_options=(cpu,)).resource_options, (cpu,))
+        gpu_plan = execution_plan(resource_options=(gpu,))
+        self.assertEqual(gpu_plan.resource_options[0].kind, ResourceKind.GPU)
+
     def test_serial_profile_rejects_a_two_slot_approval(self):
         with self.assertRaises(ContractError):
             execution_plan(approval=approval(max_active_resources=2))
