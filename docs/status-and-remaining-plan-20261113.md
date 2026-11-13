@@ -66,7 +66,7 @@ approval to another project.
 
 ## Ordered remaining work
 
-### Immediate implementation slice after this audit
+### Completed setup cleanup and WAL slice
 
 Source review at `5fec8af` identified a concrete setup-cleanup risk:
 `run_attempt` calls `setup_process.poll()` outside its cleanup error guard in
@@ -76,38 +76,31 @@ could escape before `_cleanup` requested provider termination. This was fixed in
 provider cleanup path still runs. An unconfirmed local process stop escalates
 the outcome to reconciliation required.
 
-The next focused milestone should:
+All five setup failure paths listed below and deterministic WAL retry exhaustion
+are now covered. Setup failures stop before collection/workload launch. The
+provider cleanup path still runs when local process polling or stopping fails,
+and an unconfirmed local process stop produces a reconciliation-required
+outcome. The WAL retry recognizes extended SQLite busy codes and stops at its
+configured deadline; unrelated I/O errors fail immediately.
 
-1. Reproduce invalid setup handles and poll errors with a fake provider, and
-   ensure local setup-process inspection/termination errors cannot bypass the
-   independent provider cleanup path. Preserve the original setup failure and
-   report an unconfirmed local stop as reconciliation required.
-2. Exercise nonzero setup exit, configured setup timeout and supervisor loss
-   during setup. Assert that collector/workload launch never follows failure,
-   exact provider cleanup runs, and accounting exposure remains pending until
-   separately reconciled.
-3. Exercise terminate/wait/kill failures without suppressing provider cleanup.
-   Keep every wait finite and report unconfirmed cleanup honestly.
-4. Add deterministic WAL retry exhaustion and SQLite error-code cases, including
-   extended busy/locked codes and immediate rejection of unrelated codes.
-5. Run focused regressions and the relevant store/engine suites. A source fix
-   then warrants the broader offline suite and a fresh installed artifact check;
-   record the actual results before committing the completed milestone.
-
-Setup cleanup milestone (2026-11-13): the regression suite now covers invalid
+Setup cleanup milestone (2026-11-13): the regression suite covers invalid
 process handles, poll errors, nonzero setup exit, configured timeout, supervisor
-loss, and terminate/kill failure. All seven setup tests passed. They verify the
-collector and workload do not start after setup failure and provider cleanup is
-still attempted; an unconfirmed local process stop is reported for
+loss, and terminate/kill failure. All seven focused setup tests passed. They
+verify the collector and workload do not start after setup failure and provider
+cleanup is still attempted; an unconfirmed local process stop is reported for
 reconciliation. WAL tests cover transient text locks, extended
 `SQLITE_BUSY_SNAPSHOT`, non-retryable I/O errors and deadline exhaustion. The
-full suite passed 206 tests with one platform-capability skip before the
-additional invalid-handle regression was added; all seven focused setup tests
-passed afterward. A fresh wheel
-installed into a clean venv; execution-store and serial-engine imports were
-asserted to originate under that venv's `site-packages`, and the collector CLI
-loaded. Wheel `0.2.0.dev0` SHA-256:
-`61fb65f5a349440b8c5d1acea61a25ce3e73c7eccfbc73383bbb4114e90dfd9d`.
+full suite passed 207 tests with one platform-capability skip. Wheel and sdist
+`0.2.0.dev0` both installed in a clean venv, and the execution-store and
+serial-engine imports were asserted to originate under that venv's
+`site-packages`. The installed `runpod-experiment-supervisor --help` entry point
+loaded. The detached-supervisor parent-exit test passed from both installed
+environments. The sdist archive audit found only package source, build metadata,
+and generic tests; no run data, credentials, weights, checkpoints, or consumer
+tracking files were present. SHA-256 hashes:
+
+- Wheel: `61fb65f5a349440b8c5d1acea61a25ce3e73c7eccfbc73383bbb4114e90dfd9d`
+- Sdist: `e1215eb51782dbe2f44b56e60d5a6b938b41beab89f34a89b251e573f432f6d1`
 
 This milestone changes common behavior only. Consumer adapters can be prepared
 in isolated checkouts after these cleanup guarantees are established; production
@@ -115,7 +108,7 @@ cutovers still require reconciliation and consumer acceptance.
 
 | Order | Work and deliverable | Completion criterion |
 | --- | --- | --- |
-| 1 | Finish the common fault matrix. Map requirements to concrete tests; add setup nonzero/timeout/supervisor-loss cases, termination failure handling and bounded WAL exhaustion/error-code cases. Review remaining clock/reboot, collector and recovery scenarios. | Each required scenario has a passing test or a named unsupported capability; failure never launches the next stage or bypasses cleanup/accounting. |
+| 1 | Close the remaining common fault matrix. Setup exit/timeout/supervisor-loss, process-stop failure and bounded WAL exhaustion/error-code coverage are complete. Review clock/reboot, collector and recovery scenarios and fill any demonstrated gaps. | Each required scenario has a passing test or a named unsupported capability; failure never launches the next stage or bypasses cleanup/accounting. |
 | 2 | Freeze a serial integration candidate. Review public vs internal APIs, schemas, direct/proxy launcher capabilities and approved secret-delivery needs. Build and inspect wheel plus sdist, preserve hashes and a durable artifact. | Clean isolated installs and documented module origins; secret values absent from plans/argv/logs/artifacts; supported capabilities and migration rules explicit. |
 | 3 | Qualify deployment without paid compute. Exercise the exact installed artifact and interpreter through detached supervision, parent exit, PID and package identity checks. Define canonical project state roots, host identities and ACLs. | Host-specific evidence includes source/artifact/environment and actual child identity; unsupported OS/host combinations remain explicitly unsupported. |
 | 4 | Prepare Hybrid adapter and offline acceptance in an isolated checkout. Preserve framing, local trusted-client work, setup verification and scientific acceptance. Replace sibling-path loading with the immutable package pin. | Existing protocol/failure/integrity checks pass through the common engine; deployment/source bindings and rollback are reviewable. Reconcile active legacy controls before changing their runtime or state. |
