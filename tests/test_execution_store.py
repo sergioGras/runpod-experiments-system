@@ -12,8 +12,9 @@ import unittest
 
 from runpod_experiments.contracts import (
     ApprovalScope, AttemptPlan, BillingObservation, ExecutionPlan,
-    FailureCategory, ManifestFile, PodProvisioningSpec, ProjectPolicy, QuoteObservation,
-    ResourceKind, ResourceProfile, RetryPolicy, TransferDirection, TransferManifest,
+    ContractError, FailureCategory, ManifestFile, PodProvisioningSpec, ProjectPolicy,
+    QuoteObservation, ResourceKind, ResourceProfile, RetryPolicy, StageStatus,
+    TransferDirection, TransferManifest,
     encode_document, sha256_bytes,
 )
 from runpod_experiments.errors import ExecutionError
@@ -128,6 +129,32 @@ class ExecutionStoreTests(unittest.TestCase):
                          self.store.get_attempt(attempt.attempt_id)["attempt_sha256"])
         self.assertTrue(reopened.verify_event_chain())
         self.assertEqual([event["event_type"] for event in reopened.events()], ["reserved"])
+
+    def test_stage_events_are_typed_durable_and_do_not_change_lifecycle_projection(self):
+        attempt, _ = self.reserve()
+        self.assertTrue(self.store.verify_execution_plan(attempt.attempt_id, self.plan))
+        started = self.store.append_stage_event(
+            attempt.attempt_id, "upload", StageStatus.STARTED)
+        completed = self.store.append_stage_event(
+            attempt.attempt_id, "upload", StageStatus.SUCCEEDED,
+            evidence_sha256=(ONE,))
+        failed = self.store.append_stage_event(
+            attempt.attempt_id, "launch", StageStatus.FAILED,
+            failure_category=FailureCategory.SETUP_FAILURE,
+            error_code="launch_config_invalid")
+        self.assertEqual((started.sequence, completed.sequence, failed.sequence), (1, 2, 3))
+        self.assertTrue(self.store.verify_attempt_lifecycle_projection(attempt.attempt_id))
+        self.assertTrue(self.store.verify_event_chain())
+
+        reopened = ExecutionStore(str(self.path), project_id=self.plan.project.project_id,
+                                  controller_host="TEST-HOST", clock=lambda: self.now)
+        restored = reopened.get_stage_events(attempt.attempt_id)
+        self.assertEqual([event.stage for event in restored], ["upload", "upload", "launch"])
+        self.assertEqual(restored[2].failure_category, FailureCategory.SETUP_FAILURE)
+        self.assertEqual(restored[2].error_code, "launch_config_invalid")
+        with self.assertRaises(ContractError):
+            self.store.append_stage_event(
+                attempt.attempt_id, "bad-stage", StageStatus.FAILED)
 
     def test_create_claim_and_lifecycle_transitions_preserve_identity(self):
         attempt, _ = self.reserve()

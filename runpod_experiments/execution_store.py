@@ -12,12 +12,13 @@ import re
 import sqlite3
 import math
 import time
+import uuid
 from typing import Any, Iterator
 
 from runpod_experiments.contracts import (
     ApprovalScope, AttemptPlan, BillingObservation, ContractError, ExecutionPlan,
     FailureCategory, PodProvisioningSpec, ProjectPolicy, QuoteObservation,
-    ResourceKind, ResourceProfile,
+    ResourceKind, ResourceProfile, StageEvent, StageStatus,
     canonical_json_bytes, decode_document, encode_document, sha256_bytes,
     strict_json_loads, validate_attempt,
 )
@@ -59,6 +60,37 @@ def _quote_from_payload(value: Any) -> QuoteObservation:
         minimum_cuda=value["minimum_cuda"],
         schema_version=value["schema_version"],
     )
+
+
+def _stage_event_from_payload(value: Any) -> StageEvent:
+    """Parse and hash-check the typed event nested in the store event chain."""
+    fields = {"stage_event_sha256", "stage_event_document"}
+    if not isinstance(value, dict) or set(value) != fields or not isinstance(
+            value["stage_event_document"], dict):
+        raise ContractError("stored stage event is malformed")
+    document = canonical_json_bytes(value["stage_event_document"])
+    if sha256_bytes(document) != value["stage_event_sha256"]:
+        raise ContractError("stored stage event digest differs")
+    payload = decode_document(document, expected_kind="stage_event")
+    required = {"event_id", "job_id", "attempt_id", "sequence", "occurred_epoch",
+                "stage", "status", "failure_category", "error_code",
+                "evidence_sha256", "schema_version"}
+    if not isinstance(payload, dict) or set(payload) != required:
+        raise ContractError("stored stage event document is malformed")
+    try:
+        return StageEvent(
+            event_id=payload["event_id"], job_id=payload["job_id"],
+            attempt_id=payload["attempt_id"], sequence=payload["sequence"],
+            occurred_epoch=payload["occurred_epoch"], stage=payload["stage"],
+            status=StageStatus(payload["status"]),
+            failure_category=(FailureCategory(payload["failure_category"])
+                              if payload["failure_category"] is not None else None),
+            error_code=payload["error_code"],
+            evidence_sha256=tuple(payload["evidence_sha256"]),
+            schema_version=payload["schema_version"],
+        )
+    except (ContractError, TypeError, ValueError):
+        raise ContractError("stored stage event document is invalid") from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -866,6 +898,52 @@ class ExecutionStore:
             raise ExecutionError(FailureCategory.CONFIGURATION, "unknown_attempt")
         return dict(row)
 
+    def verify_execution_plan(self, attempt_id: str, plan: ExecutionPlan) -> bool:
+        """Require a supplied typed plan to match the attempt's immutable document."""
+        if not isinstance(plan, ExecutionPlan):
+            raise ContractError("plan must be an ExecutionPlan")
+        self.verify_attempt_lifecycle_projection(attempt_id)
+        with closing(self._connect()) as db:
+            row = db.execute("""SELECT a.job_id,a.plan_sha256,p.document
+                FROM execution_attempts a JOIN execution_plans p
+                  ON p.plan_sha256=a.plan_sha256
+                WHERE a.attempt_id=? AND a.project_id=?""",
+                (attempt_id, self.project_id)).fetchone()
+        if row is None:
+            raise ExecutionError(FailureCategory.CONFIGURATION, "unknown_attempt")
+        try:
+            stored = bytes(row["document"])
+            supplied = encode_document("execution_plan", plan)
+            if (sha256_bytes(stored) != row["plan_sha256"] or
+                    sha256_bytes(supplied) != row["plan_sha256"] or
+                    plan.job_id != row["job_id"] or plan.project.project_id != self.project_id):
+                raise ContractError("supplied plan differs from the stored attempt")
+        except (ContractError, TypeError, ValueError):
+            raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                 "execution_plan_mismatch") from None
+        return True
+
+    def attempt_runtime_seconds(self, attempt_id: str) -> int:
+        """Return the immutable runtime allowance recorded for one attempt."""
+        self.verify_attempt_lifecycle_projection(attempt_id)
+        with closing(self._connect()) as db:
+            row = db.execute("""SELECT attempt_sha256,attempt_document FROM execution_attempts
+                WHERE attempt_id=? AND project_id=?""", (attempt_id, self.project_id)).fetchone()
+        if row is None:
+            raise ExecutionError(FailureCategory.CONFIGURATION, "unknown_attempt")
+        try:
+            raw = bytes(row["attempt_document"])
+            if sha256_bytes(raw) != row["attempt_sha256"]:
+                raise ContractError("stored attempt document digest differs")
+            payload = decode_document(raw, expected_kind="attempt_plan")
+            value = payload.get("runtime_seconds")
+            if type(value) is not int or value <= 0:
+                raise ContractError("stored attempt runtime is malformed")
+        except (ContractError, TypeError, ValueError):
+            raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                 "attempt_runtime_mismatch") from None
+        return value
+
     def selected_resource_for_attempt(self, attempt_id: str) -> tuple[ResourceProfile, str]:
         """Return the hash-bound resource profile and region selected for an attempt."""
         self.verify_attempt_lifecycle_projection(attempt_id)
@@ -1282,6 +1360,66 @@ class ExecutionStore:
                 row["terminated_epoch"] != expected_terminated_epoch):
             mismatch()
         return True
+
+    def append_stage_event(self, attempt_id: str, stage: str, status: StageStatus, *,
+                           failure_category: FailureCategory | None = None,
+                           error_code: str | None = None,
+                           evidence_sha256: tuple[str, ...] = ()) -> StageEvent:
+        """Append one redacted, typed stage observation to the durable hash chain."""
+        self.verify_attempt_lifecycle_projection(attempt_id)
+        now = self._now()
+        with self._transaction() as db:
+            attempt = db.execute("SELECT job_id FROM execution_attempts WHERE attempt_id=? AND project_id=?",
+                                 (attempt_id, self.project_id)).fetchone()
+            if attempt is None:
+                raise ExecutionError(FailureCategory.CONFIGURATION, "unknown_attempt")
+            rows = db.execute("SELECT payload FROM execution_events WHERE entity_type='stage' "
+                              "AND entity_id=? AND event_type='stage_event' ORDER BY sequence",
+                              (attempt_id,)).fetchall()
+            prior = []
+            try:
+                prior = [_stage_event_from_payload(strict_json_loads(bytes(row["payload"])))
+                         for row in rows]
+            except (ContractError, TypeError, ValueError):
+                raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                     "stage_event_projection_mismatch") from None
+            if [event.sequence for event in prior] != list(range(1, len(prior) + 1)):
+                raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                     "stage_event_projection_mismatch")
+            event = StageEvent(
+                event_id=uuid.uuid4().hex, job_id=attempt["job_id"],
+                attempt_id=attempt_id, sequence=len(prior) + 1,
+                occurred_epoch=now, stage=stage, status=status,
+                failure_category=failure_category, error_code=error_code,
+                evidence_sha256=evidence_sha256)
+            document = encode_document("stage_event", event)
+            payload = {"stage_event_sha256": sha256_bytes(document),
+                       "stage_event_document": strict_json_loads(document)}
+            self._append_event(db, "stage", attempt_id, "stage_event", now, payload)
+            return event
+
+    def get_stage_events(self, attempt_id: str) -> tuple[StageEvent, ...]:
+        """Read hash-verified stage observations in their per-attempt order."""
+        self.verify_attempt_lifecycle_projection(attempt_id)
+        attempt = self.get_attempt(attempt_id)
+        with closing(self._connect()) as db:
+            rows = db.execute("SELECT created_epoch,payload FROM execution_events "
+                              "WHERE entity_type='stage' AND entity_id=? "
+                              "AND event_type='stage_event' ORDER BY sequence",
+                              (attempt_id,)).fetchall()
+        try:
+            events = tuple(_stage_event_from_payload(strict_json_loads(bytes(row["payload"])))
+                           for row in rows)
+        except (ContractError, TypeError, ValueError):
+            raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                 "stage_event_projection_mismatch") from None
+        if (any(event.job_id != attempt["job_id"] or event.attempt_id != attempt_id or
+                event.occurred_epoch != row["created_epoch"]
+                for event, row in zip(events, rows)) or
+                [event.sequence for event in events] != list(range(1, len(events) + 1))):
+            raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                 "stage_event_projection_mismatch")
+        return events
 
     def events(self, *, after_sequence: int = 0, limit: int = 1000) -> tuple[dict[str, Any], ...]:
         if (type(after_sequence) is not int or after_sequence < 0 or

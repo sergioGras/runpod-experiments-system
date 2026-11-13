@@ -3,10 +3,11 @@
 Status: M0 design and M1 are complete. M2 remains open pending account-level
 qualification of billing and resource quotes. The isolated
 `design/unified-execution` worktree now has an internal schema-v4 SQLite store,
-store-backed cleanup supervisor and one-shot create controller, plus
-store-verified direct SSH paths for upload, remote launch and collection.
-These slices have offline evidence, but M3 through M6 exit criteria remain open;
-there is no complete serial engine or production migration. Read
+store-backed cleanup supervisor and one-shot create controller, store-verified
+direct/proxy transfer paths, durable stage events and an internal serial
+coordinator for one attempt, finite job retries and controller-restart cleanup.
+M3 through M6 exit criteria remain open; this is not a qualified production
+engine or consumer migration. Read
 [architecture](architecture.md), [testing](testing-strategy.md) and
 [contribution rules](../CONTRIBUTING.md) together. The earlier
 [unification study](unification-roadmap.md) supplies the capability inventory.
@@ -282,12 +283,17 @@ contract. Implement direct SSH and the required proxy handshake against common
 integrity/limit tests. Keep protocol-specific framing in workload adapters. Add
 explicit ephemeral secret delivery and redaction, with private failure journals.
 
-The serial engine admits a plan, starts supervision, claims/sends one create,
-verifies the scheduled resource, runs workload stages, collects outcomes and
-requests cleanup. Retry eligibility is based on typed failure, reconciled state,
-remaining scope/capacity/budget and finite policy. Restart can recover verified
-results without creating a new resource. Operational failure and scientific
-failure both retain permitted evidence and independent cleanup.
+The serial engine admits one already-reserved attempt, starts supervision,
+claims/sends one create, verifies the scheduled resource, runs bounded workload
+stages, collects allowlisted outcomes and requests cleanup. Job retries use a
+fresh reservation callback and require an allowed typed failure plus terminal
+cleanup; the callback remains responsible for current quotes and the store
+enforces the remaining approved scope and budget. Controller restart recovery
+closes any interrupted stage as not replayed, asks a running collector for one
+final pass, and relies on the independent supervisor to reconcile provider
+termination. It does not relaunch a stale supervisor or replay a workload.
+Operational and scientific verdicts remain separate; the coordinator returns
+`NOT_EVALUATED` until the consumer's verifier decides the scientific result.
 
 `SSHInteractiveProcess`, bundle upload, bounded remote launch, result collection
 and a detached collector support an `ExecutionStore` attempt in addition to the
@@ -299,9 +305,17 @@ transfers; store-backed upload and collection can select this route, including
 from a detached collector. Raw binary pipes, long-lived process launch and
 interrupted large-file resume remain direct-only or open. Fake-provider coverage
 exercises the direct paths and proxy framing/route selection; unexpected live
-shape prevents SSH startup, and the legacy paths remain covered. Restartable
-serial-engine orchestration and end-to-end stage/retry recovery remain open. The
-GPU path is still blocked by unavailable per-card VRAM runtime evidence.
+shape prevents SSH startup, and the legacy paths remain covered. The internal
+`SerialExecutionEngine` records durable stage events, passes manifest file and
+aggregate limits into direct or proxy collectors, coordinates one reserved
+attempt, retries only after a clean terminal failure, and recovers an
+interrupted attempt without rerunning its workload. A stale or missing
+supervisor leaves cleanup pending for reconciliation. GPU SSH and workload
+access remain blocked by unavailable per-card VRAM runtime evidence. Full M6
+acceptance still requires a successful fake GPU attempt through an explicit
+runtime-evidence seam, additional fault-injection/restart cases, stable
+package/API review and consumer acceptance. No consumer source or package pin
+changed in this slice.
 
 M5 proxy-transport evidence on Windows/Python 3.12.14: the full offline suite
 passed 152 tests with one directory-symlink capability skip. The tests cover
@@ -320,6 +334,36 @@ Hybrid's binary interactive flow and MIAP's batch orchestration remain on their
 current paths; Partition can evaluate the finite proxy transfer capability while
 keeping service framing and workload acceptance in its adapter. All consumers
 still need their own acceptance checks and exact artifact pins before adoption.
+
+### M6.1: bounded serial coordinator slice (incomplete)
+
+The design branch now includes a store-backed `SerialExecutionEngine` for one
+reserved attempt, a finite job retry loop, typed durable stage events, and
+controller-restart cleanup that never replays an interrupted workload. Retries
+require an allowed typed failure, a terminal prior attempt, and confirmed or
+not-required cleanup. The caller reserves the next immutable attempt after a
+fresh quote; store accounting remains the guard for remaining cost and slots.
+The detached collector now receives each result's declared byte ceiling and
+the plan's per-file and aggregate transfer limits. Direct and proxy fetchers
+enforce those limits while reading. Recovery relies on the already running
+independent supervisor; it leaves cleanup pending if that supervisor is stale.
+
+On Windows with Python 3.12.14, the full offline suite passed 158
+tests with one directory-symlink capability skip. New fake tests cover a
+complete CPU attempt and provider-confirmed cleanup, safe retry gating and
+restart cleanup without workload replay. A wheel built from this revision
+installed in a new venv outside the checkout; imports for the serial engine and
+collector succeeded, and the installed collector CLI displayed its limits
+options. Wheel SHA-256:
+`a3336edf22abd5da6ceb78b6ce78137bfa04aabf5975a0afcaf3ec748512ed06`. No
+RunPod account, credential, SSH endpoint or resource was contacted.
+
+This is a validated implementation slice, not M6 completion. A successful GPU
+attempt remains blocked by the missing independent per-card VRAM runtime
+evidence seam; recovery when the supervisor itself has died is deliberately
+manual; scientific output verification, secret delivery and consumer-specific
+approval integration remain open. Do not update consumer pins until their
+separate acceptance gates pass.
 
 ### Store-backed one-shot create slice (internal; qualification remains open)
 

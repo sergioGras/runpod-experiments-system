@@ -47,13 +47,18 @@ class SSHFetcher:
         self.max_bytes, self.timeout, self.runner = max_bytes, timeout, runner
 
     def __call__(self, name):
+        return self.fetch_limited(name, self.max_bytes)
+
+    def fetch_limited(self, name, max_bytes):
+        if type(max_bytes) is not int or not 0 < max_bytes <= self.max_bytes:
+            raise ValueError("Requested SSH collection limit exceeds configured maximum")
         if not isinstance(name, str) or not name or "\\" in name or "\x00" in name:
             raise ValueError("Invalid artifact name")
         relative = PurePosixPath(name)
         if relative.is_absolute() or ".." in relative.parts:
             raise ValueError("Artifact must be inside the remote root")
         remote = str(PurePosixPath(self.remote_root) / relative)
-        command = "head -c " + str(self.max_bytes + 1) + " -- " + shlex.quote(remote)
+        command = "head -c " + str(max_bytes + 1) + " -- " + shlex.quote(remote)
         argv = ["ssh", "-T", "-i", self.key_file, "-p", str(self.port), "-o", "BatchMode=yes",
                 "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=yes", "-o",
                 "UserKnownHostsFile=" + self.known_hosts, self.username + "@" + self.host, command]
@@ -61,7 +66,7 @@ class SSHFetcher:
             result = self.runner(argv, capture_output=True, timeout=self.timeout, check=True)
         except (subprocess.SubprocessError, OSError):
             raise RuntimeError("SSH collection failed") from None
-        if len(result.stdout) > self.max_bytes:
+        if len(result.stdout) > max_bytes:
             raise ValueError("Artifact exceeds collection size limit")
         return result.stdout
 

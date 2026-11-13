@@ -306,10 +306,15 @@ class SSHProxyFetcher:
         self.session = SSHProxySession(endpoint, key_file, known_hosts, runner=runner)
 
     def __call__(self, name):
+        return self.fetch_limited(name, self.max_bytes)
+
+    def fetch_limited(self, name, max_bytes):
+        if type(max_bytes) is not int or not 0 < max_bytes <= self.max_bytes:
+            raise ValueError("Requested proxy collection limit exceeds configured maximum")
         if (not isinstance(name, str) or not name or "\\" in name or "\x00" in name):
             raise ValueError("Invalid artifact name")
         relative = PurePosixPath(name)
         if relative.is_absolute() or ".." in relative.parts:
             raise ValueError("Artifact must be inside the remote root")
         remote = str(PurePosixPath(self.remote_root) / relative)
-        return self.session.read_file(remote, max_bytes=self.max_bytes, timeout=self.timeout)
+        return self.session.read_file(remote, max_bytes=max_bytes, timeout=self.timeout)

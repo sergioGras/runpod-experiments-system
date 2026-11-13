@@ -14,7 +14,8 @@ from runpod_experiments.store_transport import resolve_store_ssh_context
 
 def collect_owned_once(client, ledger, attempt_id, project_id, store, names, key_file,
                        known_hosts, remote_root, previous=None, *, ssh_route="direct",
-                       fetcher_type=None):
+                       fetcher_type=None, max_file_bytes=10_000_000,
+                       max_total_bytes=100_000_000, per_file_limits=None):
     if isinstance(ledger, ExecutionStore):
         target = resolve_store_ssh_context(client, ledger, attempt_id, project_id, route=ssh_route)
         endpoint = target.endpoint
@@ -35,17 +36,25 @@ def collect_owned_once(client, ledger, attempt_id, project_id, store, names, key
             raise AttemptError("Direct SSH endpoint not available")
         host, port, username = (endpoint.get("host"), endpoint.get("port"),
                                 endpoint.get("username"))
-    if fetcher_type is None:
+    use_builtin_fetcher = fetcher_type is None
+    if use_builtin_fetcher:
         fetcher_type = (SSHProxyFetcher if isinstance(ledger, ExecutionStore) and endpoint.route == "proxy"
                         else SSHFetcher)
-    fetch = fetcher_type(host, port, username,
-                         key_file, known_hosts, remote_root)
-    return collect_once(store, fetch, names, attempt_id, previous)
+    if use_builtin_fetcher:
+        fetch = fetcher_type(host, port, username, key_file, known_hosts, remote_root,
+                             max_bytes=max_file_bytes)
+    else:
+        fetch = fetcher_type(host, port, username, key_file, known_hosts, remote_root)
+    return collect_once(store, fetch, names, attempt_id, previous,
+                        max_file_bytes=max_file_bytes, max_total_bytes=max_total_bytes,
+                        per_file_limits=per_file_limits)
 
 
 def collect_loop(client, ledger, attempt_id, project_id, store, names, key_file, known_hosts,
                  remote_root, control_directory, *, ssh_route="direct", interval=30,
-                 sleep=time.sleep, clock=time.time, max_polls=None):
+                 sleep=time.sleep, clock=time.time, max_polls=None,
+                 max_file_bytes=10_000_000, max_total_bytes=100_000_000,
+                 per_file_limits=None):
     """Keep collecting until collection.stop is present; then try once more."""
     if ssh_route not in ("direct", "proxy") or (
             ssh_route == "proxy" and not isinstance(ledger, ExecutionStore)):
@@ -70,7 +79,10 @@ def collect_loop(client, ledger, attempt_id, project_id, store, names, key_file,
             else:
                 previous, errors = collect_owned_once(client, ledger, attempt_id, project_id, store, names,
                                                        key_file, known_hosts, remote_root, previous,
-                                                       ssh_route=ssh_route)
+                                                       ssh_route=ssh_route,
+                                                       max_file_bytes=max_file_bytes,
+                                                       max_total_bytes=max_total_bytes,
+                                                       per_file_limits=per_file_limits)
         except Exception as error:
             errors = {"collection": type(error).__name__}
         polls += 1

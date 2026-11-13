@@ -31,6 +31,61 @@ def pod_billing_response(pod_id, records, start_time="2026-11-11T08:00:00Z",
 
 
 class ConnectionTests(unittest.TestCase):
+    def test_collection_applies_per_file_and_aggregate_limits_before_storage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "results")
+            requested = []
+
+            class Fetch:
+                def __call__(self, name):
+                    return self.fetch_limited(name, 8)
+
+                def fetch_limited(self, name, max_bytes):
+                    requested.append((name, max_bytes))
+                    return name.encode()[:max_bytes]
+
+            previous, errors = collect_once(
+                store, Fetch(), ["a.bin", "long-name.bin"], "attempt-1",
+                max_file_bytes=8, max_total_bytes=10,
+                per_file_limits={"a.bin": 2, "long-name.bin": 8})
+            self.assertEqual(errors, {})
+            self.assertEqual([limit for _name, limit in requested], [2, 8])
+            self.assertEqual(set(previous), {"a.bin", "long-name.bin"})
+            entries = [json.loads(line) for line in
+                       (Path(directory) / "results" / "manifest.jsonl").read_text().splitlines()]
+            self.assertEqual([entry["bytes"] for entry in entries], [2, 8])
+
+            aggregate_store = ArtifactStore(Path(directory) / "aggregate-results")
+            aggregate_requested = []
+
+            class AggregateFetch:
+                def fetch_limited(self, name, max_bytes):
+                    aggregate_requested.append((name, max_bytes))
+                    return name.encode()[:max_bytes]
+
+            _previous, aggregate_errors = collect_once(
+                aggregate_store, AggregateFetch(), ["one", "two"], "attempt-2",
+                max_file_bytes=8, max_total_bytes=5)
+            self.assertEqual(aggregate_errors, {})
+            self.assertEqual([limit for _name, limit in aggregate_requested], [5, 2])
+
+            empty_store = ArtifactStore(Path(directory) / "empty-results")
+            empty_previous, empty_errors = collect_once(
+                empty_store, lambda _name: b"", ["empty.bin"], "attempt-3",
+                max_file_bytes=8, max_total_bytes=1,
+                per_file_limits={"empty.bin": 0})
+            self.assertEqual(empty_errors, {})
+            self.assertEqual(empty_previous["empty.bin"], hashlib.sha256(b"").hexdigest())
+
+    def test_collection_rejects_unbounded_fallback_fetch_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "results")
+            previous, errors = collect_once(
+                store, lambda _name: b"too large", ["result.bin"], "attempt-1",
+                max_file_bytes=3, max_total_bytes=3)
+            self.assertEqual(previous, {})
+            self.assertEqual(errors, {"result.bin": "ValueError"})
+
     def test_exact_pod_billing_is_a_read_only_validated_observation(self):
         records = [{"podId": "pod-123", "startTime": "2026-11-11T08:00:00Z",
                     "endTime": "2026-11-11T09:00:00Z", "totalAmount": 0.11,

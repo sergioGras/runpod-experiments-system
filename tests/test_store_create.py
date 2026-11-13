@@ -2,17 +2,21 @@ import base64
 import io
 import json
 import re
+import os
 from pathlib import Path
 import struct
 import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+from dataclasses import replace
 
 from runpod_experiments.contracts import (
-    ApprovalScope, AttemptPlan, ExecutionPlan, FailureCategory, PodProvisioningSpec,
-    ProjectPolicy, QuoteObservation, ResourceKind, ResourceProfile, RetryPolicy,
-    TransferManifest, encode_document, sha256_bytes,
+    ApprovalScope, AttemptPlan, BillingStatus, CleanupStatus, ExecutionOutcome,
+    ExecutionPlan, FailureCategory, OperationalStatus, PodProvisioningSpec,
+    ManifestFile, ProjectPolicy, QuoteObservation, ResourceKind, ResourceProfile,
+    RetryPolicy, ScientificVerdict, TransferDirection, TransferManifest,
+    StageStatus, encode_document, sha256_bytes,
 )
 from runpod_experiments.artifacts import ArtifactStore
 from runpod_experiments.collection_process import launch_execution_store
@@ -22,9 +26,13 @@ from runpod_experiments.execution_store import ExecutionStore
 from runpod_experiments.interactive_ssh import SSHInteractiveProcess
 from runpod_experiments.remote_process import start_python
 from runpod_experiments.run_collection import collect_owned_once
+from runpod_experiments.serial_engine import (
+    AttemptWorkload, SerialAttemptResult, SerialExecutionEngine,
+)
 from runpod_experiments.ssh import ssh_public_key_fingerprint
 from runpod_experiments.state_config import StateStoreConfig
 from runpod_experiments.store_create import StoreCreateController
+from runpod_experiments.supervision import StoreCleanupMonitor
 from runpod_experiments.upload import upload_bundle
 
 
@@ -129,6 +137,7 @@ class StoreCreateControllerTests(unittest.TestCase):
             sha256_bytes(encode_document("project_policy", self.project)),
             self.plan.source_sha256, self.plan.config_sha256, self.plan.package_sha256,
             profile, REGION, 300, 60, self.now, self.now + 360)
+        self.attempt_plan = attempt
         self.store = self.state_config.open_execution_store(
             self.project.project_id, clock=lambda: self.now)
         self.store.reserve_attempt(self.plan, attempt, "nebula-run-001")
@@ -435,6 +444,241 @@ class StoreCreateControllerTests(unittest.TestCase):
         route_index = launched["argv"].index("--ssh-route")
         self.assertEqual(launched["argv"][route_index + 1], "proxy")
 
+    def test_store_serial_engine_runs_one_fake_attempt_and_confirms_cleanup(self):
+        collector_limits = {}
+        self.store.cancel_uncreated(self.attempt["attempt_id"])
+        worker = b"synthetic serial worker"
+        transfer = TransferManifest((
+            ManifestFile("worker.py", sha256_bytes(worker), len(worker), TransferDirection.UPLOAD),
+            ManifestFile("results.json", ZERO, 0, TransferDirection.DOWNLOAD),
+        ), 4096, 8192)
+        job_id, attempt_id, pod_name = "job-serial-engine", "attempt-engine", "nebula-engine-001"
+        plan = replace(self.plan, job_id=job_id, transfers=transfer)
+        attempt_plan = replace(
+            self.attempt_plan, attempt_id=attempt_id, job_id=job_id,
+            request_sha256=pod_create_request_sha256(
+                plan.provisioning, self.attempt_plan.selected_resource, REGION, pod_name))
+        self.store.reserve_attempt(plan, attempt_plan, pod_name)
+        attempt = self.store.get_attempt(attempt_id)
+        self.assertEqual(attempt["state"], "reserved")
+
+        source_root = self.root / "serial-source"
+        source_root.mkdir()
+        (source_root / "worker.py").write_bytes(worker)
+
+        def create_pod(request):
+            receipt = SimpleNamespace(pod_id="pod-engine-001", pod_name=request["name"])
+            self.set_live_cpu_detail(receipt)
+            self.client.inventory = [{"id": receipt.pod_id, "name": receipt.pod_name,
+                                      "status": "RUNNING"}]
+            return {"id": receipt.pod_id, "name": receipt.pod_name}
+
+        def delete_pod(pod_id):
+            self.assertEqual(pod_id, "pod-engine-001")
+            self.client.inventory = []
+            self.client.detail["status"] = "TERMINATED"
+            return {"deleted": True}
+
+        self.client._create_pod = create_pod
+        self.client._delete_pod = delete_pod
+
+        def supervisor_launcher(_config, selected_attempt, project_id, directory):
+            directory = Path(directory)
+            directory.mkdir(parents=True, exist_ok=True)
+            monitor = StoreCleanupMonitor(
+                self.client, self.store, selected_attempt, project_id,
+                clock=lambda: self.now)
+            owner = self
+
+            class FakeSupervisor:
+                pid = os.getpid()
+                returncode = None
+
+                def poll(self):
+                    if self.returncode is not None:
+                        return self.returncode
+                    if not getattr(self, "ready", False):
+                        monitor.client.pods()
+                    stop = (directory / "stop.request").exists()
+                    outcome = monitor.observe(stop=stop)
+                    self.ready = True
+                    state = {
+                        "ready": True, "stopping": monitor.stopping,
+                        "terminated": outcome == "terminated",
+                        "pid": self.pid, "attempt_id": selected_attempt,
+                        "project_id": project_id,
+                        "deadline_epoch": attempt["deadline_epoch"],
+                        "attempt_sha256": attempt["attempt_sha256"],
+                        "policy_sha256": monitor.policy_sha256,
+                        "heartbeat_epoch": owner.now,
+                    }
+                    (directory / "supervisor.json").write_text(
+                        json.dumps(state) + "\n", encoding="utf-8")
+                    if outcome in ("terminated", "not_created"):
+                        self.returncode = 0
+                    return self.returncode
+
+            return FakeSupervisor()
+
+        class Collector:
+            def poll(self):
+                return None
+
+            def wait(self, timeout=None):
+                return 0
+
+        def collector_launcher(*_args, **kwargs):
+            collector_limits.update(kwargs)
+            return Collector()
+
+        engine = SerialExecutionEngine(
+            self.client, self.store, self.state_config,
+            supervisor_launcher=supervisor_launcher,
+            collector_launcher=collector_launcher,
+            uploader=lambda *_args, **_kwargs: 1,
+            process_launcher=lambda *_args, **_kwargs: SimpleNamespace(
+                returncode=0, poll=lambda: 0),
+            clock=lambda: self.now, sleep=lambda _duration: None)
+        workload = AttemptWorkload(
+            source_root, self.root / "id_ed25519", self.root / "known_hosts",
+            "/tmp/nebula", "worker.py", (), 30, ("results.json",),
+            self.root / "serial-artifacts")
+        self.assertTrue(self.key_path.is_file())
+        (self.root / "id_ed25519").write_bytes(b"private-key-fixture")
+        (self.root / "known_hosts").write_text(
+            "[127.0.0.1]:2222 ssh-ed25519 fixture\n", encoding="utf-8")
+        result = engine.run_attempt(
+            plan, attempt_id, workload, local_public_key_path=self.key_path,
+            cleanup_timeout_seconds=3)
+        self.assertEqual(result.pod_id, "pod-engine-001",
+                         msg=f"{result.outcome}; stages={result.stage_events}; "
+                             f"events={[(e['entity_type'], e['event_type'], e['entity_id']) for e in self.store.events()]}")
+        self.assertEqual(self.store.get_attempt(attempt_id)["state"], "terminated")
+        self.assertEqual(result.outcome.operational_status.value, "succeeded",
+                         msg=f"{result.outcome}; stages={result.stage_events}; "
+                             f"attempt={self.store.get_attempt(attempt_id)}")
+        self.assertEqual(result.outcome.cleanup_status.value, "confirmed")
+        self.assertEqual(result.outcome.scientific_verdict.value, "not_evaluated")
+        self.assertTrue(self.store.verify_attempt_lifecycle_projection(attempt_id))
+        self.assertEqual(result.stage_events[-1].stage, "cleanup")
+        self.assertEqual(result.stage_events[-1].status.value, "succeeded")
+        self.assertEqual(collector_limits["max_file_bytes"], plan.transfers.max_file_bytes)
+        self.assertEqual(collector_limits["max_total_bytes"], plan.transfers.max_total_bytes)
+        self.assertEqual(collector_limits["per_file_limits"], {"results.json": 0})
+
+    def test_serial_job_retries_only_after_a_clean_terminal_attempt(self):
+        self.store.cancel_uncreated(self.attempt["attempt_id"])
+        retry_scope = replace(self.scope, approval_id="approval-retry", max_attempts=2)
+        plan = replace(
+            self.plan, job_id="job-retry", approval=retry_scope,
+            retry=RetryPolicy(2, 120, (FailureCategory.TRANSIENT_READ,), 1, 2))
+        attempt_one = replace(
+            self.attempt_plan, attempt_id="attempt-retry-1", job_id=plan.job_id,
+            approval_id=retry_scope.approval_id, attempt_number=1,
+            request_sha256=pod_create_request_sha256(
+                plan.provisioning, self.attempt_plan.selected_resource, REGION,
+                "nebula-retry-001"))
+        self.store.reserve_attempt(plan, attempt_one, "nebula-retry-001")
+        attempt_two = replace(
+            attempt_one, attempt_id="attempt-retry-2", attempt_number=2,
+            request_sha256=pod_create_request_sha256(
+                plan.provisioning, attempt_one.selected_resource, REGION,
+                "nebula-retry-002"))
+        workload = AttemptWorkload(
+            self.root, self.key_path, self.key_path, "/work", "worker.py", (),
+            30, ("result.bin",), self.root / "retry-artifacts")
+        engine = SerialExecutionEngine(
+            self.client, self.store, self.state_config,
+            monotonic=lambda: 100.0, sleep=lambda _duration: None)
+        attempts_run = []
+        reservations = []
+
+        def fail_before_create(_plan, selected_attempt, _workload, **_kwargs):
+            attempts_run.append(selected_attempt)
+            self.store.cancel_uncreated(selected_attempt)
+            outcome = ExecutionOutcome(
+                OperationalStatus.FAILED, ScientificVerdict.NOT_EVALUATED,
+                CleanupStatus.NOT_REQUIRED, BillingStatus.NOT_APPLICABLE,
+                FailureCategory.TRANSIENT_READ)
+            return SerialAttemptResult(selected_attempt, None, outcome, ())
+
+        def reserve_next(number, prior_result):
+            reservations.append((number, prior_result.attempt_id))
+            self.assertEqual(number, 2)
+            self.store.reserve_attempt(plan, attempt_two, "nebula-retry-002")
+            return "attempt-retry-2", workload
+
+        with patch.object(engine, "run_attempt", side_effect=fail_before_create):
+            result = engine.run_job(
+                plan, "attempt-retry-1", workload, reserve_next=reserve_next,
+                local_public_key_path=self.key_path)
+        self.assertEqual(attempts_run, ["attempt-retry-1", "attempt-retry-2"])
+        self.assertEqual(reservations, [(2, "attempt-retry-1")])
+        self.assertEqual(result.stop_reason, "attempt_limit_reached")
+        self.assertEqual(len(result.attempt_results), 2)
+        self.assertEqual(self.store.get_attempt("attempt-retry-2")["state"], "cancelled")
+
+    def test_controller_restart_recovery_stops_without_replaying_workload(self):
+        receipt = self.create()
+        self.set_live_cpu_detail(receipt)
+        self.client.inventory = [{"id": receipt.pod_id, "name": receipt.pod_name,
+                                  "status": "RUNNING"}]
+
+        def delete_pod(pod_id):
+            self.assertEqual(pod_id, receipt.pod_id)
+            self.client.inventory = []
+            self.client.detail["status"] = "TERMINATED"
+            return {"deleted": True}
+
+        self.client._delete_pod = delete_pod
+        attempt_id = self.attempt["attempt_id"]
+        for stage in ("supervisor", "create", "upload", "collector"):
+            self.store.append_stage_event(attempt_id, stage, StageStatus.STARTED)
+            self.store.append_stage_event(attempt_id, stage, StageStatus.SUCCEEDED)
+        self.store.append_stage_event(attempt_id, "workload", StageStatus.STARTED)
+        attempt_directory = (self.state_config.state_root / self.project.project_id / attempt_id)
+        supervisor_directory = attempt_directory / "supervisor"
+        stop_path = supervisor_directory / "stop.request"
+        monitor = StoreCleanupMonitor(
+            self.client, self.store, attempt_id, self.project.project_id,
+            clock=lambda: self.now)
+        ticks = [0.0]
+
+        def recovery_sleep(duration):
+            ticks[0] += duration
+            self.now += 1
+            stop = stop_path.exists()
+            observation = monitor.observe(stop=stop)
+            supervisor_state = {
+                "ready": True, "stopping": monitor.stopping,
+                "terminated": observation == "terminated", "pid": self.process.pid,
+                "attempt_id": attempt_id, "project_id": self.project.project_id,
+                "deadline_epoch": self.attempt["deadline_epoch"],
+                "attempt_sha256": self.attempt["attempt_sha256"],
+                "policy_sha256": monitor.policy_sha256,
+                "heartbeat_epoch": self.now,
+            }
+            (supervisor_directory / "supervisor.json").write_text(
+                json.dumps(supervisor_state) + "\n", encoding="utf-8")
+
+        engine = SerialExecutionEngine(
+            self.client, self.store, self.state_config, clock=lambda: self.now,
+            monotonic=lambda: ticks[0], sleep=recovery_sleep)
+        result = engine.recover_attempt(
+            self.plan, attempt_id, cleanup_timeout_seconds=10,
+            collector_timeout_seconds=1)
+        self.assertEqual(self.store.get_attempt(attempt_id)["state"], "terminated")
+        self.assertEqual(result.outcome.operational_status.value, "reconciliation_required")
+        self.assertEqual(result.outcome.cleanup_status.value, "confirmed")
+        workload_failure = next(
+            event for event in reversed(result.stage_events)
+            if event.stage == "workload" and event.status is StageStatus.FAILED)
+        self.assertEqual(workload_failure.failure_category,
+                         FailureCategory.RECONCILIATION_REQUIRED)
+        self.assertEqual(result.stage_events[-1].stage, "cleanup")
+        self.assertEqual(result.stage_events[-1].status, StageStatus.SUCCEEDED)
+        self.assertTrue(self.store.verify_attempt_lifecycle_projection(attempt_id))
+
     def test_detached_store_collector_binds_allowlist_store_and_attempt(self):
         receipt = self.create()
         self.set_live_cpu_detail(receipt)
@@ -452,13 +696,19 @@ class StoreCreateControllerTests(unittest.TestCase):
 
         process = launch_execution_store(
             self.state_config, self.attempt["attempt_id"], self.project.project_id,
-            artifact_directory, names, private_key, known_hosts, "/tmp/nebula", popen=popen)
+            artifact_directory, names, private_key, known_hosts, "/tmp/nebula",
+            max_file_bytes=64, max_total_bytes=96,
+            per_file_limits={"results/out.bin": 32}, popen=popen)
         self.assertEqual(process.pid, 6060)
         self.assertIn("--store-root", launched["argv"])
         collector_directory = (self.state_config.state_root / self.project.project_id /
                                self.attempt["attempt_id"] / "collector")
         names_path = collector_directory / "collection-allowlist.json"
         self.assertEqual(json.loads(names_path.read_text(encoding="utf-8")), names)
+        limits_path = collector_directory / "collection-limits.json"
+        self.assertEqual(json.loads(limits_path.read_text(encoding="utf-8")), {
+            "max_file_bytes": 64, "max_total_bytes": 96,
+            "per_file_limits": {"results/out.bin": 32}})
         with self.assertRaises(ValueError):
             launch_execution_store(
                 self.state_config, self.attempt["attempt_id"], self.project.project_id,
@@ -476,7 +726,7 @@ class StoreCreateControllerTests(unittest.TestCase):
 
         with patch.object(entry.RunPodClient, "from_config", return_value=self.client), \
              patch.object(entry, "collect_loop", side_effect=one_collection), \
-             patch.object(SSHFetcher, "__call__", return_value=b"stored-result"), \
+             patch.object(SSHFetcher, "fetch_limited", return_value=b"stored-result"), \
              patch("sys.argv", cli):
             entry.main()
         manifest = artifact_directory / "manifest.jsonl"

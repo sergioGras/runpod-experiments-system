@@ -16,19 +16,27 @@ from runpod_experiments.state_config import StateStoreConfig
 
 
 def launch(ledger_path, attempt_id, project_id, directory, artifact_directory, names, key_file, known_hosts, remote_root,
-           *, popen=subprocess.Popen):
+           *, max_file_bytes=10_000_000, max_total_bytes=100_000_000,
+           per_file_limits=None, popen=subprocess.Popen):
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=True)
     if not isinstance(names, list) or not names or any(not isinstance(n, str) or not n for n in names):
         raise ValueError("Expected a non-empty result allowlist")
     names_path = directory / "collection-allowlist.json"
     names_path.write_text(json.dumps(names) + "\n", encoding="utf-8")
+    limits = _validate_transfer_limits(names, max_file_bytes, max_total_bytes,
+                                       per_file_limits)
+    limits_path = directory / "collection-limits.json"
+    limits_path.write_text(json.dumps(limits, sort_keys=True, separators=(",", ":")) + "\n",
+                           encoding="utf-8")
     bootstrap = "import sys; sys.path.insert(0, sys.argv.pop(1)); from runpod_experiments.collection_process import main; main()"
     argv = [sys.executable, "-c", bootstrap, str(Path(__file__).resolve().parent.parent),
             "--ledger", str(Path(ledger_path).resolve()), "--attempt", attempt_id, "--project", project_id,
             "--directory", str(directory), "--artifact-directory", str(Path(artifact_directory).resolve()),
             "--names", str(names_path), "--key", str(Path(key_file).resolve()),
-            "--known-hosts", str(Path(known_hosts).resolve()), "--remote-root", remote_root]
+            "--known-hosts", str(Path(known_hosts).resolve()), "--remote-root", remote_root,
+            "--max-file-bytes", str(max_file_bytes), "--max-total-bytes", str(max_total_bytes),
+            "--limits", str(limits_path)]
     flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW) if os.name == "nt" else 0
     with (directory / "collection-process.log").open("a", encoding="utf-8") as log:
         return popen(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=log, creationflags=flags,
@@ -37,7 +45,8 @@ def launch(ledger_path, attempt_id, project_id, directory, artifact_directory, n
 
 def launch_execution_store(state_config, attempt_id, project_id, artifact_directory, names,
                            key_file, known_hosts, remote_root, *, ssh_route="direct",
-                           popen=subprocess.Popen):
+                           max_file_bytes=10_000_000, max_total_bytes=100_000_000,
+                           per_file_limits=None, popen=subprocess.Popen):
     """Launch an independent collector bound to one active execution-store attempt."""
     if not isinstance(state_config, StateStoreConfig):
         raise TypeError("state_config must be a StateStoreConfig")
@@ -45,6 +54,8 @@ def launch_execution_store(state_config, attempt_id, project_id, artifact_direct
         raise ValueError("ssh_route must be direct or proxy")
     if not isinstance(names, list) or not names or any(not isinstance(n, str) or not n for n in names):
         raise ValueError("Expected a non-empty result allowlist")
+    limits = _validate_transfer_limits(names, max_file_bytes, max_total_bytes,
+                                       per_file_limits)
     database_path = state_config.database_path(project_id)
     if not database_path.is_file():
         raise FileNotFoundError("Configured execution store does not exist")
@@ -68,6 +79,7 @@ def launch_execution_store(state_config, attempt_id, project_id, artifact_direct
         raise ValueError("Collector state path escaped the configured root")
 
     names_path = directory / "collection-allowlist.json"
+    limits_path = directory / "collection-limits.json"
     if names_path.is_symlink():
         raise ValueError("Collector allowlist cannot be a symlink")
     encoded_names = json.dumps(names, separators=(",", ":")) + "\n"
@@ -82,6 +94,20 @@ def launch_execution_store(state_config, attempt_id, project_id, artifact_direct
             os.fsync(stream.fileno())
         os.replace(temporary, names_path)
 
+    encoded_limits = json.dumps(limits, sort_keys=True, separators=(",", ":")) + "\n"
+    if limits_path.is_symlink():
+        raise ValueError("Collector limits cannot be a symlink")
+    if limits_path.exists():
+        if limits_path.read_text(encoding="utf-8") != encoded_limits:
+            raise ValueError("Collector limits differ from the existing attempt")
+    else:
+        temporary = limits_path.with_name(limits_path.name + ".tmp-" + uuid.uuid4().hex)
+        with temporary.open("x", encoding="utf-8") as stream:
+            stream.write(encoded_limits)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, limits_path)
+
     bootstrap = "import sys; sys.path.insert(0, sys.argv.pop(1)); from runpod_experiments.collection_process import main; main()"
     argv = [sys.executable, "-c", bootstrap, str(Path(__file__).resolve().parent.parent),
             "--store-root", str(state_config.state_root),
@@ -90,7 +116,8 @@ def launch_execution_store(state_config, attempt_id, project_id, artifact_direct
             "--directory", str(directory), "--artifact-directory", str(Path(artifact_directory).resolve()),
             "--names", str(names_path), "--key", str(Path(key_file).resolve()),
             "--known-hosts", str(Path(known_hosts).resolve()), "--remote-root", remote_root,
-            "--ssh-route", ssh_route]
+            "--ssh-route", ssh_route, "--max-file-bytes", str(max_file_bytes),
+            "--max-total-bytes", str(max_total_bytes), "--limits", str(limits_path)]
     flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW) if os.name == "nt" else 0
     with (directory / "collection-process.log").open("a", encoding="utf-8") as log:
         return popen(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
@@ -105,6 +132,9 @@ def main():
     parser.add_argument("--store-root")
     parser.add_argument("--controller-host")
     parser.add_argument("--ssh-route", choices=("direct", "proxy"), default="direct")
+    parser.add_argument("--max-file-bytes", type=int, default=10_000_000)
+    parser.add_argument("--max-total-bytes", type=int, default=100_000_000)
+    parser.add_argument("--limits")
     args = parser.parse_args()
     if (args.ledger is None) == (args.store_root is None):
         parser.error("select exactly one of --ledger or --store-root")
@@ -114,6 +144,17 @@ def main():
     names = json.loads(Path(args.names).read_text(encoding="utf-8"))
     if not isinstance(names, list) or not names or any(not isinstance(n, str) or not n for n in names):
         raise ValueError("Invalid collection allowlist")
+    saved_limits = (json.loads(Path(args.limits).read_text(encoding="utf-8"))
+                    if args.limits else None)
+    if saved_limits is not None:
+        if (not isinstance(saved_limits, dict) or
+                saved_limits.get("max_file_bytes") != args.max_file_bytes or
+                saved_limits.get("max_total_bytes") != args.max_total_bytes or
+                set(saved_limits) != {"max_file_bytes", "max_total_bytes", "per_file_limits"}):
+            raise ValueError("Collector limit file does not match its command line")
+        saved_limits = saved_limits["per_file_limits"]
+    limits = _validate_transfer_limits(
+        names, args.max_file_bytes, args.max_total_bytes, saved_limits)
     if args.ledger is not None:
         ledger = AttemptLedger(args.ledger)
         attempt = ledger.get(args.attempt)
@@ -132,7 +173,27 @@ def main():
             raise ValueError("Collector attempt has an invalid lifecycle state")
     collect_loop(RunPodClient.from_config(), ledger, args.attempt, args.project,
                  ArtifactStore(args.artifact_directory), names, args.key,
-                 args.known_hosts, args.remote_root, args.directory, ssh_route=args.ssh_route)
+                 args.known_hosts, args.remote_root, args.directory, ssh_route=args.ssh_route,
+                 max_file_bytes=args.max_file_bytes, max_total_bytes=args.max_total_bytes,
+                 per_file_limits=limits["per_file_limits"])
+
+
+def _validate_transfer_limits(names, max_file_bytes, max_total_bytes, per_file_limits):
+    if type(max_file_bytes) is not int or max_file_bytes <= 0:
+        raise ValueError("max_file_bytes must be a positive integer")
+    if type(max_total_bytes) is not int or max_total_bytes <= 0:
+        raise ValueError("max_total_bytes must be a positive integer")
+    if per_file_limits is None:
+        per_file_limits = {}
+    if (not isinstance(per_file_limits, dict) or
+            any(not isinstance(name, str) or not name for name in per_file_limits) or
+            not set(per_file_limits) <= set(names) or
+            any(type(value) is not int or value < 0 or value > max_file_bytes
+                for value in per_file_limits.values()) or
+            sum(per_file_limits.values()) > max_total_bytes):
+        raise ValueError("Invalid per-file result limits")
+    return {"max_file_bytes": max_file_bytes, "max_total_bytes": max_total_bytes,
+            "per_file_limits": per_file_limits}
 
 
 if __name__ == "__main__":
