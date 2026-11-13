@@ -527,6 +527,35 @@ consumer maintenance rules from CONTRIBUTING.md at this step. Pending charges
 remain attached to the original approval. For a continuing envelope, reconcile
 all commitments before using an explicit state bridge; no import may reset a cap.
 
+### Compatibility audit follow-up (2026-11-13)
+
+The read-only review confirms that the current shared package is a useful base,
+but the consumer cutovers still have concrete contract gaps:
+
+- Hybrid's binary SSH transport can use an `ExecutionStore` attempt, but the
+  serial engine currently launches and polls a workload process; it does not
+  drive a client-controlled request/response session. M7 needs a bounded
+  interactive workload interface. The protocol and its scientific checks stay
+  in Hybrid.
+- MIAP can delegate provider, attempt, SSH, and cleanup mechanics. Its exact
+  one-use approval receipt, source/host binding, credential-delivery decision,
+  and scientific acceptance remain in its adapter. Approval or accounting
+  state must not cross project boundaries.
+- Partition's serial path can map to the shared CPU/GPU attempt lifecycle, but
+  its proxy path uses chunked archive transfer. The current shared proxy file
+  frames do not provide interrupted large-file resume. Add and qualify a
+  bounded chunk-transfer contract before migrating that workload.
+- Partition's two-resource dispatcher still requires M10's atomic parent/child
+  caps, slot admission, and independent per-resource supervision; serial
+  parity alone is not evidence for this cutover.
+
+These findings came from source inspection only. No consumer source, state,
+package pin, or provider resource was changed. Complete the shared M6 contract
+and fault-injection gates, then qualify the interactive and chunk-transfer
+interfaces with local fakes before their respective consumer migrations. A
+consumer cutover also requires exact reconciliation of its existing attempts,
+controllers, and pending accounting in that project's own namespace.
+
 ## M10 and M11: parallelism and completion
 
 Implement the two-resource profile only after serial recovery works. Reserve
