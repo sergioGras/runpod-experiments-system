@@ -17,11 +17,12 @@ engine or consumer migration. Read
 [contribution rules](../CONTRIBUTING.md) together. The earlier
 [unification study](unification-roadmap.md) supplies the capability inventory.
 
-An isolated `codex/resumable-transfer` candidate now prototypes resumable direct
-uploads with remote-prefix verification and no-clobber publication. The proxy
-route remains unchanged. Offline Bash receiver checks pass, but this candidate
-has not passed the full suite in a supported interpreter, installed-artifact
-qualification, live SSH or consumer acceptance; it is not adopted or released.
+The isolated `codex/resumable-transfer` candidate (`6296795`, based on `32b1b90`)
+prototypes resumable direct uploads with remote-prefix verification and
+no-clobber publication. Its 78 focused transfer, store, launch and host-identity
+tests pass. The proxy route remains unchanged. The full suite has not passed in a
+supported interpreter, and installed-artifact qualification, live SSH and
+consumer acceptance remain open; the candidate is not adopted or released.
 
 ## Working rules
 

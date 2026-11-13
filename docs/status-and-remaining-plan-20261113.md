@@ -166,9 +166,10 @@ each consumer's own records and authorized operational context.
 
 ## Isolated direct-resume candidate — 2026-11-13
 
-Branch `codex/resumable-transfer`, based on `508c181280161c9b0b6a798e3a13ce39e77bfb35`,
-prototypes resumable direct SSH uploads. A per-file partial name is bound to the
-reviewed SHA-256. Each invocation probes the remote destination and prefix,
+Commit `6296795` on branch `codex/resumable-transfer`, based on shared design
+commit `32b1b90`, prototypes resumable direct SSH uploads. A per-file partial
+name is bound to the reviewed SHA-256. Each invocation probes the remote
+destination and prefix,
 compares the prefix hash with the local source, and resumes at the verified
 offset. A corrupt prefix resets; an oversized prefix is rejected. Publication
 uses a same-directory hard link for no-clobber atomicity, and a lost publication
@@ -185,15 +186,19 @@ files, lost publish acknowledgement and transfer-guard stopping. Also passed
 Python 3.12.10. These checks do not qualify SSH, RunPod's remote shell, transfer
 latency or billing.
 
-The broad run reported 214 tests, one skipped, and one failed test with a cleanup
-error. The detached-supervisor test relies on a temporary `sitecustomize.py`
-loaded through `PYTHONPATH`; this workstation's embeddable Python
+Before rebasing onto `32b1b90`, a broad run on base `508c181` reported 214 tests,
+one skipped, and one failed test with a cleanup error. The detached-supervisor
+test relies on a temporary `sitecustomize.py` loaded through `PYTHONPATH`; this
+workstation's embeddable Python
 `python312._pth` ignores that variable in child interpreters. The test child
 therefore missed its fake provider opener and remained in stopping/unresolved
 state after provider-read errors. No provider create or model transfer was
 performed. The runtime configuration was restored. Re-run the full suite under
 a supported interpreter/test bootstrap before treating this branch as a
-complete library candidate.
+complete library candidate. After rebasing onto `32b1b90`, the focused set passed
+78 tests: direct-resume receiver (7), connections (14), store-create (32),
+host identity (5), persisted attempts/deadlines (14) and launch (6). The entire
+suite has not been rerun on the rebased branch.
 
 Consumer disposition: none adopts this branch. Hybrid retains its current
 resumable uploader and pinned shared revision; MIAP and Partition require their
