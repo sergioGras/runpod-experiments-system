@@ -63,7 +63,7 @@ approval to another project.
 | M3 | Serial transactional core verified; deployment/migration open | Canonical state root/actual-host/ACL checks and explicit legacy-state handling |
 | M4 | Detached process and supervision components verified; host qualification open | Exact installed candidate survives foreground exit on every supported controlling host; failure/reboot behavior recorded |
 | M5–M6 | Internal serial CPU/GPU/interactive implementation and enumerated setup/WAL fault paths verified offline; installed wheel/sdist reviewed | Public API/schema, credential-delivery and supported-host review; complete consumer lifecycle acceptance; then authorized live qualification |
-| M7–M9 | Isolated adapters exist for Hybrid, MIAP, and Partition; no consumer adopts them from an active entrypoint or pin | Complete Hybrid protocol-through-engine, MIAP interrupted-batch/finalizer, and Partition service/archive acceptance; reconcile each consumer before cutover |
+| M7–M9 | Isolated adapters exist for Hybrid, MIAP, and Partition; Hybrid's successful interactive path now runs through the serial engine; no consumer adopts an adapter from an active entrypoint or pin | Complete Hybrid failure/integrity and guarded-provider acceptance, MIAP interrupted-batch/finalizer, and Partition service/archive acceptance; reconcile each consumer before cutover |
 | M10 | Hierarchical parallel admission not delivered by the serial store | Atomic parent/child caps, two-slot process races and independent resource cleanup |
 | M11 | Open | Integrated acceptance, duplication retirement, rollback and release evidence |
 
@@ -235,6 +235,8 @@ all three tests in `tests.test_shared_runpod_adapter`. In addition to factory
 construction, these exercise the policy-loaded consumer factory and the
 consumer's own `ProjectPodApi` with a synthetic durable create claim, denial
 before claim, exact Pod deletion after stop, and lifecycle-projection check.
-Hybrid's 13 protocol/watchdog tests also passed against the installed wheel.
-These targeted checks still do not constitute full consumer serial-engine,
-MIAP batch, or Partition service/archive acceptance.
+Hybrid's 14 protocol/watchdog tests passed against the installed wheel; one
+runs the real Hybrid bridge through `SerialExecutionEngine` with fake setup,
+interactive transport and cleanup. These targeted checks still do not
+constitute MIAP batch or Partition service/archive acceptance, nor live
+qualification.
