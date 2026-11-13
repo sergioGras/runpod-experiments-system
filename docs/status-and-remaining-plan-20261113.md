@@ -1,7 +1,7 @@
 # Evidence audit and remaining implementation plan
 
-Audit date: 2026-11-13. Current shared implementation is
-`8654afe` on `design/unified-execution`; this commit is pending its remote push.
+Audit date: 2026-11-13. The CPU/GPU resource-kind change is at `8654afe` on
+`design/unified-execution`; following commits update this evidence report.
 This report records offline implementation and preview evidence, not a
 production cutover. Earlier milestone paragraphs describe their source
 snapshots; later follow-up sections supersede their interim test and artifact
