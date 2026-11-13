@@ -639,6 +639,7 @@ urllib.request.urlopen = _fake_urlopen
         source = '''
 import os
 import sys
+import subprocess
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 from runpod_experiments.state_config import StateStoreConfig
@@ -646,8 +647,25 @@ from runpod_experiments.supervisor_process import launch_execution_store
 root = Path(sys.argv[2]); state_root = Path(sys.argv[3]); control = Path(sys.argv[4])
 project, attempt = sys.argv[5], sys.argv[6]
 os.environ["RUNPOD_TEST_RELEASE_FILE"] = sys.argv[7]
+os.environ["RUNPOD_TEST_SITE_FILE"] = sys.argv[8]
+def test_popen(argv, **kwargs):
+    argv = list(argv)
+    if len(argv) < 4 or argv[1] != "-c" or "supervisor_process import main" not in argv[2]:
+        raise AssertionError("unexpected detached supervisor bootstrap")
+    # Embedded CPython ignores PYTHONPATH and does not load sitecustomize. Load
+    # this test's narrow provider fake explicitly, without changing production
+    # bootstrap behavior or the controller's generated arguments.
+    argv[2] = (
+        "import importlib.util, os, sys; "
+        "sys.path.insert(0, sys.argv.pop(1)); "
+        "spec=importlib.util.spec_from_file_location('detached_test_provider', "
+        "os.environ['RUNPOD_TEST_SITE_FILE']); "
+        "fake=importlib.util.module_from_spec(spec); spec.loader.exec_module(fake); "
+        "from runpod_experiments.supervisor_process import main; main()"
+    )
+    return subprocess.Popen(argv, **kwargs)
 child = launch_execution_store(StateStoreConfig(state_root, "TEST-HOST"), attempt,
-                               project, control)
+                               project, control, popen=test_popen)
 (root / "child.pid").write_text(str(child.pid), encoding="ascii")
 '''
         env = dict(os.environ)
@@ -659,7 +677,7 @@ child = launch_execution_store(StateStoreConfig(state_root, "TEST-HOST"), attemp
             [sys.executable, "-c", source,
              str(package_parent), str(self.root),
              str(config.state_root), str(control), self.plan.project.project_id,
-             attempt.attempt_id, str(gate)],
+             attempt.attempt_id, str(gate), str(sitecustomize)],
             env=env, capture_output=True, text=True, timeout=30)
         self.assertEqual(process.returncode, 0, process.stderr)
         child_pid = int((self.root / "child.pid").read_text(encoding="ascii"))

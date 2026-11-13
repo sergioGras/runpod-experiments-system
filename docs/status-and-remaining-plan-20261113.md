@@ -188,19 +188,28 @@ latency or billing.
 
 Before rebasing onto `32b1b90`, a broad run on base `508c181` reported 214 tests,
 one skipped, and one failed test with a cleanup error. The detached-supervisor
-test relies on a temporary `sitecustomize.py` loaded through `PYTHONPATH`; this
-workstation's embeddable Python
-`python312._pth` ignores that variable in child interpreters. The test child
-therefore missed its fake provider opener and remained in stopping/unresolved
-state after provider-read errors. No provider create or model transfer was
-performed. The runtime configuration was restored. After rebasing onto
-`32b1b90`, the focused set passed 78 tests: direct-resume receiver (7),
-connections (14), store-create (32), host identity (5), persisted
-attempts/deadlines (14) and launch (6). A filtered current-source run discovered
-223 tests, excluded only the detached-supervisor test above, and ran 222 tests
-successfully with one platform-capability skip. The full unfiltered suite still
-needs that detached test run under an interpreter that loads its fake provider
-hook reliably before treating this branch as fully qualified.
+test relied on a temporary `sitecustomize.py` loaded through `PYTHONPATH`; this
+workstation's embeddable Python `python312._pth` ignores that variable in child
+interpreters. The child therefore missed its fake provider opener and remained
+in stopping/unresolved state after provider-read errors. No provider create or
+model transfer was performed. The runtime configuration was restored.
+
+The test now injects the narrow fake provider module explicitly through the
+existing `popen` seam and checks that the generated supervisor bootstrap is the
+expected one. Production launch code is unchanged. The exact detached-process
+test passed, then the full unfiltered suite on the rebased candidate passed 223
+tests with one platform-capability skip on Python 3.12.10. Because child tests
+also need the shared source path, that path was temporarily added to the
+workstation's embeddable `python312._pth` for this run; its original bytes were
+restored afterward. The suite used local synthetic providers and no SSH or
+cloud resources. The earlier filtered run's 222/223 result is retained as
+historical evidence, not the latest status.
+
+The focused set also passed 78 tests: direct-resume receiver (7), connections
+(14), store-create (32), host identity (5), persisted attempts/deadlines (14)
+and launch (6). This closes source-suite coverage for this candidate, but not
+installed-artifact qualification, live SSH/remote-shell behavior, proxy resume,
+provider compatibility, consumer acceptance or release review.
 
 Consumer disposition: none adopts this branch. Hybrid retains its current
 resumable uploader and pinned shared revision; MIAP and Partition require their
