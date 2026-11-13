@@ -540,6 +540,20 @@ modules, and the installed collector CLI displayed its options. Wheel
 `41b29e8e8f07eeb32d3a9fe273c15908509da8ab4a131fe035c5c33ae91c9733`.
 No consumer or provider state was accessed.
 
+SQLite initialization concurrency follow-up (2026-11-13): the setup-stage
+full-suite run exposed an occasional lock while two local controllers switched
+the same new execution-store file to WAL. Initialization now retries only
+SQLite busy/locked responses during that transition, within the configured
+store timeout; unrelated SQLite errors still fail immediately. The targeted
+cross-process budget/slot admission test passed, and the full offline suite
+passed 200 tests with one platform-capability skip. A new isolated venv
+installed the candidate wheel; execution-store, serial-engine, transfer and
+collector imports succeeded, and the collector CLI displayed its options.
+Wheel `0.2.0.dev0` SHA-256:
+`7f4b741f878af57498824033fc54be67f9c51485bf018384097073801b8a75dc`.
+This is local synthetic evidence; no provider, consumer source, pin or state
+was touched.
+
 ### Store-backed one-shot create slice (internal; qualification remains open)
 
 The current planning slice advances the canonical contract envelope to v3 and

@@ -142,6 +142,32 @@ class ExecutionStore:
             raise ExecutionError(FailureCategory.INTERNAL, "clock_invalid")
         return int(value)
 
+    def _enable_wal(self, db: sqlite3.Connection) -> None:
+        # SQLite can return SQLITE_BUSY immediately while two controllers try
+        # to switch the same fresh database to WAL. Retry only that transition;
+        # the schema lock below then serializes initialization as usual.
+        deadline = time.monotonic() + self._timeout_seconds
+        db.execute("PRAGMA busy_timeout = 0")
+        try:
+            while True:
+                try:
+                    db.execute("PRAGMA journal_mode=WAL")
+                    return
+                except sqlite3.OperationalError as error:
+                    code = getattr(error, "sqlite_errorcode", None)
+                    base_code = code & 0xFF if isinstance(code, int) else None
+                    if base_code is None:
+                        message = str(error).lower()
+                        retryable = "locked" in message or "busy" in message
+                    else:
+                        retryable = base_code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+                    remaining = deadline - time.monotonic()
+                    if not retryable or remaining <= 0:
+                        raise
+                    time.sleep(min(0.05, remaining))
+        finally:
+            db.execute(f"PRAGMA busy_timeout = {self._timeout_seconds * 1000}")
+
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
         with closing(self._connect()) as db:
@@ -223,7 +249,7 @@ class ExecutionStore:
                     return self._initialize()
                 raise ExecutionError(FailureCategory.INTERNAL, "unversioned_store_not_empty")
 
-            db.execute("PRAGMA journal_mode=WAL")
+            self._enable_wal(db)
             db.execute("PRAGMA synchronous=FULL")
             db.execute("BEGIN EXCLUSIVE")
             version = db.execute("PRAGMA user_version").fetchone()[0]

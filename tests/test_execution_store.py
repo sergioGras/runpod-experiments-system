@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 from runpod_experiments.contracts import (
     ApprovalScope, AttemptPlan, BillingObservation, ExecutionPlan,
@@ -110,6 +111,46 @@ class ExecutionStoreTests(unittest.TestCase):
         self.store.bind_pod(attempt.attempt_id, f"pod-{number}", pod_name(number))
         self.store.request_stop(attempt.attempt_id)
         self.store.confirm_termination(attempt.attempt_id, f"pod-{number}", ONE)
+
+    def test_wal_initialization_retries_only_transient_database_lock(self):
+        class FlakyWalConnection:
+            def __init__(self):
+                self.statements = []
+                self.wal_attempts = 0
+
+            def execute(self, statement):
+                self.statements.append(statement)
+                if statement == "PRAGMA journal_mode=WAL":
+                    self.wal_attempts += 1
+                    if self.wal_attempts < 3:
+                        raise sqlite3.OperationalError("database is locked")
+                return self
+
+        connection = FlakyWalConnection()
+        with patch("runpod_experiments.execution_store.time.sleep") as sleep:
+            self.store._enable_wal(connection)
+        self.assertEqual(connection.wal_attempts, 3)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual(connection.statements[0], "PRAGMA busy_timeout = 0")
+        self.assertEqual(connection.statements[-1], "PRAGMA busy_timeout = 15000")
+
+        class InvalidWalConnection:
+            def __init__(self):
+                self.statements = []
+
+            def execute(self, statement):
+                self.statements.append(statement)
+                if statement == "PRAGMA journal_mode=WAL":
+                    raise sqlite3.OperationalError("disk I/O error")
+                return self
+
+        invalid = InvalidWalConnection()
+        with patch("runpod_experiments.execution_store.time.sleep") as sleep:
+            with self.assertRaisesRegex(sqlite3.OperationalError, "disk I/O error"):
+                self.store._enable_wal(invalid)
+        self.assertEqual(invalid.statements.count("PRAGMA journal_mode=WAL"), 1)
+        self.assertEqual(invalid.statements[-1], "PRAGMA busy_timeout = 15000")
+        sleep.assert_not_called()
 
     def test_reservation_is_transactional_persistent_and_hash_chained(self):
         attempt, exposure = self.reserve()
