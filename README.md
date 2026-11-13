@@ -12,8 +12,9 @@ admission/accounting store, a store-backed cleanup supervisor, and a
 store-backed one-shot create controller with offline test evidence. It binds a
 fresh quote, selected region, registered SSH-key fingerprint, project inventory,
 and independent supervisor state to a durable one-use create claim. The create
-path has not been qualified against a RunPod account or connected to an execution
-engine. M3 and M4 remain open; no consumer migration has begun. These changes
+path is connected to the internal serial engine, with passing complete fake
+CPU and GPU attempt scenarios. It has not been qualified against a RunPod account.
+M3 through M6 qualification remains open; no consumer migration has begun. These changes
 are not part of the pinned 0.1.0 package; existing consumers and their current
 package pins remain unchanged.
 
@@ -21,6 +22,7 @@ Detailed design and development documents:
 
 - [Architecture and principles](docs/architecture.md)
 - [Implementation milestones and consumer migrations](docs/implementation-plan.md)
+- [Current evidence audit and ordered remaining work](docs/status-and-remaining-plan-20261113.md)
 - [Testing, acceptance and rollback](docs/testing-strategy.md)
 - [Contribution and consumer maintenance rules](CONTRIBUTING.md)
 
@@ -47,9 +49,9 @@ The design branch also adds `StoreCleanupMonitor` and
 path reconstructs the selected CPU/GPU profile from hash-verified plan documents,
 checks live identity, region, CPU shape, image digest, disk, mount state and
 hourly rate, and only deletes through the store-backed ownership guard. It checks
-GPU identity/count, vCPU and host system RAM minima, and the CUDA floor, then
-deliberately fails closed because REST v2 does not expose per-card VRAM in the Pod
-detail. It is not connected to a create engine or any consumer. Provider-detail
+GPU identity/count, vCPU and host system RAM minima, and the CUDA floor. Per-card
+VRAM requires supervisor-bound SSH runtime evidence before GPU workload access.
+It is connected to the internal serial engine, with no consumer adoption. Provider-detail
 shape checks have synthetic evidence only;
 account-level and live-host qualification remain open. Never run both supervisor
 paths against one attempt.
@@ -65,8 +67,8 @@ ambiguous response retains the exposure and requires reconciliation; this
 controller never retries create or deletes an unknown resource. Fake-provider
 tests cover the CPU/GPU request paths, stale/mismatched preflight, inventory and
 SSH-key guards, supervisor changes, malformed responses, and ambiguous timeout.
-This is an internal component, not a complete serial engine, live qualification,
-or consumer integration. The quote/catalog and SSH-key API paths still need
+This component is used by the internal serial engine; live qualification
+and consumer integration remain open. The quote/catalog and SSH-key API paths still need
 account-level compatibility checks before use with a real account.
 
 `runpod_experiments.ssh.SSHFetcher` downloads bounded named files over direct SSH using an existing key and a pinned known-hosts file. Store-backed upload and collection can explicitly select the provider's proxy route; `SSHProxySession` runs one finite command through its interactive PTY. Bounded large-file uploads and reads use digest-checked chunks, and uploads publish by atomic rename. Direct remains the default. Proxy transport does not support raw binary streams, long-lived interactive protocols or resuming an interrupted file transfer. `collection_process` can run independently of the foreground controller and records the selected route; it rechecks the recorded provider ID/name and live endpoint on every poll, preserves changed snapshots, and retries failed files. `ArtifactStore` saves content-addressed local copies and a manifest. `upload.upload_bundle` checks an entire reviewed hash-pinned manifest before sending any file to the exact recorded Pod. Use a private local store and reviewed allowlists; callers must still approve disclosure and review the SSH host-key trust. Producers should publish complete files by atomic rename when coherent snapshots are required.

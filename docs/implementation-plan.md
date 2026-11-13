@@ -1,5 +1,10 @@
 # Implementation and consumer migration plan
 
+Current evidence and remaining work are reconciled in the
+[2026-11-13 audit](status-and-remaining-plan-20261113.md). Dated development
+paragraphs below retain their original scope and may describe earlier code;
+they are not current capability summaries.
+
 Status: M0 design and M1 are complete. M2 remains open pending account-level
 qualification of billing and resource quotes. The isolated
 `design/unified-execution` worktree now has an internal schema-v4 SQLite store,

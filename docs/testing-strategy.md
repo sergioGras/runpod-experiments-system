@@ -2,7 +2,9 @@
 
 This is the planned acceptance contract for the [implementation milestones](implementation-plan.md).
 Tests accompany implementation; a final integrated phase follows consumer adoption.
-Current test counts are baselines for the old systems, not proof of the new design.
+Historical test counts apply to their recorded snapshots. The
+[current evidence audit](status-and-remaining-plan-20261113.md) distinguishes
+new-engine offline evidence from consumer adoption and live qualification.
 
 ## Test boundaries
 
