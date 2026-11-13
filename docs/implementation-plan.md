@@ -335,12 +335,15 @@ Chunk-transfer follow-up (2026-11-13): large proxy reads now verify remote
 file identity and SHA-256 before and across bounded chunks; direct and proxy
 uploads stream reviewed sources, verify the published digest and size, and
 publish by atomic rename. Upload health checks run between chunks against the
-supervisor, collector and immutable attempt deadline. The full offline suite
-passed 192 tests with one platform-capability skip, including regressions
-that abort chunked direct upload when its health check fails and stop the
-serial engine before workload launch when supervision exits during upload.
-That failure case restarts supervision once for cleanup and confirms exact
-fake-Pod termination. The generated remote
+supervisor and immutable attempt deadline. The full offline suite
+passed 193 tests with one platform-capability skip, including regressions
+that abort chunked direct upload when its health check fails, stop the serial
+engine before workload launch when supervision exits during upload, and stop
+the workload when its collector exits. The supervisor-loss case restarts
+supervision once for cleanup; both integrated failures confirm exact fake-Pod
+termination. A successful attempt also verifies that the remote workload
+timeout is clamped to the five seconds remaining before its attempt deadline.
+The generated remote
 Python bodies were syntax-checked and transfer behavior used local fake SSH
 runners only. No provider account, credentials, SSH endpoint, consumer source,
 package pin, state or resource was contacted or changed. This still does not
@@ -348,8 +351,9 @@ qualify remote shell behavior, live proxy compatibility or interrupted-transfer
 resume. Wheel `0.2.0.dev0` built from commit `c0f9e64` installed in a fresh
 temporary venv outside the checkout; proxy session/fetcher, serial engine and
 uploader imports succeeded, and the installed supervisor CLI displayed its
-options. Wheel SHA-256:
-`e8a8ea28a8267ccdc829e4f935593a48baae02622d662365918bd6e17628ea78`.
+options. The follow-up wheel built from the current source also installed and
+passed the same imports and CLI check; SHA-256:
+`c1697f880f56586eae39d7714cc7d381c9f12de8e1bab091f3809ec538640bf4`.
 Consumer disposition: no source, package pin, state, or live process changed.
 Hybrid's binary interactive flow and MIAP's batch orchestration remain on their
 current paths; Partition can evaluate the finite proxy transfer capability while
@@ -464,14 +468,14 @@ outside the checkout; the installed supervisor CLI displayed its options. Wheel
 SHA-256: `8082e431168b76709884c38063bdac02ddc74dbb3e6da4e962c56071e9dc15ed`.
 These checks validate only local package contents and synthetic behavior.
 
-M6 fault-matrix review (2026-11-13): upload health-check abort and supervisor
-exit during upload now have local regression coverage. The test inventory
-still lacks integrated assertions for collector exit during upload/workload and
-the serial engine's attempt-deadline failures at upload or workload boundaries.
-Controller-restart recovery is covered after a started workload, but not after
-every intermediate stage. These remain M6 local test work before any consumer
-pin changes; package artifact import and CLI checks have passed for the current
-internal wheel, while stable API review remains open.
+M6 fault-matrix review (2026-11-13): upload health-check abort, supervisor exit
+during upload, collector exit during workload, and remaining-time clamping now
+have regression coverage. Explicit attempt-deadline expiry injections at upload
+and workload boundaries remain open. Controller-restart recovery is covered
+after a started workload, but not after every intermediate stage. These remain
+M6 local test work before any consumer pin changes; package artifact import and
+CLI checks have passed for the current internal wheel, while stable API review
+remains open.
 
 ### Store-backed one-shot create slice (internal; qualification remains open)
 

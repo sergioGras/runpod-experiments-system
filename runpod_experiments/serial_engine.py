@@ -477,15 +477,12 @@ class SerialExecutionEngine:
                 max(0, attempt["deadline_epoch"] - self.clock()))
 
             def check_upload_health() -> None:
-                self._check_supervisor(supervisor_process, supervisor_directory,
-                                       attempt, policy_sha256)
-                if collector_process is not None and collector_process.poll() is not None:
-                    raise ExecutionError(FailureCategory.TRANSPORT_FAILURE,
-                                         "collector_process_exited")
                 if (self.clock() >= attempt["deadline_epoch"] or
                         self.monotonic() >= upload_deadline):
                     raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
                                          "attempt_deadline_reached")
+                self._check_supervisor(supervisor_process, supervisor_directory,
+                                       attempt, policy_sha256)
 
             self.uploader(
                 self.client, self.store, attempt_id, project,
@@ -495,9 +492,8 @@ class SerialExecutionEngine:
                 max_total_bytes=plan.transfers.max_total_bytes,
                 ssh_route=workload.ssh_route,
                 transfer_check=check_upload_health)
+            check_upload_health()
             succeed()
-            self._check_supervisor(supervisor_process, supervisor_directory,
-                                   attempt, policy_sha256)
 
             start("collector")
             collector_process = self.collector_launcher(
@@ -521,17 +517,26 @@ class SerialExecutionEngine:
             end = self.monotonic() + min(
                 self.store.attempt_runtime_seconds(attempt_id),
                 max(0, attempt["deadline_epoch"] - self.clock()))
+
+            def check_workload_deadline() -> None:
+                if (self.clock() >= attempt["deadline_epoch"] or
+                        self.monotonic() >= end):
+                    raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                         "attempt_deadline_reached")
+
             if interactive_driver is None:
+                check_workload_deadline()
+                remaining = end - self.monotonic()
+                workload_timeout = min(
+                    workload.timeout_seconds, max(1, math.ceil(remaining)))
                 workload_process = self.process_launcher(
                     self.client, self.store, attempt_id, project, workload.key_file,
                     workload.known_hosts, workload.remote_root, workload.script,
-                    list(workload.arguments), workload.timeout_seconds,
+                    list(workload.arguments), workload_timeout,
                     attempt_directory / "workload.log")
             else:
+                check_workload_deadline()
                 remaining = end - self.monotonic()
-                if remaining <= 0:
-                    raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
-                                         "attempt_deadline_reached")
                 interactive_timeout = min(workload.timeout_seconds,
                                            max(1, math.ceil(remaining)))
                 workload_process = self.interactive_process_factory(
@@ -544,14 +549,12 @@ class SerialExecutionEngine:
                                      "workload_process_invalid")
             if interactive_driver is not None:
                 def check_interactive_health() -> None:
+                    check_workload_deadline()
                     self._check_supervisor(supervisor_process, supervisor_directory,
                                            attempt, policy_sha256)
                     if collector_process.poll() is not None:
                         raise ExecutionError(FailureCategory.TRANSPORT_FAILURE,
                                              "collector_process_exited")
-                    if self.clock() >= attempt["deadline_epoch"]:
-                        raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
-                                             "attempt_deadline_reached")
 
                 session = InteractiveSession(
                     workload_process, check=check_interactive_health, deadline=end,
@@ -562,16 +565,15 @@ class SerialExecutionEngine:
                 check_interactive_health()
             exit_code = workload_process.poll()
             while exit_code is None:
+                check_workload_deadline()
                 self._check_supervisor(supervisor_process, supervisor_directory,
                                        attempt, policy_sha256)
                 if collector_process.poll() is not None:
                     raise ExecutionError(FailureCategory.TRANSPORT_FAILURE,
                                          "collector_process_exited")
-                if self.clock() >= attempt["deadline_epoch"] or self.monotonic() >= end:
-                    raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
-                                         "attempt_deadline_reached")
                 self.sleep(min(0.25, max(0, end - self.monotonic())))
                 exit_code = workload_process.poll()
+            check_workload_deadline()
             self._check_supervisor(supervisor_process, supervisor_directory,
                                    attempt, policy_sha256)
             if collector_process.poll() is not None:

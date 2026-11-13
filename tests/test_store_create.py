@@ -593,15 +593,21 @@ class StoreCreateControllerTests(unittest.TestCase):
 
         def uploader(*_args, **kwargs):
             kwargs["transfer_check"]()
+            self.now = attempt["deadline_epoch"] - 5
             return 1
+
+        workload_timeouts = []
+
+        def process_launcher(*args, **_kwargs):
+            workload_timeouts.append(args[9])
+            return SimpleNamespace(returncode=0, poll=lambda: 0)
 
         engine = SerialExecutionEngine(
             self.client, self.store, self.state_config,
             supervisor_launcher=supervisor_launcher,
             collector_launcher=collector_launcher,
             uploader=uploader,
-            process_launcher=lambda *_args, **_kwargs: SimpleNamespace(
-                returncode=0, poll=lambda: 0),
+            process_launcher=process_launcher,
             clock=lambda: self.now, sleep=lambda _duration: None)
         workload = AttemptWorkload(
             source_root, self.root / "id_ed25519", self.root / "known_hosts",
@@ -629,6 +635,7 @@ class StoreCreateControllerTests(unittest.TestCase):
         self.assertEqual(collector_limits["max_file_bytes"], plan.transfers.max_file_bytes)
         self.assertEqual(collector_limits["max_total_bytes"], plan.transfers.max_total_bytes)
         self.assertEqual(collector_limits["per_file_limits"], {"results.json": 0})
+        self.assertEqual(workload_timeouts, [5])
 
     def test_serial_engine_stops_before_workload_when_supervisor_exits_during_upload(self):
         self.store.cancel_uncreated(self.attempt["attempt_id"])
@@ -751,6 +758,161 @@ class StoreCreateControllerTests(unittest.TestCase):
         self.assertEqual(upload_failure.error_code, "supervisor_process_exited")
         self.assertFalse(any(event.stage in ("collector", "workload")
                              for event in result.stage_events))
+
+    def test_serial_engine_stops_workload_when_collector_exits(self):
+        self.store.cancel_uncreated(self.attempt["attempt_id"])
+        worker = b"synthetic collector-failure worker"
+        transfer = TransferManifest((
+            ManifestFile("worker.py", sha256_bytes(worker), len(worker), TransferDirection.UPLOAD),
+            ManifestFile("result.json", ZERO, 0, TransferDirection.DOWNLOAD),
+        ), 4096, 8192)
+        job_id, attempt_id, pod_name = (
+            "job-collector-workload-failure", "attempt-collector-workload-failure",
+            "nebula-collector-failure-001")
+        plan = replace(self.plan, job_id=job_id, transfers=transfer)
+        attempt_plan = replace(
+            self.attempt_plan, attempt_id=attempt_id, job_id=job_id,
+            request_sha256=pod_create_request_sha256(
+                plan.provisioning, self.attempt_plan.selected_resource, REGION, pod_name))
+        self.store.reserve_attempt(plan, attempt_plan, pod_name)
+        attempt = self.store.get_attempt(attempt_id)
+
+        source_root = self.root / "collector-failure-source"
+        source_root.mkdir()
+        (source_root / "worker.py").write_bytes(worker)
+
+        def create_pod(request):
+            receipt = SimpleNamespace(pod_id="pod-collector-failure", pod_name=request["name"])
+            self.set_live_cpu_detail(receipt)
+            self.client.inventory = [{"id": receipt.pod_id, "name": receipt.pod_name,
+                                      "status": "RUNNING"}]
+            return {"id": receipt.pod_id, "name": receipt.pod_name}
+
+        def delete_pod(pod_id):
+            self.assertEqual(pod_id, "pod-collector-failure")
+            self.client.inventory = []
+            self.client.detail["status"] = "TERMINATED"
+            return {"deleted": True}
+
+        self.client._create_pod = create_pod
+        self.client._delete_pod = delete_pod
+        supervisors = []
+
+        def supervisor_launcher(_config, selected_attempt, project_id, directory):
+            directory = Path(directory)
+            directory.mkdir(parents=True, exist_ok=True)
+            monitor = StoreCleanupMonitor(
+                self.client, self.store, selected_attempt, project_id,
+                clock=lambda: self.now)
+            owner = self
+
+            class FakeSupervisor:
+                pid = 8180 + len(supervisors)
+                returncode = None
+                ready = False
+
+                def poll(self):
+                    if self.returncode is not None:
+                        return self.returncode
+                    if not self.ready:
+                        monitor.client.pods()
+                    outcome = monitor.observe(stop=(directory / "stop.request").exists())
+                    current = owner.store.get_attempt(selected_attempt)
+                    state = {
+                        "ready": True, "stopping": monitor.stopping,
+                        "terminated": outcome == "terminated", "pid": self.pid,
+                        "attempt_id": selected_attempt, "project_id": project_id,
+                        "deadline_epoch": current["deadline_epoch"],
+                        "attempt_sha256": current["attempt_sha256"],
+                        "policy_sha256": monitor.policy_sha256,
+                        "heartbeat_epoch": owner.now,
+                    }
+                    (directory / "supervisor.json").write_text(
+                        json.dumps(state) + "\n", encoding="utf-8")
+                    self.ready = True
+                    if outcome in ("terminated", "not_created"):
+                        self.returncode = 0
+                    return self.returncode
+
+            supervisor = FakeSupervisor()
+            supervisors.append(supervisor)
+            return supervisor
+
+        class Collector:
+            returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                return self.returncode or 0
+
+        collectors = []
+
+        def collector_launcher(*_args, **_kwargs):
+            collector = Collector()
+            collectors.append(collector)
+            return collector
+
+        def uploader(*_args, **kwargs):
+            kwargs["transfer_check"]()
+            return 1
+
+        class WorkloadProcess:
+            returncode = None
+            terminated = False
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self):
+                self.terminated = True
+                self.returncode = -15
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+            def kill(self):
+                self.returncode = -9
+
+        workload_processes = []
+
+        def process_launcher(*_args, **_kwargs):
+            self.assertEqual(len(collectors), 1)
+            collectors[0].returncode = 17
+            process = WorkloadProcess()
+            workload_processes.append(process)
+            return process
+
+        engine = SerialExecutionEngine(
+            self.client, self.store, self.state_config,
+            supervisor_launcher=supervisor_launcher,
+            collector_launcher=collector_launcher, uploader=uploader,
+            process_launcher=process_launcher, clock=lambda: self.now,
+            sleep=lambda _duration: None)
+        private_key = self.root / "id_ed25519"
+        private_key.write_bytes(b"private-key-fixture")
+        known_hosts = self.root / "known_hosts"
+        known_hosts.write_text("[127.0.0.1]:2222 ssh-ed25519 fixture\n", encoding="utf-8")
+        workload = AttemptWorkload(
+            source_root, private_key, known_hosts, "/tmp/nebula", "worker.py", (),
+            30, ("result.json",), self.root / "collector-failure-artifacts")
+
+        result = engine.run_attempt(
+            plan, attempt_id, workload, local_public_key_path=self.key_path,
+            cleanup_timeout_seconds=3)
+
+        self.assertEqual(len(collectors), 1)
+        self.assertEqual(len(workload_processes), 1)
+        self.assertTrue(workload_processes[0].terminated)
+        self.assertEqual(len(supervisors), 1)
+        self.assertEqual(self.store.get_attempt(attempt_id)["state"], "terminated")
+        self.assertEqual(result.outcome.operational_status, OperationalStatus.FAILED)
+        self.assertEqual(result.outcome.cleanup_status, CleanupStatus.CONFIRMED)
+        workload_failure = next(
+            event for event in result.stage_events
+            if event.stage == "workload" and event.status is StageStatus.FAILED)
+        self.assertEqual(workload_failure.error_code, "collector_process_exited")
 
     def test_serial_engine_drives_bounded_interactive_workload_under_supervision(self):
         self.store.cancel_uncreated(self.attempt["attempt_id"])
