@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from runpod_experiments.contracts import FailureCategory
 from runpod_experiments.errors import ExecutionError
 from runpod_experiments.execution_store import ExecutionStore
-from runpod_experiments.provider import DirectSSHEndpoint, ProviderAdapter
+from runpod_experiments.provider import ProviderAdapter, SSHRouteEndpoint
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,12 +15,16 @@ class StoreSSHContext:
     project_id: str
     pod_id: str
     pod_name: str
-    endpoint: DirectSSHEndpoint = field(repr=False)
+    endpoint: SSHRouteEndpoint = field(repr=False)
 
 
 def resolve_store_ssh_context(client, store: ExecutionStore, attempt_id: str,
-                              project_id: str) -> StoreSSHContext:
-    """Verify durable ownership and live shape before exposing SSH coordinates."""
+                              project_id: str, *, route: str = "direct") -> StoreSSHContext:
+    """Verify durable ownership and live shape before exposing SSH coordinates.
+
+    Direct remains the default. A caller selecting ``proxy`` must use the
+    PTY-safe bounded command transport rather than a raw binary SSH stream.
+    """
     if not isinstance(store, ExecutionStore):
         raise TypeError("store must be an ExecutionStore")
     if project_id != store.project_id:
@@ -32,9 +36,9 @@ def resolve_store_ssh_context(client, store: ExecutionStore, attempt_id: str,
     policy = store.project_policy_for_attempt(attempt_id)
     profile, region = store.selected_resource_for_attempt(attempt_id)
     provisioning = store.provisioning_for_attempt(attempt_id)
-    endpoint = ProviderAdapter(client).get_attempt_direct_ssh(
+    endpoint = ProviderAdapter(client).get_attempt_ssh_endpoint(
         attempt["pod_id"], attempt["pod_name"], policy,
         resource_profile=profile, selected_region=region,
-        expected_ports=provisioning.ports)
+        expected_ports=provisioning.ports, route=route)
     return StoreSSHContext(attempt_id, project_id, attempt["pod_id"],
                            attempt["pod_name"], endpoint)

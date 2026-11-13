@@ -36,10 +36,13 @@ def launch(ledger_path, attempt_id, project_id, directory, artifact_directory, n
 
 
 def launch_execution_store(state_config, attempt_id, project_id, artifact_directory, names,
-                           key_file, known_hosts, remote_root, *, popen=subprocess.Popen):
+                           key_file, known_hosts, remote_root, *, ssh_route="direct",
+                           popen=subprocess.Popen):
     """Launch an independent collector bound to one active execution-store attempt."""
     if not isinstance(state_config, StateStoreConfig):
         raise TypeError("state_config must be a StateStoreConfig")
+    if ssh_route not in ("direct", "proxy"):
+        raise ValueError("ssh_route must be direct or proxy")
     if not isinstance(names, list) or not names or any(not isinstance(n, str) or not n for n in names):
         raise ValueError("Expected a non-empty result allowlist")
     database_path = state_config.database_path(project_id)
@@ -86,7 +89,8 @@ def launch_execution_store(state_config, attempt_id, project_id, artifact_direct
             "--attempt", attempt_id, "--project", project_id,
             "--directory", str(directory), "--artifact-directory", str(Path(artifact_directory).resolve()),
             "--names", str(names_path), "--key", str(Path(key_file).resolve()),
-            "--known-hosts", str(Path(known_hosts).resolve()), "--remote-root", remote_root]
+            "--known-hosts", str(Path(known_hosts).resolve()), "--remote-root", remote_root,
+            "--ssh-route", ssh_route]
     flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW) if os.name == "nt" else 0
     with (directory / "collection-process.log").open("a", encoding="utf-8") as log:
         return popen(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
@@ -100,6 +104,7 @@ def main():
     parser.add_argument("--ledger")
     parser.add_argument("--store-root")
     parser.add_argument("--controller-host")
+    parser.add_argument("--ssh-route", choices=("direct", "proxy"), default="direct")
     args = parser.parse_args()
     if (args.ledger is None) == (args.store_root is None):
         parser.error("select exactly one of --ledger or --store-root")
@@ -127,7 +132,7 @@ def main():
             raise ValueError("Collector attempt has an invalid lifecycle state")
     collect_loop(RunPodClient.from_config(), ledger, args.attempt, args.project,
                  ArtifactStore(args.artifact_directory), names, args.key,
-                 args.known_hosts, args.remote_root, args.directory)
+                 args.known_hosts, args.remote_root, args.directory, ssh_route=args.ssh_route)
 
 
 if __name__ == "__main__":

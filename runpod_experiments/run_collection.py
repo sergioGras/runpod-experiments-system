@@ -7,17 +7,21 @@ from pathlib import Path
 from runpod_experiments.attempts import AttemptError
 from runpod_experiments.collection import collect_once
 from runpod_experiments.execution_store import ExecutionStore
+from runpod_experiments.proxy_ssh import SSHProxyFetcher
 from runpod_experiments.ssh import SSHFetcher
 from runpod_experiments.store_transport import resolve_store_ssh_context
 
 
 def collect_owned_once(client, ledger, attempt_id, project_id, store, names, key_file,
-                       known_hosts, remote_root, previous=None, *, fetcher_type=SSHFetcher):
+                       known_hosts, remote_root, previous=None, *, ssh_route="direct",
+                       fetcher_type=None):
     if isinstance(ledger, ExecutionStore):
-        target = resolve_store_ssh_context(client, ledger, attempt_id, project_id)
+        target = resolve_store_ssh_context(client, ledger, attempt_id, project_id, route=ssh_route)
         endpoint = target.endpoint
         host, port, username = endpoint.host, endpoint.port, endpoint.username
     else:
+        if ssh_route != "direct":
+            raise ValueError("Proxy SSH is available only for store-backed attempts")
         attempt = ledger.get(attempt_id)
         if attempt["project_id"] != project_id or attempt["state"] != "active" or not attempt["pod_id"]:
             raise AttemptError("No active attempt in this project")
@@ -31,14 +35,21 @@ def collect_owned_once(client, ledger, attempt_id, project_id, store, names, key
             raise AttemptError("Direct SSH endpoint not available")
         host, port, username = (endpoint.get("host"), endpoint.get("port"),
                                 endpoint.get("username"))
+    if fetcher_type is None:
+        fetcher_type = (SSHProxyFetcher if isinstance(ledger, ExecutionStore) and endpoint.route == "proxy"
+                        else SSHFetcher)
     fetch = fetcher_type(host, port, username,
                          key_file, known_hosts, remote_root)
     return collect_once(store, fetch, names, attempt_id, previous)
 
 
 def collect_loop(client, ledger, attempt_id, project_id, store, names, key_file, known_hosts,
-                 remote_root, control_directory, *, interval=30, sleep=time.sleep, clock=time.time, max_polls=None):
+                 remote_root, control_directory, *, ssh_route="direct", interval=30,
+                 sleep=time.sleep, clock=time.time, max_polls=None):
     """Keep collecting until collection.stop is present; then try once more."""
+    if ssh_route not in ("direct", "proxy") or (
+            ssh_route == "proxy" and not isinstance(ledger, ExecutionStore)):
+        raise ValueError("Proxy SSH requires an execution-store attempt")
     if not isinstance(interval, (int, float)) or isinstance(interval, bool) or not 0 < interval < float("inf"):
         raise ValueError("Invalid collection interval")
     directory = Path(control_directory)
@@ -58,7 +69,8 @@ def collect_loop(client, ledger, attempt_id, project_id, store, names, key_file,
                 errors = {}
             else:
                 previous, errors = collect_owned_once(client, ledger, attempt_id, project_id, store, names,
-                                                       key_file, known_hosts, remote_root, previous)
+                                                       key_file, known_hosts, remote_root, previous,
+                                                       ssh_route=ssh_route)
         except Exception as error:
             errors = {"collection": type(error).__name__}
         polls += 1

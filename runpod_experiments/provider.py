@@ -80,6 +80,24 @@ class DirectSSHEndpoint:
             raise ContractError("direct SSH endpoint is malformed")
 
 
+@dataclass(frozen=True, slots=True)
+class SSHRouteEndpoint:
+    """Validated coordinates for one explicitly selected SSH transport route."""
+
+    host: str
+    port: int
+    username: str
+    route: str
+
+    def __post_init__(self) -> None:
+        if (not isinstance(self.host, str) or _SSH_HOST.fullmatch(self.host) is None or
+                self.host.startswith("-") or type(self.port) is not int or
+                not 1 <= self.port <= 65535 or not isinstance(self.username, str) or
+                _SSH_USERNAME.fullmatch(self.username) is None or
+                self.route not in ("direct", "proxy")):
+            raise ContractError("SSH route endpoint is malformed")
+
+
 class ProviderAdapter:
     """Project-scoped read methods over the low-level RunPod transport.
 
@@ -172,6 +190,24 @@ class ProviderAdapter:
                                selected_region: str,
                                expected_ports: tuple[str, ...]) -> DirectSSHEndpoint:
         """Return a direct endpoint only after exact live resource-shape checks."""
+        endpoint = self.get_attempt_ssh_endpoint(
+            pod_id, pod_name, policy, resource_profile=resource_profile,
+            selected_region=selected_region, expected_ports=expected_ports,
+            route="direct")
+        return DirectSSHEndpoint(endpoint.host, endpoint.port, endpoint.username)
+
+    def get_attempt_ssh_endpoint(self, pod_id: str, pod_name: str, policy: ProjectPolicy, *,
+                                 resource_profile: ResourceProfile,
+                                 selected_region: str,
+                                 expected_ports: tuple[str, ...],
+                                 route: str = "direct") -> SSHRouteEndpoint:
+        """Return one selected SSH route after exact live resource-shape checks.
+
+        Direct remains the default. Proxy endpoints require callers to use the
+        PTY-safe command transport; they are not interchangeable with binary SSH.
+        """
+        if route not in ("direct", "proxy"):
+            raise ContractError("route must be direct or proxy")
         if (not isinstance(expected_ports, tuple) or not expected_ports or
                 any(not isinstance(port, str) for port in expected_ports) or
                 len(expected_ports) != len(set(expected_ports))):
@@ -190,16 +226,16 @@ class ProviderAdapter:
             raise ExecutionError(FailureCategory.RESOURCE_MISMATCH,
                                  "attempt_ports_unverified")
         ssh = raw.get("ssh")
-        direct = ssh.get("direct") if isinstance(ssh, dict) else None
-        if not isinstance(direct, dict):
+        selected = ssh.get(route) if isinstance(ssh, dict) else None
+        if not isinstance(selected, dict):
             raise ExecutionError(FailureCategory.TRANSPORT_FAILURE,
-                                 "direct_ssh_endpoint_unavailable")
+                                 f"{route}_ssh_endpoint_unavailable")
         try:
-            return DirectSSHEndpoint(direct.get("host"), direct.get("port"),
-                                     direct.get("username"))
+            return SSHRouteEndpoint(selected.get("host"), selected.get("port"),
+                                    selected.get("username"), route)
         except ContractError:
             raise ExecutionError(FailureCategory.RESOURCE_MISMATCH,
-                                 "direct_ssh_endpoint_invalid") from None
+                                 f"{route}_ssh_endpoint_invalid") from None
 
     def quote_cpu(self, resource_id: str, vcpu_count: int, *, observed_epoch: int,
                   storage_hourly_usd: str | int | float = "0") -> QuoteObservation:

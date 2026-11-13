@@ -1,6 +1,7 @@
 import base64
 import io
 import json
+import re
 from pathlib import Path
 import struct
 import tempfile
@@ -376,6 +377,63 @@ class StoreCreateControllerTests(unittest.TestCase):
             fetcher_type=Fetcher)
         self.assertEqual(errors, {})
         self.assertEqual(previous["results/out.bin"], sha256_bytes(b"synthetic result"))
+
+    def test_store_proxy_route_supports_bounded_upload_and_collection_resolution(self):
+        receipt = self.create()
+        self.set_live_cpu_detail(receipt)
+        self.client.detail["ssh"]["proxy"] = {
+            "host": "ssh.runpod.io", "port": 22, "username": "runpod"}
+        known_hosts = self.root / "known_hosts"
+        known_hosts.write_text("[ssh.runpod.io]:22 ssh-ed25519 fixture\n", encoding="utf-8")
+        private_key = self.root / "id_ed25519"
+        private_key.write_bytes(b"private-key-fixture")
+        worker = b"proxy worker source"
+        (self.root / "worker.py").write_bytes(worker)
+        calls = []
+
+        def proxy_runner(argv, **kwargs):
+            calls.append((argv, kwargs))
+            request = kwargs["input"]
+            match = re.search(rb"(RUNPOD_[A-F0-9]{24})_STATUS:%s", request)
+            self.assertIsNotNone(match)
+            return SimpleNamespace(stdout=match.group(1) + b"_STATUS:0\n",
+                                   stderr=b"", returncode=0)
+
+        self.assertEqual(upload_bundle(
+            self.client, self.store, self.attempt["attempt_id"], self.project.project_id,
+            self.root, {"worker.py": sha256_bytes(worker)}, private_key, known_hosts,
+            "/tmp/nebula", ssh_route="proxy", runner=proxy_runner), 1)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("-tt", calls[0][0])
+        self.assertIn("runpod@ssh.runpod.io", calls[0][0])
+
+        class Fetcher:
+            def __init__(self, host, port, username, *_args):
+                self.endpoint = (host, port, username)
+
+            def __call__(self, _name):
+                return b"proxy-result"
+
+        previous, errors = collect_owned_once(
+            self.client, self.store, self.attempt["attempt_id"], self.project.project_id,
+            ArtifactStore(self.root / "proxy-artifacts"), ["results/out.bin"],
+            private_key, known_hosts, "/tmp/nebula", ssh_route="proxy",
+            fetcher_type=Fetcher)
+        self.assertEqual(errors, {})
+        self.assertEqual(previous["results/out.bin"], sha256_bytes(b"proxy-result"))
+
+        launched = {}
+
+        def popen(argv, **kwargs):
+            launched["argv"] = argv
+            return SimpleNamespace(pid=7070)
+
+        self.assertEqual(launch_execution_store(
+            self.state_config, self.attempt["attempt_id"], self.project.project_id,
+            self.root / "proxy-artifacts", ["results/out.bin"], private_key,
+            known_hosts, "/tmp/nebula", ssh_route="proxy", popen=popen).pid, 7070)
+        route_index = launched["argv"].index("--ssh-route")
+        self.assertEqual(launched["argv"][route_index + 1], "proxy")
 
     def test_detached_store_collector_binds_allowlist_store_and_attempt(self):
         receipt = self.create()

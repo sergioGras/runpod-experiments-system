@@ -290,15 +290,36 @@ results without creating a new resource. Operational failure and scientific
 failure both retain permitted evidence and independent cleanup.
 
 `SSHInteractiveProcess`, bundle upload, bounded remote launch, result collection
-and a detached collector now support an `ExecutionStore` attempt in addition to
-the legacy ledger. Shared resolution verifies the lifecycle projection, project
-policy, selected resource/region, declared ports, live provider detail and
-direct SSH endpoint before opening the transport. Fake-provider coverage exercises CPU upload,
-launch, interactive pipes, collection and a reopened detached-collector CLI;
-unexpected live shape prevents SSH startup, and the legacy paths remain covered.
-This is a transport slice only: proxy transport, restartable serial-engine
-orchestration and end-to-end stage/retry recovery remain open. The GPU path is
-still blocked by unavailable per-card VRAM runtime evidence.
+and a detached collector support an `ExecutionStore` attempt in addition to the
+legacy ledger. Shared resolution verifies the lifecycle projection, project
+policy, selected resource/region, declared ports and live provider detail before
+opening the explicitly selected SSH endpoint. Direct remains the default. The
+new `SSHProxySession` supports finite PTY commands and framed, bounded file
+transfers; store-backed upload and collection can select this route, including
+from a detached collector. Raw binary pipes, long-lived process launch and
+interrupted large-file resume remain direct-only or open. Fake-provider coverage
+exercises the direct paths and proxy framing/route selection; unexpected live
+shape prevents SSH startup, and the legacy paths remain covered. Restartable
+serial-engine orchestration and end-to-end stage/retry recovery remain open. The
+GPU path is still blocked by unavailable per-card VRAM runtime evidence.
+
+M5 proxy-transport evidence on Windows/Python 3.12.14: the full offline suite
+passed 152 tests with one directory-symlink capability skip. The tests cover
+bounded local subprocess output, strict proxy status/payload frames, malformed
+and oversized responses, opt-in store route selection, hash-checked proxy
+upload, and route persistence in a detached collector. No provider account,
+credentials, or SSH endpoint was contacted. A fresh no-dependency wheel
+`0.2.0.dev0` installed in a new venv outside the checkout and imported the proxy
+session/fetcher, route endpoint, and detached collector; wheel SHA-256:
+`3ca89fe4684bff9f59084f1c5574dee3254b07c43dbed47abbaabdc2fb54d54e`. The wheel
+manifest contained only package modules and standard distribution metadata.
+This validates the local artifact and fake path, not live provider proxy
+compatibility or remote shell behavior.
+Consumer disposition: no source, package pin, state, or live process changed.
+Hybrid's binary interactive flow and MIAP's batch orchestration remain on their
+current paths; Partition can evaluate the finite proxy transfer capability while
+keeping service framing and workload acceptance in its adapter. All consumers
+still need their own acceptance checks and exact artifact pins before adoption.
 
 ### Store-backed one-shot create slice (internal; qualification remains open)
 
