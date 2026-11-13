@@ -1,5 +1,6 @@
 """Launch the supervisor as a separate local process; never creates a Pod."""
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -13,6 +14,7 @@ from runpod_experiments.host_identity import (
     current_boot_identity, supervisor_process_lock,
 )
 from runpod_experiments.runpod import RunPodClient
+from runpod_experiments.provider_factory import provider_client_for_attempt
 from runpod_experiments.resource_policy import ResourcePolicy
 from runpod_experiments.state_config import StateStoreConfig
 from runpod_experiments.supervision import (
@@ -29,7 +31,7 @@ def _launch(argv, directory, *, popen):
                      creationflags=flags, start_new_session=os.name != "nt", close_fds=True)
 
 
-def _bootstrap_argv(arguments):
+def _bootstrap_argv(arguments, provider_factory_module_roots=()):
     package_parent = str(Path(__file__).resolve().parent.parent)
     # On Windows, a venv's python.exe may be a launcher whose PID differs from
     # the actual detached interpreter that writes supervisor.json. Launch the
@@ -39,8 +41,11 @@ def _bootstrap_argv(arguments):
     interpreter = Path(getattr(sys, "_base_executable", sys.executable))
     if not interpreter.is_file():
         interpreter = Path(sys.executable)
-    bootstrap = "import sys; sys.path.insert(0, sys.argv.pop(1)); from runpod_experiments.supervisor_process import main; main()"
-    return [str(interpreter), "-c", bootstrap, package_parent, *arguments]
+    bootstrap = ("import json,sys; roots=json.loads(sys.argv.pop(1)); "
+                 "package=sys.argv.pop(1); sys.path[:0]=[package]+roots; "
+                 "from runpod_experiments.supervisor_process import main; main()")
+    return [str(interpreter), "-c", bootstrap,
+            json.dumps(list(provider_factory_module_roots)), package_parent, *arguments]
 
 
 def launch(ledger_path, attempt_id, project_id, directory, deadline_epoch, policy_path, *, popen=subprocess.Popen):
@@ -66,7 +71,7 @@ def launch_execution_store(state_config, attempt_id, project_id, directory, *,
     store = ExecutionStore(str(path), project_id=project_id,
                            controller_host=state_config.controller_host)
     store.verify_attempt_lifecycle_projection(attempt_id)
-    store.project_policy_for_attempt(attempt_id)
+    policy = store.project_policy_for_attempt(attempt_id)
     profile, _region = store.selected_resource_for_attempt(attempt_id)
     if gpu_ssh_key_file is not None and profile.kind is not ResourceKind.GPU:
         raise ValueError("GPU probe credentials require a GPU attempt")
@@ -89,7 +94,8 @@ def launch_execution_store(state_config, attempt_id, project_id, directory, *,
     if gpu_ssh_key_file is not None:
         arguments.extend(["--gpu-ssh-key-file", os.path.abspath(os.fspath(gpu_ssh_key_file)),
                           "--gpu-known-hosts", os.path.abspath(os.fspath(gpu_known_hosts))])
-    return _launch(_bootstrap_argv(arguments), directory, popen=popen)
+    return _launch(_bootstrap_argv(
+        arguments, policy.provider_factory_module_roots), directory, popen=popen)
 
 
 def main():
@@ -164,7 +170,8 @@ def main():
                 stop_path = supervisor_directory / "stop.request"
                 if not stop_path.is_symlink():
                     stop_path.touch(exist_ok=True)
-            client = RunPodClient.from_config()
+            client = (RunPodClient.from_config() if args.store_root is None else
+                      provider_client_for_attempt(store, args.attempt, "supervisor"))
             monitor = monitor_factory(client)
             run_supervisor(monitor, args.directory, args.deadline)
     finally:

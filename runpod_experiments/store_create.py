@@ -221,7 +221,7 @@ class StoreCreateController:
                     request.get("name") != attempt["pod_name"] or
                     self.store.project_id != policy.project_id):
                 raise ExecutionError(FailureCategory.AUTHORIZATION, "attempt_outside_project")
-            policy_sha256 = sha256_bytes(encode_document("project_policy", policy))
+            policy_sha256 = self.store.project_policy_sha256_for_attempt(attempt_id)
             directory = Path(supervisor_directory)
             self._wait_for_supervisor(directory, supervisor_process, attempt, policy_sha256)
 

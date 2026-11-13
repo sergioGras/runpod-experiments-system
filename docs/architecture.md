@@ -58,7 +58,7 @@ explicitly before exposing the facade. The names below are design proposals.
 
 | Contract | Responsibility |
 | --- | --- |
-| `ProjectPolicy` | Project ID, namespace registry digest, allowed host, state root and configured ceilings |
+| `ProjectPolicy` | Project ID, namespace registry digest, allowed host, provider-factory identity, state root and configured ceilings |
 | `ApprovalScope` | Validated approval evidence, stable objective/disclosure digests, cumulative limits and any owner-imposed deadline |
 | `ExecutionPlan` | Immutable job recipe: approved resource constraints, source/package/config digests, transfer manifests and finite retry policy |
 | `Workload` | Bounded prepare/start/observe/collect/verify stages using an attempt context |
@@ -166,6 +166,15 @@ Use explicit `list_account_pods`, `list_project_pods` and `get_attempt_pod`
 operations. Account inventory is observational. Foreign resources do not occupy
 project slots. Unknown project-owned resources or ambiguous attempts require
 reconciliation. Legacy adapters preserve the old `pods()` meaning until removed.
+
+`ProjectPolicy.provider_factory` is part of the policy digest stored with each
+plan and approval. Controllers, detached supervisors and collectors resolve that
+same factory against the exact attempt. A consumer factory can wrap its existing
+guarded API with `GuardedProjectApiClient`; `StoreProjectRunGuard` checks the
+durable one-use create claim and exact stopping Pod before delegating a mutation.
+The consumer module and installed package must be pinned by the consumer's source
+binding. The internal default factory remains for synthetic development; paid
+consumer paths must choose the consumer's guarded adapter explicitly.
 
 The provider adapter normalizes CPU/GPU offers, scheduled resource details,
 sanitized errors and exact-Pod billing evidence. Selection preferences are inputs,

@@ -76,6 +76,22 @@ This component is used by the internal serial engine; live qualification
 and consumer integration remain open. The quote/catalog and SSH-key API paths still need
 account-level compatibility checks before use with a real account.
 
+`ProjectPolicy.provider_factory` binds a consumer-owned provider client factory
+into the immutable project-policy, approval, and plan hashes. The serial engine
+can resolve it for an exact attempt, and the detached supervisor and collector
+reload it from the same stored policy. `GuardedProjectApiClient` routes reads and
+mutations through the consumer's existing guarded API; `StoreProjectRunGuard`
+requires the shared attempt's exact create claim or stopping identity at that
+boundary. Consumer factories must be importable on the controlling host and
+return the shared client protocol. Consumer plans must explicitly bind their
+guarded factory; the default direct RunPod client is for internal development,
+synthetic tests, and resuming older v3 records that predate this field. Those
+older policy hashes are verified against their original stored representation.
+Absolute consumer module roots are also included in the policy hash and passed
+to detached supervisor/collector bootstraps, so child interpreters can load an
+adapter that is not installed as a separate Python distribution.
+The extension remains an internal preview, not a qualified consumer integration.
+
 `runpod_experiments.ssh.SSHFetcher` downloads bounded named files over direct SSH using an existing key and a pinned known-hosts file. Store-backed upload and collection can explicitly select the provider's proxy route; `SSHProxySession` runs one finite command through its interactive PTY. Bounded large-file uploads and reads use digest-checked chunks, and uploads publish by atomic rename. Direct remains the default. Proxy transport does not support raw binary streams, long-lived interactive protocols or resuming an interrupted file transfer. `collection_process` can run independently of the foreground controller and records the selected route; it rechecks the recorded provider ID/name and live endpoint on every poll, preserves changed snapshots, and retries failed files. `ArtifactStore` saves content-addressed local copies and a manifest. `upload.upload_bundle` checks an entire reviewed hash-pinned manifest before sending any file to the exact recorded Pod. Use a private local store and reviewed allowlists; callers must still approve disclosure and review the SSH host-key trust. Producers should publish complete files by atomic rename when coherent snapshots are required.
 
 Upload, bounded remote launch, and result collection now also accept an `ExecutionStore` attempt. Those call paths verify the event chain, exact project/Pod identity, selected CPU/GPU shape and selected endpoint before opening SSH; direct remains the default, while upload and collection can select the proxy PTY route. A detached store-backed collector reopens only the configured project store and its bound attempt, including the explicit route and the plan's per-file and aggregate result limits.

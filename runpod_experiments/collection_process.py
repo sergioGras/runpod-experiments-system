@@ -12,6 +12,7 @@ from runpod_experiments.attempts import AttemptLedger
 from runpod_experiments.execution_store import ExecutionStore
 from runpod_experiments.run_collection import collect_loop
 from runpod_experiments.runpod import RunPodClient
+from runpod_experiments.provider_factory import provider_client_for_attempt
 from runpod_experiments.state_config import StateStoreConfig
 from runpod_experiments.transfer import (
     DEFAULT_COLLECTION_TIMEOUT_SECONDS, DEFAULT_TRANSFER_CHUNK_BYTES,
@@ -37,8 +38,11 @@ def launch(ledger_path, attempt_id, project_id, directory, artifact_directory, n
     limits_path = directory / "collection-limits.json"
     limits_path.write_text(json.dumps(limits, sort_keys=True, separators=(",", ":")) + "\n",
                            encoding="utf-8")
-    bootstrap = "import sys; sys.path.insert(0, sys.argv.pop(1)); from runpod_experiments.collection_process import main; main()"
-    argv = [sys.executable, "-c", bootstrap, str(Path(__file__).resolve().parent.parent),
+    bootstrap = ("import json,sys; roots=json.loads(sys.argv.pop(1)); "
+                 "package=sys.argv.pop(1); sys.path[:0]=[package]+roots; "
+                 "from runpod_experiments.collection_process import main; main()")
+    argv = [sys.executable, "-c", bootstrap, "[]",
+            str(Path(__file__).resolve().parent.parent),
             "--ledger", str(Path(ledger_path).resolve()), "--attempt", attempt_id, "--project", project_id,
             "--directory", str(directory), "--artifact-directory", str(Path(artifact_directory).resolve()),
             "--names", str(names_path), "--key", str(Path(key_file).resolve()),
@@ -73,6 +77,7 @@ def launch_execution_store(state_config, attempt_id, project_id, artifact_direct
     store = ExecutionStore(str(database_path), project_id=project_id,
                            controller_host=state_config.controller_host)
     store.verify_attempt_lifecycle_projection(attempt_id)
+    policy = store.project_policy_for_attempt(attempt_id)
     attempt = store.get_attempt(attempt_id)
     if attempt["state"] != "active" or not attempt["pod_id"]:
         raise ValueError("Execution-store collector requires an active bound attempt")
@@ -119,8 +124,12 @@ def launch_execution_store(state_config, attempt_id, project_id, artifact_direct
             os.fsync(stream.fileno())
         os.replace(temporary, limits_path)
 
-    bootstrap = "import sys; sys.path.insert(0, sys.argv.pop(1)); from runpod_experiments.collection_process import main; main()"
-    argv = [sys.executable, "-c", bootstrap, str(Path(__file__).resolve().parent.parent),
+    bootstrap = ("import json,sys; roots=json.loads(sys.argv.pop(1)); "
+                 "package=sys.argv.pop(1); sys.path[:0]=[package]+roots; "
+                 "from runpod_experiments.collection_process import main; main()")
+    argv = [sys.executable, "-c", bootstrap,
+            json.dumps(list(policy.provider_factory_module_roots)),
+            str(Path(__file__).resolve().parent.parent),
             "--store-root", str(state_config.state_root),
             "--controller-host", state_config.controller_host,
             "--attempt", attempt_id, "--project", project_id,
@@ -202,7 +211,9 @@ def main():
         attempt = ledger.get_attempt(args.attempt)
         if attempt["state"] not in {"active", "stopping", "terminated", "cancelled"}:
             raise ValueError("Collector attempt has an invalid lifecycle state")
-    collect_loop(RunPodClient.from_config(), ledger, args.attempt, args.project,
+    client = (RunPodClient.from_config() if args.ledger is not None else
+              provider_client_for_attempt(ledger, args.attempt, "collector"))
+    collect_loop(client, ledger, args.attempt, args.project,
                  ArtifactStore(args.artifact_directory), names, args.key,
                  args.known_hosts, args.remote_root, args.directory, ssh_route=args.ssh_route,
                  max_file_bytes=args.max_file_bytes, max_total_bytes=args.max_total_bytes,

@@ -107,6 +107,16 @@ class ProjectAndApprovalContracts(unittest.TestCase):
         with self.assertRaises(ContractError):
             policy(max_active_resources=True)
 
+    def test_provider_factory_roots_are_bounded_absolute_immutable_paths(self):
+        root = str(Path.cwd())
+        value = policy(provider_factory_module_roots=(root,))
+        self.assertEqual(value.provider_factory_module_roots, (root,))
+        for invalid in ("relative/path", "\x00bad", "x" * 2049):
+            with self.subTest(root=invalid), self.assertRaises(ContractError):
+                policy(provider_factory_module_roots=(invalid,))
+        with self.assertRaises(ContractError):
+            policy(provider_factory_module_roots=(root, root))
+
     def test_rejects_bool_budgets_and_malformed_evidence(self):
         with self.assertRaises(ContractError):
             approval(max_attempts=True)

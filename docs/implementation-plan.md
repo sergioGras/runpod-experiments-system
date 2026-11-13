@@ -728,6 +728,24 @@ actual versus pending costs and termination evidence. Mark the migration complet
 only when all three consumer entry points use the package and their generic
 operational duplication has been retired under these gates.
 
+M6.4 consumer-bound provider factory (2026-11-13): `ProjectPolicy` now records
+an importable provider-factory identifier, which is included in the policy,
+approval and execution-plan digests. A store-backed controller can resolve that
+factory for the exact attempt; detached supervision and collection reload the
+same identity from persisted policy. `GuardedProjectApiClient` delegates through
+the consumer API's `call` method, while `StoreProjectRunGuard` requires a claimed
+exact create or a stopping exact Pod before mutation. The default direct client
+remains for synthetic/internal development and backward-compatible resumption
+of legacy policies. MIAP and Partition serial preview adapters bind their
+existing project APIs without changing active entry points. This adds no
+provider qualification and does not support Partition's two-slot dispatcher.
+Absolute adapter import roots are policy-bound and explicitly supplied to
+detached children that otherwise load only the shared package.
+The schema remains at v3; policies written before the new factory field retain
+their exact stored hash and resolve to the legacy direct client. Consumer policy
+factories are internal until full fault, package, consumer and deployment gates
+pass.
+
 M0 evidence: documentation review and provenance recorded in design commit
 `3a13149`; no source or consumer behavior changed. M1 validation: 21 focused
 contract tests and 68 full-suite tests pass; no provider access or paid resource

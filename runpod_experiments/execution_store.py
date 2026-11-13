@@ -18,7 +18,7 @@ from typing import Any, Iterator
 from runpod_experiments.contracts import (
     ApprovalScope, AttemptPlan, BillingObservation, ContractError, ExecutionPlan,
     FailureCategory, PodProvisioningSpec, ProjectPolicy, QuoteObservation,
-    ResourceKind, ResourceProfile, StageEvent, StageStatus,
+    ResourceKind, ResourceProfile, SCHEMA_VERSION, StageEvent, StageStatus,
     canonical_json_bytes, decode_document, encode_document, sha256_bytes,
     strict_json_loads, validate_attempt,
 )
@@ -43,6 +43,80 @@ _QUOTE_FIELDS = {
     "region_ids", "observed_epoch", "response_sha256", "memory_gb", "minimum_cuda",
     "schema_version",
 }
+_PROJECT_POLICY_FIELDS = {
+    "project_id", "pod_name_prefixes", "namespace_registry_sha256",
+    "controller_hosts", "max_active_resources", "schema_version",
+}
+_PROJECT_POLICY_FACTORY_FIELDS = _PROJECT_POLICY_FIELDS | {"provider_factory"}
+_PROJECT_POLICY_CURRENT_FIELDS = _PROJECT_POLICY_FACTORY_FIELDS | {
+    "provider_factory_module_roots",
+}
+
+
+def _project_policy_from_payload(value: Any) -> ProjectPolicy:
+    """Parse current and pre-provider-factory project policy payloads."""
+    if (not isinstance(value, dict) or set(value) not in (
+            _PROJECT_POLICY_FIELDS, _PROJECT_POLICY_FACTORY_FIELDS,
+            _PROJECT_POLICY_CURRENT_FIELDS)):
+        raise ContractError("stored project policy is malformed")
+    return ProjectPolicy(
+        project_id=value["project_id"],
+        pod_name_prefixes=tuple(value["pod_name_prefixes"]),
+        namespace_registry_sha256=value["namespace_registry_sha256"],
+        controller_hosts=tuple(value["controller_hosts"]),
+        max_active_resources=value["max_active_resources"],
+        schema_version=value["schema_version"],
+        **({"provider_factory": value["provider_factory"]}
+           if "provider_factory" in value else {}),
+        **({"provider_factory_module_roots": tuple(
+                value["provider_factory_module_roots"])}
+           if "provider_factory_module_roots" in value else {}),
+    )
+
+
+def _project_policy_digest(value: dict[str, Any], policy: ProjectPolicy) -> str:
+    """Verify the exact old or current approved policy representation."""
+    if "provider_factory_module_roots" in value:
+        document = encode_document("project_policy", policy)
+    else:
+        # Existing v3 plans contain a policy without one or both factory
+        # fields. Keep the exact approved representation/hash valid; omitted
+        # fields retain their historical defaults when resuming an attempt.
+        document = canonical_json_bytes({
+            "kind": "project_policy", "payload": value,
+            "schema_version": policy.schema_version,
+        })
+    return sha256_bytes(document)
+
+
+def _execution_plan_matches_document(stored: bytes, plan: ExecutionPlan) -> bool:
+    """Match a typed plan while preserving the pre-factory v3 representation."""
+    try:
+        stored_payload = decode_document(stored, expected_kind="execution_plan")
+        supplied_payload = decode_document(
+            encode_document("execution_plan", plan), expected_kind="execution_plan")
+        stored_project = stored_payload.get("project")
+        supplied_project = supplied_payload.get("project")
+        if not isinstance(stored_project, dict) or not isinstance(supplied_project, dict):
+            return False
+        if "provider_factory" not in stored_project:
+            if (supplied_project.get("provider_factory") !=
+                    "runpod_experiments.provider_factory:default_provider_factory" or
+                    supplied_project.get("provider_factory_module_roots") != []):
+                return False
+            supplied_project.pop("provider_factory")
+            supplied_project.pop("provider_factory_module_roots")
+        elif "provider_factory_module_roots" not in stored_project:
+            if supplied_project.get("provider_factory_module_roots") != []:
+                return False
+            supplied_project.pop("provider_factory_module_roots")
+        compatible = canonical_json_bytes({
+            "kind": "execution_plan", "payload": supplied_payload,
+            "schema_version": SCHEMA_VERSION,
+        })
+        return stored == compatible
+    except (ContractError, TypeError, ValueError):
+        return False
 
 
 def _quote_from_payload(value: Any) -> QuoteObservation:
@@ -954,9 +1028,8 @@ class ExecutionStore:
             raise ExecutionError(FailureCategory.CONFIGURATION, "unknown_attempt")
         try:
             stored = bytes(row["document"])
-            supplied = encode_document("execution_plan", plan)
             if (sha256_bytes(stored) != row["plan_sha256"] or
-                    sha256_bytes(supplied) != row["plan_sha256"] or
+                    not _execution_plan_matches_document(stored, plan) or
                     plan.job_id != row["job_id"] or plan.project.project_id != self.project_id):
                 raise ContractError("supplied plan differs from the stored attempt")
         except (ContractError, TypeError, ValueError):
@@ -1207,21 +1280,8 @@ class ExecutionStore:
             plan_payload = decode_document(plan_bytes, expected_kind="execution_plan")
             approval_payload = decode_document(approval_bytes, expected_kind="approval_scope")
             project_payload = plan_payload.get("project")
-            required = {
-                "project_id", "pod_name_prefixes", "namespace_registry_sha256",
-                "controller_hosts", "max_active_resources", "schema_version",
-            }
-            if not isinstance(project_payload, dict) or set(project_payload) != required:
-                raise ContractError("stored project policy is malformed")
-            policy = ProjectPolicy(
-                project_id=project_payload["project_id"],
-                pod_name_prefixes=tuple(project_payload["pod_name_prefixes"]),
-                namespace_registry_sha256=project_payload["namespace_registry_sha256"],
-                controller_hosts=tuple(project_payload["controller_hosts"]),
-                max_active_resources=project_payload["max_active_resources"],
-                schema_version=project_payload["schema_version"],
-            )
-            if (sha256_bytes(encode_document("project_policy", policy)) != row["policy_sha256"] or
+            policy = _project_policy_from_payload(project_payload)
+            if (_project_policy_digest(project_payload, policy) != row["policy_sha256"] or
                     approval_payload.get("project_policy_sha256") != row["policy_sha256"] or
                     approval_payload.get("project_id") != row["project_id"] or
                     plan_payload.get("approval") != approval_payload):
@@ -1234,6 +1294,33 @@ class ExecutionStore:
                 approval_payload.get("controller_host") != self.controller_host):
             raise ExecutionError(FailureCategory.AUTHORIZATION, "controller_host_not_approved")
         return policy
+
+    def project_policy_sha256_for_attempt(self, attempt_id: str) -> str:
+        """Return the approved policy digest without re-encoding legacy policy data."""
+        self.project_policy_for_attempt(attempt_id)
+        with closing(self._connect()) as db:
+            row = db.execute("""SELECT a.attempt_sha256,a.attempt_document,s.policy_sha256
+                FROM execution_attempts a JOIN execution_approvals s
+                  ON s.project_id=a.project_id AND s.approval_id=a.approval_id
+                WHERE a.attempt_id=? AND a.project_id=?""",
+                (attempt_id, self.project_id)).fetchone()
+        if row is None:
+            raise ExecutionError(FailureCategory.CONFIGURATION, "unknown_attempt")
+        try:
+            raw = bytes(row["attempt_document"])
+            if sha256_bytes(raw) != row["attempt_sha256"]:
+                raise ContractError("stored attempt digest differs")
+            payload = decode_document(raw, expected_kind="attempt_plan")
+            digest = payload.get("policy_sha256")
+            if digest != row["policy_sha256"]:
+                raise ContractError("stored attempt policy differs from its approval")
+        except (ContractError, TypeError, ValueError):
+            raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                 "attempt_policy_digest_malformed") from None
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                 "project_policy_digest_malformed")
+        return digest
 
     def verify_attempt_lifecycle_projection(self, attempt_id: str) -> bool:
         """Check mutable lifecycle state against the authenticated event history.

@@ -163,3 +163,66 @@ the library with synthetic regressions and revalidate affected consumers.
 No private consumer source, state, scientific outputs or provider identities are
 included in this report. Current live reconciliation status must be checked in
 each consumer's own records and authorized operational context.
+
+## Follow-up implementation evidence (2026-11-13)
+
+The consumer-bound factory path now applies to the controller, detached
+supervisor and collector. Each process reloads the factory from the attempt's
+hash-bound `ProjectPolicy`. Client methods are checked by purpose with
+least-privilege method sets. `GuardedProjectApiClient` delegates through the
+consumer's existing `ProjectPodApi.call`, and the shared run guard binds create
+to the exact durable create claim and delete to the exact stopping Pod. This is
+a local guard layer, not provider IAM.
+
+Consumer `ProjectPolicy` records also bind bounded absolute module roots.
+Controller loading prioritizes the shared package before these roots; detached
+supervisor and collector launchers pass them explicitly so a base interpreter
+can load repository-local adapters without relying on inherited `PYTHONPATH`.
+
+Backward compatibility was tightened before packaging: the contract envelope
+stays at schema v3, both new `ProjectPolicy` fields follow its old positional
+fields, and policy payloads from before either factory field are verified
+against their original serialized bytes/hash. Restart and typed-plan checks
+continue to use the exact approved legacy digest. Regressions cover original,
+intermediate and current representations, factory-root import in the controller,
+and policy-root import in real detached supervisor and collector processes.
+
+The full shared suite passed **226 tests, one skipped** against the installed
+wheel from outside the source checkout. The skip is the Windows directory-
+symlink capability case. Detached process cases loaded the shared package
+from the installed location and consumer fake factories only from the
+policy-bound module roots. A fresh venv installed the sdist, resolved package
+modules under its `site-packages`, and loaded the supervisor CLI help.
+
+Built candidate artifacts are temporary local files, not release assets:
+
+- Wheel `runpod_experiments_system-0.2.0.dev0-py3-none-any.whl`, 125,182 bytes,
+  SHA-256 `7f8f5be5a2f6aade5944ca9197509b4f1f6227f53af76378c707b5e844d457fa`.
+- Sdist `runpod_experiments_system-0.2.0.dev0.tar.gz`, 172,300 bytes,
+  SHA-256 `49f88c1717133914d52caaf066edf24dfa8242f9761ff5516aab7a635b56078a`.
+
+The wheel has 46 entries and the sdist 77. Archive review found only shared
+package source, build metadata, README and generic synthetic tests. No consumer
+repositories, run records, credentials, weights, checkpoints or private results
+were included.
+
+Isolated consumer worktrees contain opt-in serial adapters only:
+
+- MIAP: 72 adapter/lifecycle tests passed against the installed sdist. Its
+  active driver, approval cards, credential delivery, consumed-attempt ledger,
+  watchdog and result finalizer are unchanged. Batch restart/finalizer
+  acceptance remains open.
+- Partition: 42 adapter/RunPod/P020 controller tests passed against the installed
+  sdist. The adapter binds only the legacy serial API. The two-slot P020/M10
+  dispatcher, parent/child caps, service roles, archive transport and science
+  verifier remain untouched.
+- Hybrid: 13 protocol/watchdog tests passed against the installed sdist. Its
+  earlier preview commit remains isolated and unpushed; its trusted-client
+  computation and result verifier have not been cut over.
+
+These are offline synthetic/fake-path checks against the installed package;
+they do not qualify a live provider or deployment. No consumer entry point
+imports its adapter, no consumer dependency pin changed, no original checkout
+or persisted run state was modified, and no provider call, resource creation,
+paid run, upload or disclosure occurred. Live qualification, consumer parity,
+deployment checks and release remain open.

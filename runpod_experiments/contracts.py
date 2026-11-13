@@ -10,7 +10,7 @@ from enum import Enum
 import hashlib
 import json
 import math
-from pathlib import PurePosixPath
+from pathlib import PurePosixPath, PureWindowsPath
 import re
 from typing import Any
 
@@ -23,6 +23,14 @@ _PROJECT_ID = re.compile(r"[a-z][a-z0-9-]{2,63}\Z")
 _PREFIX = re.compile(r"[a-z][a-z0-9-]+-\Z")
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,252}\Z")
+_PROVIDER_FACTORY = re.compile(
+    r"(?:[A-Za-z_][A-Za-z0-9_]*\.)*[A-Za-z_][A-Za-z0-9_]*:"
+    r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\Z")
+_DEFAULT_PROVIDER_FACTORY = (
+    "runpod_experiments.provider_factory:default_provider_factory")
+_MAX_PROVIDER_FACTORY_ROOTS = 4
+_MAX_PROVIDER_FACTORY_ROOT_LENGTH = 2048
+_MAX_PROVIDER_FACTORY_ROOTS_LENGTH = 8192
 
 
 class ContractError(ValueError):
@@ -124,6 +132,10 @@ class ProjectPolicy:
     controller_hosts: tuple[str, ...]
     max_active_resources: int = 1
     schema_version: int = SCHEMA_VERSION
+    # Appended after the legacy positional fields so existing callers that pass
+    # schema_version positionally keep their meaning.
+    provider_factory: str = _DEFAULT_PROVIDER_FACTORY
+    provider_factory_module_roots: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _text(self.project_id, "project_id", _PROJECT_ID)
@@ -134,6 +146,19 @@ class ProjectPolicy:
                 raise ContractError("project prefixes may not overlap")
         _sha(self.namespace_registry_sha256, "namespace_registry_sha256")
         _unique_text_tuple(self.controller_hosts, "controller_hosts", _HOST)
+        _text(self.provider_factory, "provider_factory", _PROVIDER_FACTORY)
+        _unique_text_tuple(self.provider_factory_module_roots,
+                           "provider_factory_module_roots", allow_empty=True)
+        if (len(self.provider_factory_module_roots) > _MAX_PROVIDER_FACTORY_ROOTS or
+                sum(len(root) for root in self.provider_factory_module_roots) >
+                _MAX_PROVIDER_FACTORY_ROOTS_LENGTH):
+            raise ContractError("provider_factory_module_roots exceeds its bound")
+        for root in self.provider_factory_module_roots:
+            if (len(root) > _MAX_PROVIDER_FACTORY_ROOT_LENGTH or
+                    any(ord(char) < 32 for char in root) or
+                    not (PurePosixPath(root).is_absolute() or
+                         PureWindowsPath(root).is_absolute())):
+                raise ContractError("provider factory module roots must be bounded absolute paths")
         if type(self.max_active_resources) is not int or self.max_active_resources not in (1, 2):
             raise ContractError("max_active_resources must select a supported serial or two-slot profile")
         if type(self.schema_version) is not int or self.schema_version != SCHEMA_VERSION:

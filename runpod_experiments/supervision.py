@@ -7,7 +7,7 @@ from pathlib import Path
 from runpod_experiments.attempts import AttemptError, reconcile_candidate
 from runpod_experiments.contracts import (
     FailureCategory, ResourceKind, StageStatus, canonical_json_bytes,
-    encode_document, sha256_bytes,
+    sha256_bytes,
 )
 from runpod_experiments.errors import ExecutionError
 from runpod_experiments.gpu_probe import GPUProbeTransportError, probe_gpu_runtime
@@ -119,8 +119,7 @@ class StoreCleanupMonitor:
         self.project_policy = store.project_policy_for_attempt(attempt_id)
         self.resource_profile, self.selected_region = store.selected_resource_for_attempt(attempt_id)
         self.policy = None
-        self.policy_sha256 = sha256_bytes(encode_document(
-            "project_policy", self.project_policy))
+        self.policy_sha256 = store.project_policy_sha256_for_attempt(attempt_id)
         self._provider = ProviderAdapter(provider)
         self._clock = clock
         self.gpu_ssh_key_file = gpu_ssh_key_file

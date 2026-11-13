@@ -171,9 +171,12 @@ branch or replace code under an active controller.
 2. Normalize provider/inventory/errors/billing and packaging, preserving legacy
    API meanings behind thin temporary adapters. Adopt these in the existing
    hybrid integration and one new serial consumer path.
-3. Implement the common durable store, supervision and serial execution engine;
-   qualify MIAP's sequential workload and partition's serial CPU/GPU workload with
-   fake providers and independently verified outputs.
+3. Implement the common durable store, supervision and serial execution engine,
+   with a provider factory bound into the project-policy/approval hash so the
+   controller, detached supervisor and collector all route operations through
+   each consumer's existing project guard. Qualify MIAP's sequential workload
+   and Partition's serial CPU/GPU workload with fake providers and independently
+   verified outputs.
 4. Move generic streaming/proxy transport and restartable collection/recovery
    into the library. Simplify hybrid's repeated runner stages against the same
    engine and preserve its interactive workload interface.
@@ -188,6 +191,12 @@ only what the contract needs. A temporary adapter must delegate common behavior
 and have a removal criterion. Historical receipts, reports and source revisions
 remain reproducible; retaining history does not require maintaining every old
 launcher as an alternative production backend.
+
+The policy-bound provider-factory extension is now an internal shared-package
+preview. MIAP and Partition have isolated serial adapters that delegate to their
+existing guarded APIs; neither is imported by the active runner. Partition's
+two-slot dispatcher remains outside the serial adapter until M10 supplies
+durable parent/child caps and concurrent cleanup isolation.
 
 ## Acceptance and retirement gates
 

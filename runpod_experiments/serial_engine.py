@@ -20,6 +20,7 @@ from runpod_experiments.execution_store import ExecutionStore
 from runpod_experiments.interactive_ssh import SSHInteractiveProcess
 from runpod_experiments.interactive_workload import InteractiveDriver, InteractiveSession
 from runpod_experiments.remote_process import start_python
+from runpod_experiments.provider_factory import provider_client_for_attempt
 from runpod_experiments.state_config import StateStoreConfig
 from runpod_experiments.store_create import StoreCreateController
 from runpod_experiments.store_transport import load_verified_gpu_attestation
@@ -438,6 +439,8 @@ class SerialExecutionEngine:
             bundle = self._validate_workload(plan, attempt, workload,
                                              interactive_driver=interactive_driver)
             attempt_directory, supervisor_directory = self._prepare_attempt_directory(attempt_id)
+            client = (self.client if self.client is not None else
+                      provider_client_for_attempt(self.store, attempt_id, "controller"))
         except BaseException:
             try:
                 self._cancel_uncreated(attempt_id)
@@ -458,10 +461,9 @@ class SerialExecutionEngine:
         cleanup_status = CleanupStatus.NOT_REQUIRED
         try:
             controller = self.create_controller_factory(
-                self.client, self.store, self.state_config,
+                client, self.store, self.state_config,
                 clock=self.clock, monotonic=self.monotonic, sleep=self.sleep)
-            policy_sha256 = sha256_bytes(encode_document(
-                "project_policy", self.store.project_policy_for_attempt(attempt_id)))
+            policy_sha256 = self.store.project_policy_sha256_for_attempt(attempt_id)
         except BaseException:
             try:
                 self._cancel_uncreated(attempt_id)
@@ -524,7 +526,7 @@ class SerialExecutionEngine:
                                        attempt, policy_sha256)
 
             self.uploader(
-                self.client, self.store, attempt_id, project,
+                client, self.store, attempt_id, project,
                 workload.source_root, bundle, workload.key_file,
                 workload.known_hosts, workload.remote_root,
                 max_file_bytes=plan.transfers.max_file_bytes,
@@ -565,7 +567,7 @@ class SerialExecutionEngine:
                     workload.setup_timeout_seconds,
                     max(1, math.ceil(setup_deadline - self.monotonic())))
                 setup_process = self.process_launcher(
-                    self.client, self.store, attempt_id, project, workload.key_file,
+                    client, self.store, attempt_id, project, workload.key_file,
                     workload.known_hosts, workload.remote_root, workload.setup_script,
                     list(workload.setup_arguments), setup_timeout,
                     attempt_directory / "setup.log")
@@ -625,7 +627,7 @@ class SerialExecutionEngine:
                 workload_timeout = min(
                     workload.timeout_seconds, max(1, math.ceil(remaining)))
                 workload_process = self.process_launcher(
-                    self.client, self.store, attempt_id, project, workload.key_file,
+                    client, self.store, attempt_id, project, workload.key_file,
                     workload.known_hosts, workload.remote_root, workload.script,
                     list(workload.arguments), workload_timeout,
                     attempt_directory / "workload.log")
@@ -635,7 +637,7 @@ class SerialExecutionEngine:
                 interactive_timeout = min(workload.timeout_seconds,
                                            max(1, math.ceil(remaining)))
                 workload_process = self.interactive_process_factory(
-                    self.client, self.store, attempt_id, project, workload.key_file,
+                    client, self.store, attempt_id, project, workload.key_file,
                     workload.known_hosts, workload.remote_root, workload.script,
                     list(workload.arguments), interactive_timeout,
                     attempt_directory / "workload.log")
@@ -968,8 +970,7 @@ class SerialExecutionEngine:
                                     supervisor_state = self._read_state(supervisor_state_path)
                                 except ExecutionError:
                                     supervisor_state = {}
-                                policy_sha256 = sha256_bytes(encode_document(
-                                    "project_policy", self.store.project_policy_for_attempt(attempt_id)))
+                                policy_sha256 = self.store.project_policy_sha256_for_attempt(attempt_id)
                                 heartbeat = supervisor_state.get("heartbeat_epoch")
                                 if (supervisor_state.get("ready") is not True or
                                         type(supervisor_state.get("pid")) is not int or

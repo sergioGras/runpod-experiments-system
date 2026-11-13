@@ -8,7 +8,9 @@ import subprocess
 import sys
 import tempfile
 import time
+from types import ModuleType
 import unittest
+import uuid
 from unittest.mock import patch
 
 from runpod_experiments.contracts import (
@@ -16,12 +18,18 @@ from runpod_experiments.contracts import (
     ContractError, FailureCategory, ManifestFile, PodProvisioningSpec, ProjectPolicy,
     QuoteObservation, ResourceKind, ResourceProfile, RetryPolicy, StageStatus,
     TransferDirection, TransferManifest,
-    encode_document, sha256_bytes,
+    canonical_json_bytes, encode_document, sha256_bytes,
 )
+from runpod_experiments.collection_process import launch_execution_store as launch_collector
 from runpod_experiments.errors import ExecutionError
-from runpod_experiments.execution_store import ExecutionStore
+from runpod_experiments.execution_store import (
+    ExecutionStore, _execution_plan_matches_document, _project_policy_digest,
+    _project_policy_from_payload,
+)
+from runpod_experiments.guarded_project_api import GuardedProjectApiClient
 from runpod_experiments.ownership import request_delete_for_store_attempt
 from runpod_experiments.provider import ProviderAdapter
+from runpod_experiments.provider_factory import provider_client_for_attempt
 from runpod_experiments.runpod import ProviderError
 from runpod_experiments.resource_policy import resource_profile_violation
 from runpod_experiments.create_spec import pod_create_request_sha256
@@ -111,6 +119,210 @@ class ExecutionStoreTests(unittest.TestCase):
         self.store.bind_pod(attempt.attempt_id, f"pod-{number}", pod_name(number))
         self.store.request_stop(attempt.attempt_id)
         self.store.confirm_termination(attempt.attempt_id, f"pod-{number}", ONE)
+
+    def test_provider_factory_is_policy_bound_and_receives_exact_attempt_context(self):
+        calls = []
+
+        class Client:
+            def pods(self): return []
+            def pod(self, _pod_id): return {}
+            def ssh_key_fingerprints(self): return frozenset()
+            def _create_pod(self, _request): return {}
+            def _delete_pod(self, _pod_id): return {}
+
+        module = ModuleType("synthetic_provider_factory")
+
+        def build(*, store, attempt_id, purpose):
+            calls.append((store, attempt_id, purpose))
+            return Client()
+
+        module.build = build
+        project = replace(self.plan.project,
+                          provider_factory="synthetic_provider_factory:build")
+        approval = replace(
+            self.plan.approval,
+            project_policy_sha256=sha256_bytes(encode_document("project_policy", project)))
+        plan = replace(self.plan, project=project, approval=approval)
+        attempt = attempt_for(plan, "attempt-factory-bound", 1, self.now)
+        self.store.reserve_attempt(plan, attempt, pod_name(1))
+
+        with patch.dict(sys.modules, {module.__name__: module}):
+            client = provider_client_for_attempt(
+                self.store, attempt.attempt_id, "controller")
+
+        self.assertIsInstance(client, Client)
+        self.assertEqual(calls, [(self.store, attempt.attempt_id, "controller")])
+
+    def test_legacy_v3_project_policy_keeps_its_approved_hash_and_default_client(self):
+        current = json.loads(encode_document("project_policy", self.plan.project))["payload"]
+        legacy = dict(current)
+        legacy.pop("provider_factory")
+        legacy.pop("provider_factory_module_roots")
+        policy = _project_policy_from_payload(legacy)
+        legacy_document = canonical_json_bytes({
+            "kind": "project_policy", "payload": legacy,
+            "schema_version": self.plan.project.schema_version,
+        })
+
+        self.assertEqual(policy.provider_factory,
+                         "runpod_experiments.provider_factory:default_provider_factory")
+        self.assertEqual(_project_policy_digest(legacy, policy),
+                         sha256_bytes(legacy_document))
+        self.assertEqual(_project_policy_digest(current, self.plan.project),
+                         sha256_bytes(encode_document("project_policy", self.plan.project)))
+
+        intermediate = dict(current)
+        intermediate.pop("provider_factory_module_roots")
+        intermediate_document = canonical_json_bytes({
+            "kind": "project_policy", "payload": intermediate,
+            "schema_version": self.plan.project.schema_version,
+        })
+        self.assertEqual(
+            _project_policy_digest(intermediate, _project_policy_from_payload(intermediate)),
+            sha256_bytes(intermediate_document))
+
+    def test_legacy_v3_plan_matches_without_weakening_factory_binding(self):
+        envelope = json.loads(encode_document("execution_plan", self.plan))
+        del envelope["payload"]["project"]["provider_factory"]
+        del envelope["payload"]["project"]["provider_factory_module_roots"]
+        legacy_document = canonical_json_bytes(envelope)
+
+        self.assertTrue(_execution_plan_matches_document(legacy_document, self.plan))
+        custom_project = replace(
+            self.plan.project, provider_factory="consumer.adapter:build_client")
+        custom_approval = replace(
+            self.plan.approval,
+            project_policy_sha256=sha256_bytes(
+                encode_document("project_policy", custom_project)))
+        self.assertFalse(_execution_plan_matches_document(
+            legacy_document, replace(self.plan, project=custom_project,
+                                     approval=custom_approval)))
+
+    def test_provider_factory_imports_from_approved_module_root(self):
+        factory_root = self.root / "provider-factory"
+        factory_root.mkdir()
+        module_name = "isolated_factory_" + uuid.uuid4().hex
+        (factory_root / f"{module_name}.py").write_text('''
+class Client:
+    def pods(self): return []
+    def pod(self, _pod_id): return {}
+    def ssh_key_fingerprints(self): return frozenset()
+    def _create_pod(self, _request): return {}
+    def _delete_pod(self, _pod_id): return {}
+
+def build_client(*, store, attempt_id, purpose):
+    return Client()
+''', encoding="utf-8")
+        self.addCleanup(sys.modules.pop, module_name, None)
+        self.addCleanup(lambda: sys.path.remove(str(factory_root))
+                        if str(factory_root) in sys.path else None)
+        project = replace(
+            self.plan.project, provider_factory=f"{module_name}:build_client",
+            provider_factory_module_roots=(str(factory_root),))
+        approval = replace(
+            self.plan.approval,
+            project_policy_sha256=sha256_bytes(encode_document("project_policy", project)))
+        plan = replace(self.plan, project=project, approval=approval)
+        attempt = attempt_for(plan, "attempt-import-root", 1, self.now)
+        self.store.reserve_attempt(plan, attempt, pod_name(1))
+
+        client = provider_client_for_attempt(self.store, attempt.attempt_id, "controller")
+
+        self.assertEqual(type(client).__name__, "Client")
+        shared_root = str(Path(__import__("runpod_experiments").__file__).resolve().parent.parent)
+        self.assertLess(sys.path.index(shared_root),
+                        sys.path.index(str(factory_root)))
+
+    def test_attempt_exposes_approved_policy_digest_without_reencoding(self):
+        attempt, _ = self.reserve()
+        self.assertEqual(
+            self.store.project_policy_sha256_for_attempt(attempt.attempt_id),
+            attempt.policy_sha256)
+
+    def test_provider_factory_identifier_is_in_project_policy_hash(self):
+        default_hash = sha256_bytes(encode_document("project_policy", self.plan.project))
+        selected = replace(self.plan.project,
+                           provider_factory="consumer.runpod_adapter:build_client")
+        selected_hash = sha256_bytes(encode_document("project_policy", selected))
+        self.assertNotEqual(default_hash, selected_hash)
+        with self.assertRaises(ContractError):
+            replace(self.plan.project, provider_factory="consumer; delete-all:client")
+
+    def test_guarded_project_api_allows_only_claimed_create_and_stopping_exact_delete(self):
+        class Scope:
+            project_id = self.plan.project.project_id
+            max_active_pods = 1
+
+            def owns_name(_self, name):
+                return name.startswith("nebula-")
+
+            def owns(_self, pod):
+                return isinstance(pod, dict) and _self.owns_name(pod.get("name"))
+
+        class ProjectApi:
+            def __init__(_self):
+                _self.scope = Scope()
+                _self.run_guard = None
+                _self.created = []
+                _self.deleted = []
+
+            def call(_self, method, path, body=None):
+                if method == "GET" and path == "/pods/pod-guarded-1":
+                    return {"id": "pod-guarded-1", "name": "nebula-run-1",
+                            "status": "RUNNING"}
+                if method == "GET" and path.startswith("/pods"):
+                    return {"pods": [], "pagination": {"hasNextPage": False}}
+                if method == "POST" and path == "/pods":
+                    _self.run_guard.authorize_create(_self.scope, body, [])
+                    response = {"id": "pod-guarded-1", "name": body["name"]}
+                    _self.created.append(dict(body))
+                    _self.run_guard.created(response)
+                    return response
+                if method == "DELETE" and path == "/pods/pod-guarded-1":
+                    pod = _self.call("GET", path)
+                    if not _self.scope.owns(pod) or pod.get("id") != "pod-guarded-1":
+                        raise AssertionError("fake project API ownership guard failed")
+                    _self.run_guard.authorize_mutation(method, pod)
+                    _self.deleted.append(path.rsplit("/", 1)[-1])
+                    return {"id": "pod-guarded-1"}
+                raise AssertionError(f"unexpected guarded API request: {method} {path}")
+
+        attempt, _exposure = self.reserve()
+        api = ProjectApi()
+        client = GuardedProjectApiClient(api, self.store, attempt.attempt_id)
+        request = self.store.create_request_for_attempt(attempt.attempt_id)
+        with self.assertRaises(ExecutionError) as rejected:
+            client._create_pod(request)
+        self.assertIs(rejected.exception.category, FailureCategory.AUTHORIZATION)
+        self.assertEqual(api.created, [])
+
+        self.claim_after_preflight(attempt.attempt_id)
+        response = client._create_pod(request)
+        self.assertEqual(api.created, [request])
+        self.store.bind_pod(attempt.attempt_id, response["id"], response["name"])
+        with self.assertRaises(ExecutionError) as rejected:
+            client._delete_pod(response["id"])
+        self.assertIs(rejected.exception.category, FailureCategory.AUTHORIZATION)
+        self.assertEqual(api.deleted, [])
+
+        self.store.request_stop(attempt.attempt_id)
+        client._delete_pod(response["id"])
+        self.assertEqual(api.deleted, [response["id"]])
+
+    def test_guarded_api_preserves_shared_authorization_errors(self):
+        expected = ExecutionError(FailureCategory.AUTHORIZATION,
+                                  "project_api_mutation_outside_attempt")
+
+        class RejectingApi:
+            run_guard = None
+
+            def call(self, *_args, **_kwargs):
+                raise expected
+
+        client = GuardedProjectApiClient(RejectingApi(), self.store, "unused-attempt")
+        with self.assertRaises(ExecutionError) as caught:
+            client._request("DELETE", "/pods/foreign")
+        self.assertIs(caught.exception, expected)
 
     def test_wal_initialization_retries_only_transient_database_lock(self):
         class FlakyWalConnection:
@@ -595,46 +807,111 @@ class ExecutionStoreTests(unittest.TestCase):
         self.assertNotIn("apikey", command.lower())
         self.assertTrue(captured["kwargs"]["close_fds"])
 
+    def test_collector_launcher_passes_approved_factory_module_roots(self):
+        factory_root = self.root / "collector-factory"
+        factory_root.mkdir()
+        module_name = "collector_factory_" + uuid.uuid4().hex
+        marker = self.root / "collector-factory-used.json"
+        (factory_root / f"{module_name}.py").write_text(f'''
+import json
+from pathlib import Path
+
+class Client:
+    def pod(self, pod_id):
+        return {{"id": pod_id, "name": "nebula-run-1", "status": "RUNNING", "ssh": {{}}}}
+
+def build_client(*, store, attempt_id, purpose):
+    Path({str(marker)!r}).write_text(
+        json.dumps({{"attempt_id": attempt_id, "purpose": purpose}}), encoding="utf-8")
+    return Client()
+''', encoding="utf-8")
+        project = replace(
+            self.plan.project,
+            provider_factory=f"{module_name}:build_client",
+            provider_factory_module_roots=(str(factory_root),))
+        approval = replace(
+            self.plan.approval,
+            project_policy_sha256=sha256_bytes(encode_document("project_policy", project)))
+        plan = replace(self.plan, project=project, approval=approval)
+        config = StateStoreConfig(self.root / "collector-roots-state", "TEST-HOST")
+        store = config.open_execution_store(plan.project.project_id, clock=lambda: self.now)
+        attempt = attempt_for(plan, "attempt-collector-roots", 1, self.now)
+        store.reserve_attempt(plan, attempt, pod_name(1))
+        prepare_test_preflight(store, attempt.attempt_id)
+        store.claim_create(attempt.attempt_id)
+        store.bind_pod(attempt.attempt_id, "pod-collector-roots", pod_name(1))
+        key_file = self.root / "collector-key"
+        known_hosts = self.root / "collector-known-hosts"
+        key_file.touch()
+        known_hosts.touch()
+        collector_directory = (config.state_root / plan.project.project_id /
+                               attempt.attempt_id / "collector")
+        collector_directory.mkdir(parents=True)
+        (collector_directory / "collection.stop").touch()
+        package_parent = Path(__file__).resolve().parents[1]
+        with patch.dict(os.environ, {
+                "PYTHONPATH": str(package_parent),
+                "RUNPOD_EXPERIMENTS_TEST_MODE": "1"}):
+            process = launch_collector(
+                config, attempt.attempt_id, plan.project.project_id,
+                self.root / "collector-artifacts", ["result.json"], key_file,
+                known_hosts, "/work")
+            process.wait(timeout=20)
+
+        self.assertEqual(process.returncode, 0,
+                         (collector_directory / "collection-process.log").read_text(
+                             encoding="utf-8", errors="replace"))
+        self.assertEqual(json.loads(marker.read_text(encoding="utf-8")), {
+            "attempt_id": attempt.attempt_id, "purpose": "collector"})
+        self.assertEqual(json.loads(process.args[3]), [str(factory_root)])
+
     def test_real_detached_store_supervisor_survives_launcher_parent_exit(self):
-        config = StateStoreConfig(self.root / "detached-state", "TEST-HOST")
-        store = config.open_execution_store(self.plan.project.project_id, clock=lambda: self.now)
-        attempt = attempt_for(self.plan, "attempt-parent-exit", 1, self.now)
-        store.reserve_attempt(self.plan, attempt, pod_name(1))
-        control = self.root / "detached-control"
-        control.mkdir()
-        (control / "stop.request").touch()
-        config_home = self.root / "home"
-        (config_home / ".runpod").mkdir(parents=True)
-        (config_home / ".runpod" / "config.toml").write_text(
-            'apikey = "synthetic-test-key"\n', encoding="utf-8")
-        gate = self.root / "release-provider-read"
-        sitecustomize = self.root / "sitecustomize.py"
-        sitecustomize.write_text('''
+        factory_module = self.root / "detached_fake_provider.py"
+        factory_module.write_text('''
 import json
 import os
 import time
 from pathlib import Path
-import urllib.request
+from runpod_experiments.runpod import ProviderError
 
-class _Response:
-    def __enter__(self): return self
-    def __exit__(self, *_args): return False
-    def read(self, _size=-1):
-        return json.dumps({"pods": [], "pagination": {"hasNextPage": False}}).encode()
+class Client:
+    def pods(self):
+        gate = Path(os.environ["RUNPOD_TEST_RELEASE_FILE"])
+        deadline = time.monotonic() + 20
+        while not gate.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if not gate.exists(): raise TimeoutError("test provider read was not released")
+        return []
+    def pod(self, pod_id): raise ProviderError("missing", 404)
+    def cpu_offer(self, *_args, **_kwargs): return {}
+    def gpu_offer(self, *_args, **_kwargs): return {}
+    def pod_billing(self, *_args, **_kwargs): return {}
+    def ssh_key_fingerprints(self): return frozenset()
+    def _create_pod(self, _request): raise AssertionError("unexpected create")
+    def _delete_pod(self, _pod_id): raise AssertionError("unexpected delete")
 
-def _fake_urlopen(request, timeout=None):
-    if request.get_method() != "GET" or request.full_url != "https://api.runpod.io/v2/pods":
-        raise AssertionError("unexpected provider request in detached test")
-    gate = Path(os.environ["RUNPOD_TEST_RELEASE_FILE"])
-    deadline = time.monotonic() + 20
-    while not gate.exists() and time.monotonic() < deadline:
-        time.sleep(0.01)
-    if not gate.exists():
-        raise TimeoutError("parent did not release fake provider read")
-    return _Response()
-
-urllib.request.urlopen = _fake_urlopen
+def build(*, store, attempt_id, purpose):
+    Path(os.environ["RUNPOD_TEST_FACTORY_MARKER"]).write_text(
+        json.dumps({"attempt_id": attempt_id, "purpose": purpose}), encoding="utf-8")
+    return Client()
 ''', encoding="utf-8")
+        project = replace(
+            self.plan.project,
+            provider_factory="detached_fake_provider:build",
+            provider_factory_module_roots=(str(self.root),))
+        approval = replace(
+            self.plan.approval,
+            project_policy_sha256=sha256_bytes(encode_document("project_policy", project)))
+        plan = replace(self.plan, project=project, approval=approval)
+        config = StateStoreConfig(self.root / "detached-state", "TEST-HOST")
+        store = config.open_execution_store(plan.project.project_id, clock=lambda: self.now)
+        attempt = attempt_for(plan, "attempt-parent-exit", 1, self.now)
+        store.reserve_attempt(plan, attempt, pod_name(1))
+        control = self.root / "detached-control"
+        control.mkdir()
+        (control / "stop.request").touch()
+        gate = self.root / "release-provider-read"
+        factory_marker = self.root / "provider-factory-used.json"
         package_parent = Path(__import__("runpod_experiments").__file__).resolve().parent.parent
         source = '''
 import os
@@ -651,18 +928,26 @@ child = launch_execution_store(StateStoreConfig(state_root, "TEST-HOST"), attemp
 (root / "child.pid").write_text(str(child.pid), encoding="ascii")
 '''
         env = dict(os.environ)
-        env["HOME"] = str(config_home)
-        env["USERPROFILE"] = str(config_home)
-        env["PYTHONPATH"] = str(self.root) + os.pathsep + str(package_parent)
+        # The parent and child see only the shared package through the
+        # environment. The detached supervisor must receive the approved
+        # consumer module root from the stored project policy.
+        env["PYTHONPATH"] = str(package_parent)
         env["RUNPOD_TEST_RELEASE_FILE"] = str(gate)
+        env["RUNPOD_TEST_FACTORY_MARKER"] = str(factory_marker)
         process = subprocess.run(
             [sys.executable, "-c", source,
              str(package_parent), str(self.root),
-             str(config.state_root), str(control), self.plan.project.project_id,
+             str(config.state_root), str(control), plan.project.project_id,
              attempt.attempt_id, str(gate)],
             env=env, capture_output=True, text=True, timeout=30)
         self.assertEqual(process.returncode, 0, process.stderr)
         child_pid = int((self.root / "child.pid").read_text(encoding="ascii"))
+        factory_deadline = time.monotonic() + 20
+        while not factory_marker.exists() and time.monotonic() < factory_deadline:
+            time.sleep(0.02)
+        self.assertTrue(factory_marker.exists(), "supervisor did not load the policy-bound provider factory")
+        self.assertEqual(json.loads(factory_marker.read_text(encoding="utf-8")), {
+            "attempt_id": attempt.attempt_id, "purpose": "supervisor"})
         # The fake provider read is blocked until after the launcher parent exits.
         gate.touch()
         state_path = control / "supervisor.json"
