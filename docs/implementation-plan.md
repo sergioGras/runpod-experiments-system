@@ -532,11 +532,12 @@ all commitments before using an explicit state bridge; no import may reset a cap
 The read-only review confirms that the current shared package is a useful base,
 but the consumer cutovers still have concrete contract gaps:
 
-- Hybrid's binary SSH transport can use an `ExecutionStore` attempt, but the
-  serial engine currently launches and polls a workload process; it does not
-  drive a client-controlled request/response session. M7 needs a bounded
-  interactive workload interface. The protocol and its scientific checks stay
-  in Hybrid.
+- Hybrid's binary SSH transport can use an `ExecutionStore` attempt. The design
+  branch now includes an internal `InteractiveDriver` interface that runs a
+  bounded client-controlled request/response session under the serial engine's
+  supervisor and cleanup path. M7 still needs Hybrid conformance for its
+  protocol, failure behavior, hashes, and scientific checks; those remain in
+  Hybrid.
 - MIAP can delegate provider, attempt, SSH, and cleanup mechanics. Its exact
   one-use approval receipt, source/host binding, credential-delivery decision,
   and scientific acceptance remain in its adapter. Approval or accounting
@@ -550,11 +551,12 @@ but the consumer cutovers still have concrete contract gaps:
   parity alone is not evidence for this cutover.
 
 These findings came from source inspection only. No consumer source, state,
-package pin, or provider resource was changed. Complete the shared M6 contract
-and fault-injection gates, then qualify the interactive and chunk-transfer
-interfaces with local fakes before their respective consumer migrations. A
-consumer cutover also requires exact reconciliation of its existing attempts,
-controllers, and pending accounting in that project's own namespace.
+package pin, or provider resource was changed. The interactive interface has
+passed local fake-path coverage; complete the shared M6 contract and
+fault-injection gates, then qualify chunk transfer with local fakes before its
+consumer migration. A consumer cutover also requires exact reconciliation of
+its existing attempts, controllers, and pending accounting in that project's
+own namespace.
 
 ## M10 and M11: parallelism and completion
 

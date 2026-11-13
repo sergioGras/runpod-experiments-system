@@ -24,6 +24,7 @@ from runpod_experiments.create_spec import pod_create_request_sha256
 from runpod_experiments.errors import ExecutionError
 from runpod_experiments.execution_store import ExecutionStore
 from runpod_experiments.interactive_ssh import SSHInteractiveProcess
+from runpod_experiments.interactive_workload import InteractiveDriver
 from runpod_experiments.remote_process import start_python
 from runpod_experiments.run_collection import collect_owned_once
 from runpod_experiments.serial_engine import (
@@ -565,6 +566,148 @@ class StoreCreateControllerTests(unittest.TestCase):
         self.assertEqual(collector_limits["max_file_bytes"], plan.transfers.max_file_bytes)
         self.assertEqual(collector_limits["max_total_bytes"], plan.transfers.max_total_bytes)
         self.assertEqual(collector_limits["per_file_limits"], {"results.json": 0})
+
+    def test_serial_engine_drives_bounded_interactive_workload_under_supervision(self):
+        self.store.cancel_uncreated(self.attempt["attempt_id"])
+        worker = b"synthetic interactive worker"
+        transfer = TransferManifest((
+            ManifestFile("worker.py", sha256_bytes(worker), len(worker), TransferDirection.UPLOAD),
+            ManifestFile("results.json", ZERO, 0, TransferDirection.DOWNLOAD),
+        ), 4096, 8192)
+        plan = replace(self.plan, job_id="job-interactive", transfers=transfer)
+        attempt_id, pod_name = "attempt-interactive", "nebula-interactive-001"
+        attempt_plan = replace(
+            self.attempt_plan, attempt_id=attempt_id, job_id=plan.job_id,
+            request_sha256=pod_create_request_sha256(
+                plan.provisioning, self.attempt_plan.selected_resource, REGION, pod_name))
+        self.store.reserve_attempt(plan, attempt_plan, pod_name)
+        attempt = self.store.get_attempt(attempt_id)
+        source_root = self.root / "interactive-source"
+        source_root.mkdir()
+        (source_root / "worker.py").write_bytes(worker)
+
+        def create_pod(request):
+            receipt = SimpleNamespace(pod_id="pod-interactive-001", pod_name=request["name"])
+            self.set_live_cpu_detail(receipt)
+            self.client.inventory = [{"id": receipt.pod_id, "name": receipt.pod_name,
+                                      "status": "RUNNING"}]
+            return {"id": receipt.pod_id, "name": receipt.pod_name}
+
+        def delete_pod(pod_id):
+            self.assertEqual(pod_id, "pod-interactive-001")
+            self.client.inventory = []
+            self.client.detail["status"] = "TERMINATED"
+            return {"deleted": True}
+
+        self.client._create_pod = create_pod
+        self.client._delete_pod = delete_pod
+
+        def supervisor_launcher(_config, selected_attempt, project_id, directory):
+            directory = Path(directory)
+            directory.mkdir(parents=True, exist_ok=True)
+            monitor = StoreCleanupMonitor(
+                self.client, self.store, selected_attempt, project_id,
+                clock=lambda: self.now)
+            owner = self
+
+            class FakeSupervisor:
+                pid = os.getpid()
+                returncode = None
+
+                def poll(self):
+                    if self.returncode is not None:
+                        return self.returncode
+                    if not getattr(self, "ready", False):
+                        monitor.client.pods()
+                    stop = (directory / "stop.request").exists()
+                    outcome = monitor.observe(stop=stop)
+                    self.ready = True
+                    state = {
+                        "ready": True, "stopping": monitor.stopping,
+                        "terminated": outcome == "terminated", "pid": self.pid,
+                        "attempt_id": selected_attempt, "project_id": project_id,
+                        "deadline_epoch": attempt["deadline_epoch"],
+                        "attempt_sha256": attempt["attempt_sha256"],
+                        "policy_sha256": monitor.policy_sha256,
+                        "heartbeat_epoch": owner.now,
+                    }
+                    (directory / "supervisor.json").write_text(
+                        json.dumps(state) + "\n", encoding="utf-8")
+                    if outcome in ("terminated", "not_created"):
+                        self.returncode = 0
+                    return self.returncode
+
+            return FakeSupervisor()
+
+        class Collector:
+            def poll(self):
+                return None
+
+            def wait(self, timeout=None):
+                return 0
+
+        class InteractiveProcess:
+            def __init__(self):
+                self.returncode = None
+                self.sent = []
+
+            def send(self, data, timeout):
+                self.sent.append(data)
+
+            def receive(self, size, timeout):
+                if size != 3:
+                    raise AssertionError("driver requested an unexpected frame size")
+                return b"ack"
+
+            def poll(self):
+                return self.returncode
+
+            def close_stdin(self):
+                self.returncode = 0
+
+            def terminate(self):
+                self.returncode = -15
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+            def kill(self):
+                self.returncode = -9
+
+        interactive_process = InteractiveProcess()
+        engine = SerialExecutionEngine(
+            self.client, self.store, self.state_config,
+            supervisor_launcher=supervisor_launcher,
+            collector_launcher=lambda *_args, **_kwargs: Collector(),
+            uploader=lambda *_args, **_kwargs: 1,
+            interactive_process_factory=lambda *_args, **_kwargs: interactive_process,
+            clock=lambda: self.now, sleep=lambda _duration: None)
+        workload = AttemptWorkload(
+            source_root, self.root / "id_ed25519", self.root / "known_hosts",
+            "/tmp/nebula", "worker.py", (), 30, ("results.json",),
+            self.root / "interactive-artifacts")
+        (self.root / "id_ed25519").write_bytes(b"private-key-fixture")
+        (self.root / "known_hosts").write_text(
+            "[127.0.0.1]:2222 ssh-ed25519 fixture\n", encoding="utf-8")
+        received = {}
+
+        def drive(session):
+            session.send(b"request")
+            received["response"] = session.receive(3)
+            session.close_stdin()
+
+        result = engine.run_attempt(
+            plan, attempt_id, workload,
+            local_public_key_path=self.key_path,
+            interactive_driver=InteractiveDriver(drive, 64, 10),
+            cleanup_timeout_seconds=3)
+
+        self.assertEqual(interactive_process.sent, [b"request"])
+        self.assertEqual(received["response"], b"ack")
+        self.assertEqual(self.store.get_attempt(attempt_id)["state"], "terminated")
+        self.assertEqual(result.outcome.operational_status.value, "succeeded")
+        self.assertEqual(result.outcome.cleanup_status.value, "confirmed")
+        self.assertTrue(self.store.verify_attempt_lifecycle_projection(attempt_id))
 
     def test_serial_job_retries_only_after_a_clean_terminal_attempt(self):
         self.store.cancel_uncreated(self.attempt["attempt_id"])

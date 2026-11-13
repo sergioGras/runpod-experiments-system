@@ -17,6 +17,8 @@ from runpod_experiments.contracts import (
 )
 from runpod_experiments.errors import ExecutionError
 from runpod_experiments.execution_store import ExecutionStore
+from runpod_experiments.interactive_ssh import SSHInteractiveProcess
+from runpod_experiments.interactive_workload import InteractiveDriver, InteractiveSession
 from runpod_experiments.remote_process import start_python
 from runpod_experiments.state_config import StateStoreConfig
 from runpod_experiments.store_create import StoreCreateController
@@ -123,8 +125,8 @@ class SerialExecutionEngine:
     The caller reserves the immutable attempt first and remains responsible for
     approval, disclosure review, host-key trust and the scientific verdict. This
     coordinator never retries a scientific attempt or treats a process exit as
-    provider termination. A proxy workload must supply its own process launcher;
-    the common proxy transport only supports finite shell commands and files.
+    provider termination. Proxy workloads must supply a process launcher;
+    interactive binary sessions are supported only on the direct SSH route.
     """
 
     def __init__(self, client, store: ExecutionStore, state_config: StateStoreConfig, *,
@@ -133,6 +135,7 @@ class SerialExecutionEngine:
                  create_controller_factory: Callable = StoreCreateController,
                  uploader: Callable = upload_bundle,
                  process_launcher: Callable = start_python,
+                 interactive_process_factory: Callable = SSHInteractiveProcess,
                  clock=time.time, monotonic=time.monotonic, sleep=time.sleep):
         if not isinstance(store, ExecutionStore) or not isinstance(state_config, StateStoreConfig):
             raise TypeError("store and state_config must be configured shared-library objects")
@@ -144,12 +147,20 @@ class SerialExecutionEngine:
         self.collector_launcher = collector_launcher
         self.create_controller_factory = create_controller_factory
         self.uploader, self.process_launcher = uploader, process_launcher
+        self.interactive_process_factory = interactive_process_factory
         self.clock, self.monotonic, self.sleep = clock, monotonic, sleep
 
     def _validate_workload(self, plan: ExecutionPlan, attempt: dict,
-                           workload: AttemptWorkload) -> dict[str, str]:
+                           workload: AttemptWorkload,
+                           interactive_driver: InteractiveDriver | None = None) -> dict[str, str]:
         if not isinstance(plan, ExecutionPlan) or not isinstance(workload, AttemptWorkload):
             raise TypeError("plan and workload must use the shared typed contracts")
+        if (interactive_driver is not None and
+                not isinstance(interactive_driver, InteractiveDriver)):
+            raise TypeError("interactive_driver must use the bounded shared contract")
+        if interactive_driver is not None and workload.ssh_route != "direct":
+            raise ExecutionError(FailureCategory.CONFIGURATION,
+                                 "interactive_proxy_route_unsupported")
         self.store.verify_execution_plan(attempt["attempt_id"], plan)
         if (plan.project.project_id != self.store.project_id or
                 plan.approval.controller_host != self.store.controller_host or
@@ -374,6 +385,7 @@ class SerialExecutionEngine:
 
     def run_attempt(self, plan: ExecutionPlan, attempt_id: str, workload: AttemptWorkload, *,
                     local_public_key_path: str | Path,
+                    interactive_driver: InteractiveDriver | None = None,
                     cleanup_timeout_seconds: int = 180) -> SerialAttemptResult:
         """Run one new reserved attempt; do not retry or replay a started stage."""
         if type(cleanup_timeout_seconds) is not int or not 1 <= cleanup_timeout_seconds <= 3600:
@@ -387,7 +399,8 @@ class SerialExecutionEngine:
             raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
                                  "attempt_stage_recovery_required")
         try:
-            bundle = self._validate_workload(plan, attempt, workload)
+            bundle = self._validate_workload(plan, attempt, workload,
+                                             interactive_driver=interactive_driver)
             attempt_directory, supervisor_directory = self._prepare_attempt_directory(attempt_id)
         except BaseException:
             try:
@@ -489,17 +502,48 @@ class SerialExecutionEngine:
                                    attempt, policy_sha256)
 
             start("workload")
-            workload_process = self.process_launcher(
-                self.client, self.store, attempt_id, project, workload.key_file,
-                workload.known_hosts, workload.remote_root, workload.script,
-                list(workload.arguments), workload.timeout_seconds,
-                attempt_directory / "workload.log")
-            if not callable(getattr(workload_process, "poll", None)):
-                raise ExecutionError(FailureCategory.TRANSPORT_FAILURE,
-                                     "workload_process_invalid")
             end = self.monotonic() + min(
                 self.store.attempt_runtime_seconds(attempt_id),
                 max(0, attempt["deadline_epoch"] - self.clock()))
+            if interactive_driver is None:
+                workload_process = self.process_launcher(
+                    self.client, self.store, attempt_id, project, workload.key_file,
+                    workload.known_hosts, workload.remote_root, workload.script,
+                    list(workload.arguments), workload.timeout_seconds,
+                    attempt_directory / "workload.log")
+            else:
+                remaining = end - self.monotonic()
+                if remaining <= 0:
+                    raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                         "attempt_deadline_reached")
+                interactive_timeout = min(workload.timeout_seconds,
+                                           max(1, math.ceil(remaining)))
+                workload_process = self.interactive_process_factory(
+                    self.client, self.store, attempt_id, project, workload.key_file,
+                    workload.known_hosts, workload.remote_root, workload.script,
+                    list(workload.arguments), interactive_timeout,
+                    attempt_directory / "workload.log")
+            if not callable(getattr(workload_process, "poll", None)):
+                raise ExecutionError(FailureCategory.TRANSPORT_FAILURE,
+                                     "workload_process_invalid")
+            if interactive_driver is not None:
+                def check_interactive_health() -> None:
+                    self._check_supervisor(supervisor_process, supervisor_directory,
+                                           attempt, policy_sha256)
+                    if collector_process.poll() is not None:
+                        raise ExecutionError(FailureCategory.TRANSPORT_FAILURE,
+                                             "collector_process_exited")
+                    if self.clock() >= attempt["deadline_epoch"]:
+                        raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                             "attempt_deadline_reached")
+
+                session = InteractiveSession(
+                    workload_process, check=check_interactive_health, deadline=end,
+                    max_message_bytes=interactive_driver.max_message_bytes,
+                    max_io_timeout_seconds=interactive_driver.max_io_timeout_seconds,
+                    monotonic=self.monotonic, sleep=self.sleep)
+                interactive_driver.run(session)
+                check_interactive_health()
             exit_code = workload_process.poll()
             while exit_code is None:
                 self._check_supervisor(supervisor_process, supervisor_directory,
@@ -593,6 +637,7 @@ class SerialExecutionEngine:
                 reserve_next: Callable[[int, SerialAttemptResult],
                                        tuple[str, AttemptWorkload] | None],
                 local_public_key_path: str | Path,
+                interactive_driver: InteractiveDriver | None = None,
                 cleanup_timeout_seconds: int = 180) -> SerialJobResult:
         """Run a finite retry policy across newly reserved, sequential attempts.
 
@@ -618,6 +663,7 @@ class SerialExecutionEngine:
             result = self.run_attempt(
                 plan, attempt_id, current_workload,
                 local_public_key_path=local_public_key_path,
+                interactive_driver=interactive_driver,
                 cleanup_timeout_seconds=cleanup_timeout_seconds)
             results.append(result)
             if result.outcome.operational_status is OperationalStatus.SUCCEEDED:
