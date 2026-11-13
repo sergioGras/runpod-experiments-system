@@ -66,6 +66,37 @@ approval to another project.
 
 ## Ordered remaining work
 
+### Immediate implementation slice after this audit
+
+Source review at `5fec8af` identified a concrete setup-cleanup risk:
+`run_attempt` calls `setup_process.poll()` outside its cleanup error guard in
+`finally`. A poll exception, or a launcher result without a callable poll method,
+can escape before `_cleanup` requests provider termination. This is a source
+control-flow finding; a regression reproduction has not yet been run. The
+previous continuation inspected source only and added no tests or fixes.
+
+The next focused milestone should:
+
+1. Reproduce invalid setup handles and poll errors with a fake provider, then
+   ensure local setup-process inspection/termination errors cannot bypass the
+   independent provider cleanup path. Preserve the original setup failure and
+   record useful sanitized cleanup evidence.
+2. Exercise nonzero setup exit, configured setup timeout and supervisor loss
+   during setup. Assert that collector/workload launch never follows failure,
+   exact provider cleanup runs, and accounting exposure remains pending until
+   separately reconciled.
+3. Exercise terminate/wait/kill failures without suppressing provider cleanup.
+   Keep every wait finite and report unconfirmed cleanup honestly.
+4. Add deterministic WAL retry exhaustion and SQLite error-code cases, including
+   extended busy/locked codes and immediate rejection of unrelated codes.
+5. Run focused regressions and the relevant store/engine suites. A source fix
+   then warrants the broader offline suite and a fresh installed artifact check;
+   record the actual results before committing the completed milestone.
+
+This milestone changes common behavior only. Consumer adapters can be prepared
+in isolated checkouts after these cleanup guarantees are established; production
+cutovers still require reconciliation and consumer acceptance.
+
 | Order | Work and deliverable | Completion criterion |
 | --- | --- | --- |
 | 1 | Finish the common fault matrix. Map requirements to concrete tests; add setup nonzero/timeout/supervisor-loss cases, termination failure handling and bounded WAL exhaustion/error-code cases. Review remaining clock/reboot, collector and recovery scenarios. | Each required scenario has a passing test or a named unsupported capability; failure never launches the next stage or bypasses cleanup/accounting. |
