@@ -1553,10 +1553,18 @@ class StoreCreateControllerTests(unittest.TestCase):
         self.assertEqual(json.loads(names_path.read_text(encoding="utf-8")), names)
         limits_path = collector_directory / "collection-limits.json"
         self.assertEqual(json.loads(limits_path.read_text(encoding="utf-8")), {
+            "schema_version": 1,
             "max_file_bytes": 64, "max_total_bytes": 96,
             "per_file_limits": {"results/out.bin": 32},
             "collection_timeout_seconds": 600,
             "collection_chunk_bytes": 262_144})
+        with self.assertRaisesRegex(ValueError, "limits differ"):
+            launch_execution_store(
+                self.state_config, self.attempt["attempt_id"], self.project.project_id,
+                artifact_directory, names, private_key, known_hosts, "/tmp/nebula",
+                max_file_bytes=64, max_total_bytes=96,
+                per_file_limits={"results/out.bin": 32}, timeout_seconds=601,
+                chunk_bytes=262_144, popen=popen)
         with self.assertRaises(ValueError):
             launch_execution_store(
                 self.state_config, self.attempt["attempt_id"], self.project.project_id,
@@ -1585,6 +1593,11 @@ class StoreCreateControllerTests(unittest.TestCase):
                          "results/out.bin")
         self.assertEqual(collected_settings["timeout_seconds"], 600)
         self.assertEqual(collected_settings["chunk_bytes"], 262_144)
+        saved_limits = json.loads(limits_path.read_text(encoding="utf-8"))
+        saved_limits["schema_version"] = 99
+        limits_path.write_text(json.dumps(saved_limits), encoding="utf-8")
+        with patch("sys.argv", cli), self.assertRaisesRegex(ValueError, "unsupported schema"):
+            entry.main()
 
     def test_missing_region_or_changed_quote_blocks_create(self):
         self.client.cpu_offer = lambda *_args: {

@@ -383,12 +383,12 @@ options. Wheel SHA-256:
 `a3336edf22abd5da6ceb78b6ce78137bfa04aabf5975a0afcaf3ec748512ed06`. No
 RunPod account, credential, SSH endpoint or resource was contacted.
 
-This is a validated implementation slice, not M6 completion. A successful GPU
-attempt remains blocked by the missing independent per-card VRAM runtime
-evidence seam; recovery when the supervisor itself has died is deliberately
-manual; scientific output verification, secret delivery and consumer-specific
-approval integration remain open. Do not update consumer pins until their
-separate acceptance gates pass.
+This is a validated M6.1 implementation slice, not M6 completion. At this stage
+GPU attempts were blocked by the missing independent per-card VRAM evidence
+seam; M6.3 below adds the synthetic-tested supervisor-owned path. Recovery when
+the supervisor itself has died remains manual; scientific output verification,
+secret delivery and consumer-specific approval integration remain open. Do not
+update consumer pins until their separate acceptance gates pass.
 
 ### M6.2: GPU evidence contract foundation (not an admission path)
 
@@ -484,8 +484,10 @@ bounded `upload_timeout_seconds`, `upload_chunk_bytes`,
 at 3600 seconds and chunks at 1,000,000 bytes. The upload timeout bounds one
 reviewed bundle transfer; the collection timeout bounds each file retrieval and
 is clamped to the immutable attempt deadline. Detached collector settings are
-persisted alongside byte limits and checked against its launch arguments. This
-allows Partition to supply its existing 1200/600-second windows and 256 KiB
+persisted in a versioned limits file alongside byte limits and checked against
+its launch arguments; unknown versions fail closed and the prior default-only
+format remains readable. This allows Partition to supply its existing
+1200/600-second windows and 256 KiB
 chunks without changing common defaults. Focused upload/proxy/collector/engine
 tests passed (31 tests); the full suite passed 196 tests with one existing
 platform-capability skip. A fresh isolated wheel installed and imported the
@@ -508,6 +510,17 @@ displayed its options. Wheel `0.2.0.dev0` SHA-256:
 `0f29d8fce43afdd712c69f74ff49b82e7546dbfa90984e1620efee0e0bf827a`. No provider,
 consumer source, pin or state was touched. This is synthetic recovery evidence;
 it does not establish recovery if the independent supervisor has died.
+
+Collector-settings compatibility follow-up (2026-11-13): the persisted transfer
+limits document now has schema version 1. The detached process accepts the prior
+default-only format for compatibility, rejects unknown/malformed versions, and
+rejects a relaunch when the persisted settings differ from its arguments. The
+full offline suite again passed 198 tests with one existing platform-capability
+skip. A fresh isolated wheel imported the schema version and serial/transfer
+modules, and the installed collector CLI displayed its options. Wheel
+`0.2.0.dev0` SHA-256:
+`41b29e8e8f07eeb32d3a9fe273c15908509da8ab4a131fe035c5c33ae91c9733`.
+No consumer or provider state was accessed.
 
 ### Store-backed one-shot create slice (internal; qualification remains open)
 

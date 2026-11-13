@@ -184,9 +184,11 @@ settings. The library validates them against a one-hour operation ceiling and a
 one-million-byte chunk ceiling. Upload timeout bounds the complete reviewed bundle
 transfer; collection timeout bounds each file retrieval and is further clamped to
 the immutable attempt deadline. The detached collector records its effective byte,
-timeout and chunk settings in attempt-local state and rejects a relaunch whose
-settings differ. Project values such as Partition's 256 KiB chunks and 600-second
-collection timeout remain caller configuration rather than shared defaults.
+timeout and chunk settings in a versioned attempt-local limits file, accepts only
+the prior default-only format or the current schema, and rejects unknown versions
+or relaunch settings that differ. Project values such as Partition's 256 KiB
+chunks and 600-second collection timeout remain caller configuration rather than
+shared defaults.
 
 Host-key trust is explicit policy. Approved model credentials use an ephemeral
 delivery channel and never enter plan serialization, argument logs, diagnostics,

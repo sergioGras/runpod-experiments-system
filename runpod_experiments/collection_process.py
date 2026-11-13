@@ -18,6 +18,8 @@ from runpod_experiments.transfer import (
     validate_chunk_bytes, validate_timeout_seconds,
 )
 
+COLLECTION_LIMITS_SCHEMA_VERSION = 1
+
 
 def launch(ledger_path, attempt_id, project_id, directory, artifact_directory, names, key_file, known_hosts, remote_root,
            *, max_file_bytes=10_000_000, max_total_bytes=100_000_000,
@@ -161,12 +163,20 @@ def main():
     saved_limits = (json.loads(Path(args.limits).read_text(encoding="utf-8"))
                     if args.limits else None)
     if saved_limits is not None:
-        old_keys = {"max_file_bytes", "max_total_bytes", "per_file_limits"}
-        new_keys = old_keys | {"collection_timeout_seconds", "collection_chunk_bytes"}
-        if (not isinstance(saved_limits, dict) or
-                saved_limits.get("max_file_bytes") != args.max_file_bytes or
+        legacy_keys = {"max_file_bytes", "max_total_bytes", "per_file_limits"}
+        versioned_keys = legacy_keys | {
+            "schema_version", "collection_timeout_seconds", "collection_chunk_bytes"}
+        if not isinstance(saved_limits, dict):
+            raise ValueError("Collector limit file has an unsupported schema")
+        keys = set(saved_limits)
+        legacy_schema = keys == legacy_keys
+        current_schema = (keys == versioned_keys and
+                          type(saved_limits.get("schema_version")) is int and
+                          saved_limits["schema_version"] == COLLECTION_LIMITS_SCHEMA_VERSION)
+        if (not legacy_schema and not current_schema):
+            raise ValueError("Collector limit file has an unsupported schema")
+        if (saved_limits.get("max_file_bytes") != args.max_file_bytes or
                 saved_limits.get("max_total_bytes") != args.max_total_bytes or
-                set(saved_limits) not in (old_keys, new_keys) or
                 saved_limits.get("collection_timeout_seconds",
                                  DEFAULT_COLLECTION_TIMEOUT_SECONDS) != args.timeout_seconds or
                 saved_limits.get("collection_chunk_bytes",
@@ -218,7 +228,8 @@ def _validate_transfer_limits(names, max_file_bytes, max_total_bytes, per_file_l
                 for value in per_file_limits.values()) or
             sum(per_file_limits.values()) > max_total_bytes):
         raise ValueError("Invalid per-file result limits")
-    return {"max_file_bytes": max_file_bytes, "max_total_bytes": max_total_bytes,
+    return {"schema_version": COLLECTION_LIMITS_SCHEMA_VERSION,
+            "max_file_bytes": max_file_bytes, "max_total_bytes": max_total_bytes,
             "per_file_limits": per_file_limits,
             "collection_timeout_seconds": timeout_seconds,
             "collection_chunk_bytes": chunk_bytes}
