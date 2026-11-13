@@ -151,6 +151,102 @@ class AttemptTests(unittest.TestCase):
             self.assertTrue(state["terminated"])
             self.assertEqual(monitor.calls, [False, True])
 
+    def test_supervisor_restart_reuses_persisted_monotonic_deadline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            class FakeClient:
+                def pods(self): return []
+            class FakeMonitor:
+                client = FakeClient()
+                attempt_id, project_id, policy, stopping = "a", "hybrid-inference", None, False
+                def __init__(self): self.calls = []
+                def observe(self, stop=False):
+                    self.calls.append(stop)
+                    return "terminated" if stop else "active"
+
+            boot = {"kind": "linux_boot_uuid", "value": "01234567-89ab-cdef-0123-456789abcdef"}
+            first = FakeMonitor()
+            state = run_supervisor(
+                first, directory, 110, interval=1, clock=lambda: 100,
+                monotonic=lambda: 1000, sleep=lambda _: None, max_polls=1,
+                boot_identity_provider=lambda: boot)
+            self.assertEqual(first.calls, [False])
+            self.assertEqual(state["monotonic_deadline"], 1010)
+
+            restarted = FakeMonitor()
+            state = run_supervisor(
+                restarted, directory, 110, interval=1, clock=lambda: 101,
+                monotonic=lambda: 1011, sleep=lambda _: None, max_polls=1,
+                boot_identity_provider=lambda: boot)
+            self.assertEqual(restarted.calls, [True])
+            self.assertEqual(state["stop_reason"], "supervisor_deadline")
+
+    def test_supervisor_restart_after_boot_change_latches_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            class FakeClient:
+                def pods(self): return []
+            class FakeMonitor:
+                client = FakeClient()
+                attempt_id, project_id, policy, stopping = "a", "hybrid-inference", None, False
+                def __init__(self): self.calls = []
+                def observe(self, stop=False):
+                    self.calls.append(stop)
+                    return "terminated" if stop else "active"
+
+            first_boot = {"kind": "linux_boot_uuid", "value": "01234567-89ab-cdef-0123-456789abcdef"}
+            second_boot = {"kind": "linux_boot_uuid", "value": "fedcba98-7654-3210-fedc-ba9876543210"}
+            run_supervisor(
+                FakeMonitor(), directory, 200, interval=1, clock=lambda: 100,
+                monotonic=lambda: 10, sleep=lambda _: None, max_polls=1,
+                boot_identity_provider=lambda: first_boot)
+
+            restarted = FakeMonitor()
+            state = run_supervisor(
+                restarted, directory, 200, interval=1, clock=lambda: 101,
+                monotonic=lambda: 11, sleep=lambda _: None, max_polls=1,
+                boot_identity_provider=lambda: second_boot)
+            self.assertEqual(restarted.calls, [True])
+            self.assertEqual(state["stop_reason"], "host_boot_identity_changed")
+
+    def test_supervisor_latches_wall_clock_rollback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            class FakeClient:
+                def pods(self): return []
+            class FakeMonitor:
+                client = FakeClient()
+                attempt_id, project_id, policy, stopping = "a", "hybrid-inference", None, False
+                def __init__(self): self.calls = []
+                def observe(self, stop=False):
+                    self.calls.append(stop)
+                    return "terminated" if stop else "active"
+
+            wall = iter([100, 100, 100, 90, 90])
+            ticks = iter([0, 0, 1])
+            monitor = FakeMonitor()
+            state = run_supervisor(
+                monitor, directory, 200, interval=1, clock=lambda: next(wall),
+                monotonic=lambda: next(ticks), sleep=lambda _: None, max_polls=2,
+                boot_identity_provider=lambda: {
+                    "kind": "linux_boot_uuid", "value": "01234567-89ab-cdef-0123-456789abcdef"})
+            self.assertEqual(monitor.calls, [False, True])
+            self.assertEqual(state["stop_reason"], "wall_clock_moved_backwards")
+
+    def test_supervisor_fails_closed_without_boot_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            class FakeClient:
+                def pods(self): return []
+            class FakeMonitor:
+                client = FakeClient()
+                attempt_id, project_id, policy, stopping = "a", "hybrid-inference", None, False
+                calls = []
+                def observe(self, stop=False): self.calls.append(stop)
+
+            monitor = FakeMonitor()
+            with self.assertRaisesRegex(RuntimeError, "host_boot_identity_unavailable"):
+                run_supervisor(
+                    monitor, directory, 200, max_polls=1,
+                    boot_identity_provider=lambda: None)
+            self.assertEqual(monitor.calls, [])
+
     def test_supervisor_reconciles_claimed_unique_create_after_controller_loss(self):
         with tempfile.TemporaryDirectory() as directory:
             ledger = AttemptLedger(Path(directory) / "runs.sqlite")

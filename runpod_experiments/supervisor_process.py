@@ -9,6 +9,9 @@ from pathlib import Path
 from runpod_experiments.attempts import AttemptLedger
 from runpod_experiments.contracts import ResourceKind
 from runpod_experiments.execution_store import ExecutionStore
+from runpod_experiments.host_identity import (
+    current_boot_identity, supervisor_process_lock,
+)
 from runpod_experiments.runpod import RunPodClient
 from runpod_experiments.resource_policy import ResourcePolicy
 from runpod_experiments.state_config import StateStoreConfig
@@ -144,14 +147,26 @@ def main():
             gpu_ssh_key_file=args.gpu_ssh_key_file,
             gpu_known_hosts=args.gpu_known_hosts,
             supervisor_directory=args.directory)
-    client = RunPodClient.from_config()
-    monitor = monitor_factory(client)
+    if current_boot_identity() is None:
+        raise RuntimeError("host_boot_identity_unavailable")
     if os.name == "nt":
         # Prevent automatic idle sleep while the independently supervised Pod exists.
         if not ctypes.windll.kernel32.SetThreadExecutionState(0x80000001):
             raise RuntimeError("Could not prevent automatic idle sleep")
     try:
-        run_supervisor(monitor, args.directory, args.deadline)
+        with supervisor_process_lock(args.directory):
+            supervisor_directory = Path(args.directory)
+            state_path = supervisor_directory / "supervisor.json"
+            create_claimed = (attempt.get("create_claimed") is True or
+                              type(attempt.get("create_claimed")) is int and
+                              attempt.get("create_claimed") == 1)
+            if create_claimed and (not state_path.is_file() or state_path.is_symlink()):
+                stop_path = supervisor_directory / "stop.request"
+                if not stop_path.is_symlink():
+                    stop_path.touch(exist_ok=True)
+            client = RunPodClient.from_config()
+            monitor = monitor_factory(client)
+            run_supervisor(monitor, args.directory, args.deadline)
     finally:
         if os.name == "nt":
             ctypes.windll.kernel32.SetThreadExecutionState(0x80000000)

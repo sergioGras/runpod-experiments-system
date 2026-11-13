@@ -90,17 +90,41 @@ verify the collector and workload do not start after setup failure and provider
 cleanup is still attempted; an unconfirmed local process stop is reported for
 reconciliation. WAL tests cover transient text locks, extended
 `SQLITE_BUSY_SNAPSHOT`, non-retryable I/O errors and deadline exhaustion. The
-full suite passed 207 tests with one platform-capability skip. Wheel and sdist
-`0.2.0.dev0` both installed in a clean venv, and the execution-store and
-serial-engine imports were asserted to originate under that venv's
+full suite passed 216 tests with one platform-capability skip. Wheel and sdist
+`0.2.0.dev0` both installed in clean venvs, and the execution-store and
+serial-engine imports were asserted to originate under their respective
 `site-packages`. The installed `runpod-experiment-supervisor --help` entry point
 loaded. The detached-supervisor parent-exit test passed from both installed
 environments. The sdist archive audit found only package source, build metadata,
 and generic tests; no run data, credentials, weights, checkpoints, or consumer
 tracking files were present. SHA-256 hashes:
 
-- Wheel: `61fb65f5a349440b8c5d1acea61a25ce3e73c7eccfbc73383bbb4114e90dfd9d`
-- Sdist: `e1215eb51782dbe2f44b56e60d5a6b938b41beab89f34a89b251e573f432f6d1`
+- Wheel: `7c6f9fc32524450a41a8d68a0e38abfe9d804ac838a217078f7f6a19a5c7cf11`
+- Sdist: `fdb83a5221f2df2e50ad130566e832b891f2456608703490a2ba0f90574f97e5`
+
+### Host reboot and deadline slice
+
+Review found that a restarted supervisor rebuilt its monotonic deadline from
+current wall time and had no persisted OS boot identity. The supervisor now
+reuses its original monotonic deadline only when the persisted attempt, policy
+and boot identity still match. A changed boot, invalid prior state or backward
+wall-clock movement latches cleanup; unsupported operating systems fail before
+provider credentials are loaded. Synthetic tests cover same-boot restart,
+reboot, clock rollback and unavailable boot identity. Linux uses the kernel boot
+UUID; Windows uses an uptime-derived boot-time estimate with a conservative
+five-second comparison tolerance. Other platforms remain unsupported pending a
+qualified boot identity source.
+
+The supervisor also takes an OS-released per-attempt process lock to prevent
+duplicate monitors. If a create was claimed but supervisor state is missing on
+relaunch, it latches stop before provider access. State symlinks fail closed.
+These paths are covered by the local suite and real detached-process check.
+
+This closes local deadline-renewal paths. It does not provide provider-side
+expiry, survive host power loss, or attest the configured controller-host label
+to a physical machine. The Windows identity is an estimate; clock adjustment
+between process starts can trigger conservative cleanup. Linux runtime and
+host-specific restart behavior still need qualification.
 
 This milestone changes common behavior only. Consumer adapters can be prepared
 in isolated checkouts after these cleanup guarantees are established; production
@@ -108,7 +132,7 @@ cutovers still require reconciliation and consumer acceptance.
 
 | Order | Work and deliverable | Completion criterion |
 | --- | --- | --- |
-| 1 | Close the remaining common fault matrix. Setup exit/timeout/supervisor-loss, process-stop failure and bounded WAL exhaustion/error-code coverage are complete. Review clock/reboot, collector and recovery scenarios and fill any demonstrated gaps. | Each required scenario has a passing test or a named unsupported capability; failure never launches the next stage or bypasses cleanup/accounting. |
+| 1 | Close the remaining common fault matrix. Setup exit/timeout/supervisor-loss, process-stop failure, bounded WAL exhaustion/error-code coverage, and local deadline/boot-change latching are implemented. Review collector and recovery scenarios and fill any demonstrated gaps. | Each required scenario has a passing test or a named unsupported capability; failure never launches the next stage or bypasses cleanup/accounting. |
 | 2 | Freeze a serial integration candidate. Review public vs internal APIs, schemas, direct/proxy launcher capabilities and approved secret-delivery needs. Build and inspect wheel plus sdist, preserve hashes and a durable artifact. | Clean isolated installs and documented module origins; secret values absent from plans/argv/logs/artifacts; supported capabilities and migration rules explicit. |
 | 3 | Qualify deployment without paid compute. Exercise the exact installed artifact and interpreter through detached supervision, parent exit, PID and package identity checks. Define canonical project state roots, host identities and ACLs. | Host-specific evidence includes source/artifact/environment and actual child identity; unsupported OS/host combinations remain explicitly unsupported. |
 | 4 | Prepare Hybrid adapter and offline acceptance in an isolated checkout. Preserve framing, local trusted-client work, setup verification and scientific acceptance. Replace sibling-path loading with the immutable package pin. | Existing protocol/failure/integrity checks pass through the common engine; deployment/source bindings and rollback are reviewable. Reconcile active legacy controls before changing their runtime or state. |

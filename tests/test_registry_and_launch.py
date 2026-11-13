@@ -99,6 +99,7 @@ entry.main()
                            check=True, timeout=30, capture_output=True)
             self.assertEqual(ledger.get("attempt-1")["state"], "terminated")
             self.assertTrue(json.loads((root / "control/supervisor.json").read_text())["terminated"])
+            self.assertTrue((root / "control/stop.request").exists())
 
     def test_collector_entrypoint_in_real_local_subprocess(self):
         with tempfile.TemporaryDirectory() as directory:

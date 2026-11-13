@@ -143,8 +143,14 @@ real coordination; shared code, Git or a local file do not supply that service.
 Keep owner-imposed expiry separate from finite operational windows. A technical
 window or host proof may be renewed within the approval only when its contract
 allows it. Never extend an actual owner deadline or modify an active attempt's
-immutable plan. Persist UTC deadlines and boot/host identity; monotonic values are
-valid only within their originating process/boot context.
+immutable plan. Persist UTC deadlines, boot identity and the original monotonic
+deadline. A same-boot process restart reuses that monotonic deadline; a detected
+boot change or backward wall-clock movement latches cleanup. Monotonic deadlines
+are not portable across boots. Current boot detection supports Linux's kernel
+boot UUID and a Windows boot-time estimate; other platforms fail closed until
+they have a qualified identity source. A Windows clock discontinuity can cause a
+conservative cleanup decision. The configured controller-host label remains an
+operator assignment, not physical-host attestation.
 
 The retry policy classifies outcomes: transient read/transport failures, verified
 capacity rejection, setup failure requiring correction, scientific failure,
@@ -168,10 +174,11 @@ location, storage, mounts and ports against the admitted plan.
 
 A separately qualified supervisor starts before create. It verifies plan identity,
 freshness, real interpreter/PID and loaded package digest. Stop is latched across
-restart and telemetry failures; provider absence requires reconciled detail and
-inventory evidence. A detached-process flag, heartbeat or keep-awake request is
-not proof of survival through the controlling tool's exit or host power loss.
-Record provider-side expiry support and whether it was actually configured.
+process restarts and telemetry failures; provider absence requires reconciled
+detail and inventory evidence. A detached-process flag, heartbeat or keep-awake
+request is not proof of survival through the controlling tool's exit or host
+power loss. Record provider-side expiry support and whether it was actually
+configured.
 
 Use bounded direct SSH first, with a qualified proxy transport for required
 consumers. Unify small bundles, streaming files and archives under manifests with

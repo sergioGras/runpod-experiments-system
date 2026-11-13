@@ -16,6 +16,9 @@ from runpod_experiments.gpu_runtime import (
     GPU_RUNTIME_ATTESTATION_GRACE_SECONDS, GPURuntimeEvidenceError,
     gpu_profile_sha256, validate_gpu_attestation, validate_gpu_observation,
 )
+from runpod_experiments.host_identity import (
+    current_boot_identity, same_boot_identity, valid_boot_identity,
+)
 from runpod_experiments.ownership import delete_attempt
 from runpod_experiments.ownership import request_delete_for_store_attempt
 from runpod_experiments.provider import ProviderAdapter
@@ -517,7 +520,8 @@ class StoreCleanupMonitor:
 
 
 def run_supervisor(monitor, directory, deadline_epoch, *, interval=10, error_limit=3,
-                   clock=time.time, monotonic=time.monotonic, sleep=time.sleep, max_polls=None):
+                   clock=time.time, monotonic=time.monotonic, sleep=time.sleep,
+                   max_polls=None, boot_identity_provider=current_boot_identity):
     """Persist heartbeats and keep attempting cleanup after a stop or errors.
 
     Caller must start and qualify this loop in a separate process before any
@@ -552,10 +556,80 @@ def run_supervisor(monitor, directory, deadline_epoch, *, interval=10, error_lim
             state.pop("gpu_runtime_error_code", None)
         else:
             state["gpu_runtime_error_code"] = monitor.gpu_runtime_error_code
-    initial_remaining = max(0, deadline_epoch - clock())
-    monotonic_start = monotonic()
+    boot_identity = boot_identity_provider()
+    if not valid_boot_identity(boot_identity):
+        raise RuntimeError("host_boot_identity_unavailable")
+    now = clock()
+    monotonic_now = monotonic()
+    if (isinstance(now, bool) or not isinstance(now, (int, float)) or not math.isfinite(now) or
+            isinstance(monotonic_now, bool) or not isinstance(monotonic_now, (int, float)) or
+            not math.isfinite(monotonic_now)):
+        raise ValueError("Invalid supervisor clock")
+
+    monotonic_deadline = monotonic_now + max(0.0, deadline_epoch - now)
+    last_wall_epoch = now
+    if state_path.is_symlink():
+        state["stopping"] = True
+        state["stop_reason"] = "supervisor_state_symlink"
+        monotonic_deadline = monotonic_now
+    elif state_path.exists():
+        try:
+            previous = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            previous = None
+        if isinstance(previous, dict):
+            if not same_boot_identity(previous.get("boot_identity"), boot_identity):
+                state["stopping"] = True
+                state["stop_reason"] = "host_boot_identity_changed"
+                monotonic_deadline = monotonic_now
+            elif (previous.get("attempt_id") != monitor.attempt_id or
+                    previous.get("project_id") != monitor.project_id or
+                    previous.get("deadline_epoch") != deadline_epoch or
+                    previous.get("attempt_sha256") != attempt_sha256 or
+                    previous.get("policy_sha256") != policy_sha256):
+                state["stopping"] = True
+                state["stop_reason"] = "supervisor_state_identity_mismatch"
+                monotonic_deadline = monotonic_now
+            else:
+                prior_deadline = previous.get("monotonic_deadline")
+                prior_heartbeat = previous.get("heartbeat_epoch")
+                if (isinstance(prior_deadline, bool) or
+                        not isinstance(prior_deadline, (int, float)) or
+                        not math.isfinite(prior_deadline) or
+                        isinstance(prior_heartbeat, bool) or
+                        not isinstance(prior_heartbeat, (int, float)) or
+                        not math.isfinite(prior_heartbeat)):
+                    state["stopping"] = True
+                    state["stop_reason"] = "supervisor_state_invalid"
+                    monotonic_deadline = monotonic_now
+                else:
+                    monotonic_deadline = float(prior_deadline)
+                    last_wall_epoch = float(prior_heartbeat)
+                    state["stopping"] = state["stopping"] or previous.get("stopping") is True
+                    if previous.get("stop_reason") is not None:
+                        state["stop_reason"] = previous["stop_reason"]
+        else:
+            state["stopping"] = True
+            state["stop_reason"] = "supervisor_state_invalid"
+            monotonic_deadline = monotonic_now
+    state["boot_identity"] = boot_identity
+    state["monotonic_deadline"] = monotonic_deadline
+
     while max_polls is None or polls < max_polls:
-        if clock() >= deadline_epoch or monotonic() - monotonic_start >= initial_remaining or stop_path.exists():
+        now = clock()
+        monotonic_now = monotonic()
+        if (isinstance(now, bool) or not isinstance(now, (int, float)) or not math.isfinite(now) or
+                isinstance(monotonic_now, bool) or not isinstance(monotonic_now, (int, float)) or
+                not math.isfinite(monotonic_now)):
+            state["stopping"] = True
+            state["stop_reason"] = "supervisor_clock_invalid"
+        elif now < last_wall_epoch:
+            state["stopping"] = True
+            state["stop_reason"] = "wall_clock_moved_backwards"
+        elif now >= deadline_epoch or monotonic_now >= monotonic_deadline:
+            state["stopping"] = True
+            state.setdefault("stop_reason", "supervisor_deadline")
+        if stop_path.exists():
             state["stopping"] = True
         try:
             # An unresolved attempt still requires a working provider connection
@@ -585,11 +659,24 @@ def run_supervisor(monitor, directory, deadline_epoch, *, interval=10, error_lim
                 state["stopping"] = True
         if state["stopping"]:
             try:
-                stop_path.touch(exist_ok=True)
+                if not stop_path.is_symlink():
+                    stop_path.touch(exist_ok=True)
             except OSError:
                 pass
         polls += 1
-        state.update({"heartbeat_epoch": clock(), "polls": polls, "consecutive_errors": errors})
+        heartbeat = clock()
+        if (isinstance(heartbeat, bool) or not isinstance(heartbeat, (int, float)) or
+                not math.isfinite(heartbeat)):
+            state["stopping"] = True
+            state["stop_reason"] = "supervisor_clock_invalid"
+            heartbeat = last_wall_epoch
+        elif heartbeat < last_wall_epoch:
+            state["stopping"] = True
+            state["stop_reason"] = "wall_clock_moved_backwards"
+            heartbeat = last_wall_epoch
+        last_wall_epoch = float(heartbeat)
+        state.update({"heartbeat_epoch": last_wall_epoch, "polls": polls,
+                      "consecutive_errors": errors})
         try:
             temporary = state_path.with_suffix(".tmp")
             temporary.write_text(json.dumps(state, sort_keys=True) + "\n", encoding="utf-8")

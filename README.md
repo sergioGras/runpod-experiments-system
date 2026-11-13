@@ -51,7 +51,12 @@ checks live identity, region, CPU shape, image digest, disk, mount state and
 hourly rate, and only deletes through the store-backed ownership guard. It checks
 GPU identity/count, vCPU and host system RAM minima, and the CUDA floor. Per-card
 VRAM requires supervisor-bound SSH runtime evidence before GPU workload access.
-It is connected to the internal serial engine, with no consumer adoption. Provider-detail
+The detached supervisor persists its original monotonic deadline and boot
+identity, holds a per-attempt OS lock, and latches cleanup after a detected reboot
+or backward wall-clock movement. Boot identity currently supports Linux and
+Windows; the Windows token is an estimate, and unqualified platforms fail closed.
+The store-backed monitor is connected to the internal serial engine, with no
+consumer adoption. Provider-detail
 shape checks have synthetic evidence only;
 account-level and live-host qualification remain open. Never run both supervisor
 paths against one attempt.
