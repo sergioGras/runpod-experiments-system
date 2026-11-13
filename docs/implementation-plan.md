@@ -365,6 +365,44 @@ manual; scientific output verification, secret delivery and consumer-specific
 approval integration remain open. Do not update consumer pins until their
 separate acceptance gates pass.
 
+### M6.2: GPU evidence contract foundation (not an admission path)
+
+`runpod_experiments.gpu_runtime` now defines a strict local parser and typed
+attestation envelope for bounded `nvidia-smi` output. It requires a unique
+per-card UUID, name and memory value, checks card count and per-card VRAM against
+the selected profile, and checks the CUDA UMD driver floor. The evidence binds
+the immutable attempt, plan, selected profile, exact Pod identity, SSH
+known-hosts policy digest and fixed probe specification. It retains only a hash
+of the raw outputs. Its pure tests use synthetic output and never invoke SSH or
+provider APIs. The full offline suite passed 165 tests with one existing
+directory-symlink capability skip. A wheel installed into a fresh local venv;
+the 40-entry wheel SHA-256 was
+`ac4a71a2b78458a3fc47131433361c74ebe327e8ba3660222756f04ee83ee041`.
+
+The selected profile's integer memory floor follows RunPod's GPU catalog `GB`
+values. The probe normalizes `nvidia-smi` MiB to bytes and compares against
+decimal GB (1,000,000,000 bytes), which accepts a nominal 48 GB card reported at
+about 46,000 MiB. [RunPod's GPU type reference](https://github.com/runpod/docs/blob/main/references/gpu-types.mdx)
+labels each model's memory in GB.
+
+The CUDA UMD version is the latest CUDA version the installed driver supports;
+it does not prove which CUDA toolkit a workload has installed. Workload images
+and application runtimes remain a consumer acceptance concern. NVIDIA documents
+the query fields and this driver/toolkit distinction in its [nvidia-smi
+reference](https://docs.nvidia.com/deploy/nvidia-smi/index.html) and
+[CUDA driver compatibility matrix](https://docs.nvidia.com/datacenter/tesla/drivers/latest/cuda-toolkit-driver-and-architecture-matrix.html).
+
+This contract is deliberately not wired into SSH endpoint resolution or the
+cleanup supervisor. The existing GPU guard still fails closed. M6.3 must add a
+fixed read-only direct-SSH probe owned by the detached supervisor, a persisted
+first-RUNNING evidence deadline, hash-chain binding, strict evidence reload on
+every GPU SSH operation and bounded cleanup when proof is missing or invalid.
+Only then can a complete fake GPU attempt pass. Local proof is an integrity
+guard for cooperating processes, not provider-signed hardware attestation or a
+security boundary against a hostile local account.
+No consumer code, pin or private run state changed in this foundation slice;
+Hybrid's current flow is unchanged, and MIAP and Partition remain unintegrated.
+
 ### Store-backed one-shot create slice (internal; qualification remains open)
 
 The current planning slice advances the canonical contract envelope to v3 and

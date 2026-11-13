@@ -29,6 +29,7 @@ Never use a real account to prove that an unapproved create guard rejects a call
 | Validation | Missing/unknown versions, nonfinite numbers, bool limits, duplicate keys, malformed identities/hashes; no side effects on import/validation |
 | Ownership | Sibling and unknown resources, name/ID mismatch, duplicate names, renamed Pod, corrupted registry, exact-run mutation and scoped inventory |
 | Provider | Malformed/repeated pagination, bounded error bodies, redaction, wrong rate/shape/region/image/mounts, changed quotes and rejected capacity |
+| GPU runtime evidence | Malformed/oversized `nvidia-smi` output, duplicate cards, per-card VRAM/count floors, driver CUDA UMD floor and attempt/Pod/profile/host-key binding; synthetic bytes only |
 | Create preflight | Current quote and region, registered-key fingerprint, project inventory, supervisor readiness/heartbeat, one durable claim, post-claim supervisor change, ambiguous response with no retry and held exposure |
 | Admission | Independent-process races for the last slot/budget, serial limit, two-slot profile, parent/child hourly and total caps, previous unresolved attempts |
 | Persistence | Crash/reopen at reservation, claim, response, candidate binding, cleanup and settlement; duplicate events; schema mismatch and failed writes |
