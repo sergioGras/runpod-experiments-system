@@ -1,10 +1,11 @@
 # Evidence audit and remaining implementation plan
 
-Audit date: 2026-11-13. Shared implementation reviewed at
-`03525440626a875a8de71bbc9cf30c4d39dc7e43` on `design/unified-execution`.
-This audit adds documentation, not a production cutover. Earlier milestone
-paragraphs describe their source snapshots; this report reconciles their current
-status. No provider call or consumer modification was part of this audit.
+Audit date: 2026-11-13. Current shared implementation is
+`ce5b574` on `design/unified-execution`, pushed to the matching origin branch.
+This report records offline implementation and preview evidence, not a
+production cutover. Earlier milestone paragraphs describe their source
+snapshots; later follow-up sections supersede their interim test and artifact
+counts. No provider call or paid run was part of this audit.
 
 ## Evidence standard
 
@@ -25,27 +26,29 @@ These statuses are separate; a test count alone does not establish coverage.
 | Supervision | Store tests include a real detached child surviving launcher-parent exit; GPU supervision tests bind runtime evidence before SSH | Not a complete supported-host/interpreter/package qualification matrix |
 | Transfers | `tests/test_connections.py`, `tests/test_proxy_ssh.py`, `tests/test_store_create.py`: exact identity, direct/proxy framing, chunks, hashes and bounds | Shared transfers do not resume interrupted files; proxy is finite PTY commands, not binary interactive workload transport |
 | Serial engine | `tests/test_store_create.py`, `tests/test_gpu_supervision.py`: complete fake CPU/GPU attempts, finite retries, deadline failures and restart cleanup | No integrated live qualification or consumer acceptance |
-| Setup | Success before workload, timeout clamping and interrupted-stage recovery are covered in store-create tests | Dedicated nonzero-exit, configured-timeout, supervisor-loss and process-stop-failure regressions are not established by those success/restart cases |
+| Setup | `tests/test_store_create.py`: invalid process handle, poll error, nonzero exit, timeout, supervisor loss, and terminate/kill failure all fail before collection/workload and still attempt provider cleanup | A local process stop that cannot be confirmed still requires reconciliation |
 | Interactive I/O | `tests/test_interactive_workload.py`, `tests/test_interactive_ssh.py`, `tests/test_binary_process.py`: bounded sessions and process I/O | No consumer protocol or scientific-equivalence proof |
-| Packaging | Candidate wheel installs and imports outside checkout, with collector CLI loading from that environment | No complete wheel/sdist release inspection or full detached-host deployment qualification for this artifact |
-| Consumers | Read-only source review identifies adapters and retained project responsibilities | None has adopted the new serial engine |
+| Packaging | Candidate wheel and sdist install outside checkout; the wheel suite passes from site-packages; detached supervisor/collector import policy-bound consumer factories; archive contents were reviewed | Temporary candidates are not release assets; supported-host, ACL, and live provider qualification remain open |
+| Consumers | Isolated opt-in adapters in Hybrid, MIAP, and Partition pass focused offline suites against the installed sdist | No active entrypoint or dependency pin adopts the engine; complete consumer lifecycle/batch/service acceptance remains open |
 
-The latest recorded full offline run passed **200 tests, with one skipped**
-Windows directory-symlink capability case, on Python 3.12.14. This was the
-implementation run preceding this documentation audit; it was not repeated for
-documentation changes. An earlier run exposed a fresh-database WAL transition
-lock. Commit `0352544` added bounded busy/locked retry; its focused regression,
-cross-process admission test and full suite passed. Timeout exhaustion and
-SQLite error-code branches still warrant explicit adversarial coverage.
+The latest recorded full offline run passed **226 tests, with one skipped**
+Windows directory-symlink capability case, on the installed wheel from outside
+the source checkout. The installed package modules resolved under
+`site-packages`; targeted detached supervisor and collector processes also
+loaded consumer factories from policy-bound module roots. The MIAP, Partition,
+and Hybrid adapter slices passed 72, 42, and 13 tests respectively against the
+installed sdist. These results supersede the earlier 200-test snapshot below.
 
-Candidate wheel: `runpod_experiments_system-0.2.0.dev0-py3-none-any.whl`.
-SHA-256: `7f4b741f878af57498824033fc54be67f9c51485bf018384097073801b8a75dc`.
-During this audit, the existing isolated installation was checked from outside
-the checkout using Python `-I`: execution-store and serial-engine module paths
-were asserted to reside below the venv's `site-packages`; the setup field and
-installed collector CLI were checked, and the wheel hash was verified.
-Earlier import checks run from the checkout alone cannot establish installed
-module origin. Temporary local wheel storage is not a durable release artifact.
+Candidate wheel: `runpod_experiments_system-0.2.0.dev0-py3-none-any.whl`,
+125,182 bytes, SHA-256
+`7f8f5be5a2f6aade5944ca9197509b4f1f6227f53af76378c707b5e844d457fa`.
+Candidate sdist: `runpod_experiments_system-0.2.0.dev0.tar.gz`, 172,300 bytes,
+SHA-256 `49f88c1717133914d52caaf066edf24dfa8242f9761ff5516aab7a635b56078a`.
+Both artifacts were installed in isolated environments. The wheel's full
+synthetic suite passed outside the checkout, and the installed supervisor CLI
+loaded. The wheel/sdist archive audit found only shared package source, build
+metadata, README, and generic synthetic tests. Temporary local artifact
+storage is not a durable release asset or a published release.
 
 An older production-library smoke or a successful consumer experiment validates
 its recorded source and scope. It does not qualify this new engine or transfer
@@ -59,8 +62,8 @@ approval to another project.
 | M2 | Implemented and synthetically verified; qualification open | Reviewed account quote/billing observations and API compatibility |
 | M3 | Serial transactional core verified; deployment/migration open | Canonical state root/actual-host/ACL checks and explicit legacy-state handling |
 | M4 | Detached process and supervision components verified; host qualification open | Exact installed candidate survives foreground exit on every supported controlling host; failure/reboot behavior recorded |
-| M5–M6 | Internal serial CPU/GPU/interactive implementation verified in substantial fake paths | Close enumerated fault gaps, credential requirements, artifact and API review; then consumer and authorized live acceptance |
-| M7–M9 | Consumers not migrated | Hybrid, then MIAP, then Partition serial adapter acceptance and reconciled cutovers |
+| M5–M6 | Internal serial CPU/GPU/interactive implementation and enumerated setup/WAL fault paths verified offline; installed wheel/sdist reviewed | Public API/schema, credential-delivery and supported-host review; complete consumer lifecycle acceptance; then authorized live qualification |
+| M7–M9 | Isolated adapters exist for Hybrid, MIAP, and Partition; no consumer adopts them from an active entrypoint or pin | Complete Hybrid protocol-through-engine, MIAP interrupted-batch/finalizer, and Partition service/archive acceptance; reconcile each consumer before cutover |
 | M10 | Hierarchical parallel admission not delivered by the serial store | Atomic parent/child caps, two-slot process races and independent resource cleanup |
 | M11 | Open | Integrated acceptance, duplication retirement, rollback and release evidence |
 
@@ -226,3 +229,12 @@ imports its adapter, no consumer dependency pin changed, no original checkout
 or persisted run state was modified, and no provider call, resource creation,
 paid run, upload or disclosure occurred. Live qualification, consumer parity,
 deployment checks and release remain open.
+
+Follow-up installed-wheel checks (2026-11-13): MIAP and Partition each passed
+all three tests in `tests.test_shared_runpod_adapter`. In addition to factory
+construction, these exercise the policy-loaded consumer factory and the
+consumer's own `ProjectPodApi` with a synthetic durable create claim, denial
+before claim, exact Pod deletion after stop, and lifecycle-projection check.
+Hybrid's 13 protocol/watchdog tests also passed against the installed wheel.
+These targeted checks still do not constitute full consumer serial-engine,
+MIAP batch, or Partition service/archive acceptance.
