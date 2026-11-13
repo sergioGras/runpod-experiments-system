@@ -553,8 +553,10 @@ class StoreCreateControllerTests(unittest.TestCase):
         collector_limits = {}
         self.store.cancel_uncreated(self.attempt["attempt_id"])
         worker = b"synthetic serial worker"
+        setup = b"synthetic reviewed setup script"
         transfer = TransferManifest((
             ManifestFile("worker.py", sha256_bytes(worker), len(worker), TransferDirection.UPLOAD),
+            ManifestFile("setup.py", sha256_bytes(setup), len(setup), TransferDirection.UPLOAD),
             ManifestFile("results.json", ZERO, 0, TransferDirection.DOWNLOAD),
         ), 4096, 8192)
         job_id, attempt_id, pod_name = "job-serial-engine", "attempt-engine", "nebula-engine-001"
@@ -570,6 +572,7 @@ class StoreCreateControllerTests(unittest.TestCase):
         source_root = self.root / "serial-source"
         source_root.mkdir()
         (source_root / "worker.py").write_bytes(worker)
+        (source_root / "setup.py").write_bytes(setup)
 
         def create_pod(request):
             receipt = SimpleNamespace(pod_id="pod-engine-001", pod_name=request["name"])
@@ -644,10 +647,10 @@ class StoreCreateControllerTests(unittest.TestCase):
             self.now = attempt["deadline_epoch"] - 5
             return 1
 
-        workload_timeouts = []
+        process_launches = []
 
         def process_launcher(*args, **_kwargs):
-            workload_timeouts.append(args[9])
+            process_launches.append((args[7], tuple(args[8]), args[9]))
             return SimpleNamespace(returncode=0, poll=lambda: 0)
 
         engine = SerialExecutionEngine(
@@ -662,7 +665,8 @@ class StoreCreateControllerTests(unittest.TestCase):
             "/tmp/nebula", "worker.py", (), 30, ("results.json",),
             self.root / "serial-artifacts", upload_timeout_seconds=1200,
             upload_chunk_bytes=262_144, collection_timeout_seconds=600,
-            collection_chunk_bytes=262_144)
+            collection_chunk_bytes=262_144, setup_script="setup.py",
+            setup_arguments=("--verify-archive",), setup_timeout_seconds=900)
         self.assertTrue(self.key_path.is_file())
         (self.root / "id_ed25519").write_bytes(b"private-key-fixture")
         (self.root / "known_hosts").write_text(
@@ -689,7 +693,11 @@ class StoreCreateControllerTests(unittest.TestCase):
         self.assertEqual(upload_limits["chunk_bytes"], 262_144)
         self.assertEqual(collector_limits["timeout_seconds"], 600)
         self.assertEqual(collector_limits["chunk_bytes"], 262_144)
-        self.assertEqual(workload_timeouts, [5])
+        self.assertEqual(process_launches, [
+            ("setup.py", ("--verify-archive",), 5), ("worker.py", (), 5)])
+        stages = [event.stage for event in result.stage_events]
+        self.assertLess(stages.index("setup"), stages.index("collector"))
+        self.assertLess(stages.index("collector"), stages.index("workload"))
 
     def test_serial_workload_transfer_settings_are_finite_and_bounded(self):
         root = self.root
@@ -701,7 +709,10 @@ class StoreCreateControllerTests(unittest.TestCase):
         for field, value in (("upload_timeout_seconds", 3601),
                              ("collection_timeout_seconds", 0),
                              ("upload_chunk_bytes", 1_000_001),
-                             ("collection_chunk_bytes", True)):
+                             ("collection_chunk_bytes", True),
+                             ("setup_timeout_seconds", 3601),
+                             ("setup_script", "../setup.py"),
+                             ("setup_arguments", ("--orphaned",))):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 AttemptWorkload(**kwargs, **{field: value})
 
@@ -1396,8 +1407,10 @@ class StoreCreateControllerTests(unittest.TestCase):
         self.client._delete_pod = delete_pod
         attempt_id = self.attempt["attempt_id"]
         completed_before = ("supervisor", "create")
-        if interrupted_stage == "collector":
+        if interrupted_stage in ("setup", "collector"):
             completed_before += ("upload",)
+        if interrupted_stage == "collector":
+            completed_before += ("setup",)
         for stage in completed_before:
             self.store.append_stage_event(attempt_id, stage, StageStatus.STARTED)
             self.store.append_stage_event(attempt_id, stage, StageStatus.SUCCEEDED)
@@ -1457,6 +1470,10 @@ class StoreCreateControllerTests(unittest.TestCase):
 
     def test_controller_restart_during_upload_closes_stage_and_does_not_replay(self):
         result = self._recover_with_interrupted_stage("upload")
+        self.assertEqual(result.outcome.operational_status.value, "reconciliation_required")
+
+    def test_controller_restart_during_setup_closes_stage_and_does_not_replay(self):
+        result = self._recover_with_interrupted_stage("setup")
         self.assertEqual(result.outcome.operational_status.value, "reconciliation_required")
 
     def test_controller_restart_during_collector_waits_for_stop_and_does_not_replay(self):

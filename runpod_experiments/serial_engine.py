@@ -50,6 +50,9 @@ class AttemptWorkload:
     upload_chunk_bytes: int = DEFAULT_TRANSFER_CHUNK_BYTES
     collection_timeout_seconds: int = DEFAULT_COLLECTION_TIMEOUT_SECONDS
     collection_chunk_bytes: int = DEFAULT_TRANSFER_CHUNK_BYTES
+    setup_script: str | None = None
+    setup_arguments: tuple[str, ...] = ()
+    setup_timeout_seconds: int = 900
 
     def __post_init__(self) -> None:
         for field in ("source_root", "key_file", "known_hosts", "artifact_directory"):
@@ -76,6 +79,20 @@ class AttemptWorkload:
         validate_timeout_seconds(self.collection_timeout_seconds,
                                  "collection_timeout_seconds")
         validate_chunk_bytes(self.collection_chunk_bytes, "collection_chunk_bytes")
+        if self.setup_script is not None:
+            setup = PurePosixPath(self.setup_script) if isinstance(self.setup_script, str) else None
+            if (setup is None or not self.setup_script or "\\" in self.setup_script or
+                    "\x00" in self.setup_script or setup.is_absolute() or
+                    ".." in setup.parts or setup.as_posix() != self.setup_script):
+                raise ValueError("setup_script must be a normalized relative POSIX path")
+        if (not isinstance(self.setup_arguments, tuple) or
+                any(not isinstance(value, str) or "\x00" in value
+                    for value in self.setup_arguments) or
+                (self.setup_script is None and self.setup_arguments)):
+            raise ValueError("setup_arguments must be an immutable tuple for setup_script")
+        if (type(self.setup_timeout_seconds) is not int or
+                not 1 <= self.setup_timeout_seconds <= 3600):
+            raise ValueError("setup_timeout_seconds must be between 1 and 3600")
         if (not isinstance(self.result_names, tuple) or not self.result_names or
                 any(not isinstance(name, str) or not name for name in self.result_names) or
                 len(set(self.result_names)) != len(self.result_names)):
@@ -124,6 +141,8 @@ def _error_details(error: BaseException, stage: str) -> tuple[FailureCategory, s
         return FailureCategory.INTERNAL, "create_unclassified"
     if stage == "upload":
         return FailureCategory.SETUP_FAILURE, "upload_failed"
+    if stage == "setup":
+        return FailureCategory.SETUP_FAILURE, "setup_failed"
     if stage == "collector":
         return FailureCategory.TRANSPORT_FAILURE, "collector_failed"
     if stage == "workload" and isinstance(error, RuntimeError):
@@ -193,7 +212,10 @@ class SerialExecutionEngine:
                         if item.direction is TransferDirection.UPLOAD}
         download_names = {item.path for item in plan.transfers.files
                           if item.direction is TransferDirection.DOWNLOAD}
-        if workload.script not in upload_files or not set(workload.result_names) <= download_names:
+        if (workload.script not in upload_files or
+                (workload.setup_script is not None and
+                 workload.setup_script not in upload_files) or
+                not set(workload.result_names) <= download_names):
             raise ExecutionError(FailureCategory.AUTHORIZATION, "workload_transfer_outside_plan")
         bundle = {name: item.sha256 for name, item in upload_files.items()}
         if workload.source_root.is_symlink():
@@ -427,6 +449,7 @@ class SerialExecutionEngine:
         gpu_attempt = resource_profile.kind is ResourceKind.GPU
         supervisor_process = None
         collector_process = None
+        setup_process = None
         workload_process = None
         current_stage = None
         failure_stage = None
@@ -511,6 +534,58 @@ class SerialExecutionEngine:
                 transfer_check=check_upload_health)
             check_upload_health()
             succeed()
+
+            if workload.setup_script is not None:
+                start("setup")
+                setup_started = self.monotonic()
+                attempt_remaining = min(
+                    self.store.attempt_runtime_seconds(attempt_id),
+                    max(0, attempt["deadline_epoch"] - self.clock()))
+                if attempt_remaining <= 0:
+                    raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                         "attempt_deadline_reached")
+                setup_attempt_deadline = setup_started + attempt_remaining
+                setup_configured_deadline = setup_started + workload.setup_timeout_seconds
+                setup_deadline = min(setup_attempt_deadline, setup_configured_deadline)
+
+                def check_setup_health() -> None:
+                    if (self.clock() >= attempt["deadline_epoch"] or
+                            self.monotonic() >= setup_attempt_deadline):
+                        raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                             "attempt_deadline_reached")
+                    if self.monotonic() >= setup_configured_deadline:
+                        raise ExecutionError(FailureCategory.SETUP_FAILURE,
+                                             "setup_timeout_reached")
+                    self._check_supervisor(supervisor_process, supervisor_directory,
+                                           attempt, policy_sha256)
+
+                check_setup_health()
+                setup_timeout = min(
+                    workload.setup_timeout_seconds,
+                    max(1, math.ceil(setup_deadline - self.monotonic())))
+                setup_process = self.process_launcher(
+                    self.client, self.store, attempt_id, project, workload.key_file,
+                    workload.known_hosts, workload.remote_root, workload.setup_script,
+                    list(workload.setup_arguments), setup_timeout,
+                    attempt_directory / "setup.log")
+                if not callable(getattr(setup_process, "poll", None)):
+                    raise ExecutionError(FailureCategory.SETUP_FAILURE,
+                                         "setup_process_invalid")
+                setup_exit_code = setup_process.poll()
+                while setup_exit_code is None:
+                    check_setup_health()
+                    remaining = setup_deadline - self.monotonic()
+                    if remaining <= 0:
+                        check_setup_health()
+                        raise ExecutionError(FailureCategory.SETUP_FAILURE,
+                                             "setup_timeout_reached")
+                    self.sleep(min(0.25, remaining))
+                    setup_exit_code = setup_process.poll()
+                check_setup_health()
+                if setup_exit_code != 0:
+                    raise ExecutionError(FailureCategory.SETUP_FAILURE,
+                                         "setup_process_exit_nonzero")
+                succeed()
 
             start("collector")
             collector_process = self.collector_launcher(
@@ -612,6 +687,16 @@ class SerialExecutionEngine:
                     pass
                 current_stage = None
         finally:
+            if setup_process is not None and setup_process.poll() is None:
+                try:
+                    setup_process.terminate()
+                    setup_process.wait(timeout=5)
+                except (OSError, subprocess.SubprocessError):
+                    try:
+                        setup_process.kill()
+                        setup_process.wait(timeout=5)
+                    except (OSError, subprocess.SubprocessError):
+                        pass
             if supervisor_process is not None or attempt["create_claimed"] or attempt["state"] == "reserved":
                 try:
                     self._record(attempt_id, "cleanup", StageStatus.STARTED)

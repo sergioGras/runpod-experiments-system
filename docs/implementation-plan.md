@@ -499,6 +499,24 @@ resource was touched. M9 still needs consumer archive-contract, service-role,
 cleanup and CPU/GPU acceptance; this adapter contract alone does not qualify
 Partition for cutover.
 
+Pre-workload setup stage (2026-11-13): `AttemptWorkload` also supports an
+optional uploaded Python setup script with immutable arguments and a finite
+timeout. The engine verifies that script is in the reviewed upload manifest,
+runs it through the exact-Pod launcher after upload and before collector/workload
+startup, checks supervisor and attempt health while it runs, and records the
+setup stage. A failed setup is a typed setup failure and cleanup terminates any
+remaining local SSH process before provider cleanup. Recovery marks an
+interrupted setup as not replayed. The consumer retains setup-script contents,
+dependency selection and verification policy. Focused success and restart tests
+passed; the full suite passed 199 tests with one platform-capability skip. One
+earlier full run had a transient SQLite cross-process initialization lock; its
+focused test passed and the immediate full-suite rerun passed. A fresh wheel
+installed into a new isolated venv; serial-engine, transfer and collector
+imports succeeded and the installed collector CLI displayed its options. Wheel
+`0.2.0.dev0` SHA-256:
+`251e5dc9982a6feda0763327dfcd97c06ef3db9283abafd05403be348b17ad69`. Evidence
+is synthetic and local; no provider, consumer source, pin or state was touched.
+
 Restart recovery follow-up (2026-11-13): tests now interrupt upload before
 collector launch and interrupt the detached collector after launch. Recovery
 marks the open stage as not replayed, requests the collector stop handshake when
@@ -614,8 +632,10 @@ but the consumer cutovers still have concrete contract gaps:
 - Hybrid's binary SSH transport can use an `ExecutionStore` attempt. The design
   branch now includes an internal `InteractiveDriver` interface that runs a
   bounded client-controlled request/response session under the serial engine's
-  supervisor and cleanup path. M7 still needs Hybrid conformance for its
-  protocol, failure behavior, hashes, and scientific checks; those remain in
+  supervisor and cleanup path, plus an optional manifest-bound setup stage for
+  dependency preparation before the interactive process opens its binary
+  stream. M7 still needs Hybrid conformance for protocol framing, failure
+  behavior, hashes, setup verification and scientific checks; those remain in
   Hybrid.
 - MIAP can delegate provider, attempt, SSH, and cleanup mechanics. Its exact
   one-use approval receipt, source/host binding, credential-delivery decision,

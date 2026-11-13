@@ -190,6 +190,14 @@ or relaunch settings that differ. Project values such as Partition's 256 KiB
 chunks and 600-second collection timeout remain caller configuration rather than
 shared defaults.
 
+An optional uploaded Python setup script provides a bounded pre-workload stage
+for project-owned dependency verification or installation. Its path must be in
+the hash-reviewed upload manifest; the engine launches it through the same exact
+Pod SSH guard, checks the supervisor and attempt deadline while it runs, records
+the stage, and cleans up before the collector or workload starts on failure.
+Controller recovery records an interrupted setup as not replayed. The script's
+contents and package policy stay with the consumer.
+
 Host-key trust is explicit policy. Approved model credentials use an ephemeral
 delivery channel and never enter plan serialization, argument logs, diagnostics,
 manifests or returned artifacts. Journals/results are private by default with
