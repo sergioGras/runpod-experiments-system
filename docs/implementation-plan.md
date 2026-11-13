@@ -20,8 +20,10 @@ engine or consumer migration. Read
 The isolated `codex/resumable-transfer` candidate (`6296795`, based on `32b1b90`)
 prototypes resumable direct uploads with remote-prefix verification and
 no-clobber publication. Its 78 focused transfer, store, launch and host-identity
-tests pass. The proxy route remains unchanged. The full suite has not passed in a
-supported interpreter, and installed-artifact qualification, live SSH and
+tests pass. A current-source run passed 222 tests with one platform skip after
+excluding the detached-supervisor test whose mock provider hook this workstation's
+embedded interpreter will not load. The proxy route remains unchanged.
+Installed-artifact qualification, that detached-supervisor test, live SSH and
 consumer acceptance remain open; the candidate is not adopted or released.
 
 ## Working rules

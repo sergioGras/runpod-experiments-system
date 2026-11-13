@@ -193,12 +193,14 @@ workstation's embeddable Python
 `python312._pth` ignores that variable in child interpreters. The test child
 therefore missed its fake provider opener and remained in stopping/unresolved
 state after provider-read errors. No provider create or model transfer was
-performed. The runtime configuration was restored. Re-run the full suite under
-a supported interpreter/test bootstrap before treating this branch as a
-complete library candidate. After rebasing onto `32b1b90`, the focused set passed
-78 tests: direct-resume receiver (7), connections (14), store-create (32),
-host identity (5), persisted attempts/deadlines (14) and launch (6). The entire
-suite has not been rerun on the rebased branch.
+performed. The runtime configuration was restored. After rebasing onto
+`32b1b90`, the focused set passed 78 tests: direct-resume receiver (7),
+connections (14), store-create (32), host identity (5), persisted
+attempts/deadlines (14) and launch (6). A filtered current-source run discovered
+223 tests, excluded only the detached-supervisor test above, and ran 222 tests
+successfully with one platform-capability skip. The full unfiltered suite still
+needs that detached test run under an interpreter that loads its fake provider
+hook reliably before treating this branch as fully qualified.
 
 Consumer disposition: none adopts this branch. Hybrid retains its current
 resumable uploader and pinned shared revision; MIAP and Partition require their
