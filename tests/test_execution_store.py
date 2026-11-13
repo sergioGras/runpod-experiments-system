@@ -152,6 +152,31 @@ class ExecutionStoreTests(unittest.TestCase):
         self.assertEqual(invalid.statements[-1], "PRAGMA busy_timeout = 15000")
         sleep.assert_not_called()
 
+    def test_wal_retry_honors_deadline_and_extended_sqlite_busy_codes(self):
+        class BusyWalConnection:
+            def __init__(self):
+                self.attempts = 0
+
+            def execute(self, statement):
+                if statement == "PRAGMA journal_mode=WAL":
+                    self.attempts += 1
+                    error = sqlite3.OperationalError("database is locked")
+                    error.sqlite_errorcode = sqlite3.SQLITE_BUSY_SNAPSHOT
+                    raise error
+                return self
+
+        connection = BusyWalConnection()
+        original_timeout = self.store._timeout_seconds
+        self.store._timeout_seconds = 1
+        self.addCleanup(setattr, self.store, "_timeout_seconds", original_timeout)
+        with patch("runpod_experiments.execution_store.time.monotonic",
+                   side_effect=(10.0, 10.25, 11.01)), \
+                patch("runpod_experiments.execution_store.time.sleep") as sleep:
+            with self.assertRaisesRegex(sqlite3.OperationalError, "database is locked"):
+                self.store._enable_wal(connection)
+        self.assertEqual(connection.attempts, 2)
+        sleep.assert_called_once_with(0.05)
+
     def test_reservation_is_transactional_persistent_and_hash_chained(self):
         attempt, exposure = self.reserve()
         self.assertEqual(exposure, 105_000)

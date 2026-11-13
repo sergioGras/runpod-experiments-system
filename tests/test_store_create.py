@@ -550,6 +550,39 @@ class StoreCreateControllerTests(unittest.TestCase):
         self.assertEqual(launched["argv"][route_index + 1], "proxy")
 
     def test_store_serial_engine_runs_one_fake_attempt_and_confirms_cleanup(self):
+        self._run_fake_serial_engine_attempt()
+
+    def test_setup_process_poll_failure_still_confirms_provider_cleanup(self):
+        result = self._run_fake_serial_engine_attempt(setup_failure="poll")
+        self.assertEqual(result.outcome.operational_status.value, "failed")
+        self.assertEqual(result.outcome.cleanup_status.value, "confirmed")
+
+    def test_invalid_setup_process_handle_does_not_skip_provider_cleanup(self):
+        result = self._run_fake_serial_engine_attempt(setup_failure="invalid")
+        self.assertEqual(result.outcome.operational_status.value, "reconciliation_required")
+        self.assertEqual(result.outcome.cleanup_status.value, "confirmed")
+
+    def test_nonzero_setup_exit_stops_before_collector_and_confirms_cleanup(self):
+        result = self._run_fake_serial_engine_attempt(setup_failure="nonzero")
+        self.assertEqual(result.outcome.operational_status.value, "failed")
+        self.assertEqual(result.outcome.cleanup_status.value, "confirmed")
+
+    def test_setup_timeout_stops_before_collector_and_confirms_cleanup(self):
+        result = self._run_fake_serial_engine_attempt(setup_failure="timeout")
+        self.assertEqual(result.outcome.operational_status.value, "failed")
+        self.assertEqual(result.outcome.cleanup_status.value, "confirmed")
+
+    def test_setup_process_stop_failure_is_reconciliation_required(self):
+        result = self._run_fake_serial_engine_attempt(setup_failure="stop_failure")
+        self.assertEqual(result.outcome.operational_status.value, "reconciliation_required")
+        self.assertEqual(result.outcome.cleanup_status.value, "confirmed")
+
+    def test_supervisor_loss_during_setup_stops_before_collector(self):
+        result = self._run_fake_serial_engine_attempt(setup_failure="supervisor")
+        self.assertEqual(result.outcome.operational_status.value, "failed")
+        self.assertEqual(result.outcome.cleanup_status.value, "confirmed")
+
+    def _run_fake_serial_engine_attempt(self, *, setup_failure=None):
         collector_limits = {}
         self.store.cancel_uncreated(self.attempt["attempt_id"])
         worker = b"synthetic serial worker"
@@ -636,6 +669,8 @@ class StoreCreateControllerTests(unittest.TestCase):
                 return 0
 
         def collector_launcher(*_args, **kwargs):
+            if setup_failure is not None:
+                self.fail("collector must not start after setup failure")
             collector_limits.update(kwargs)
             return Collector()
 
@@ -651,6 +686,40 @@ class StoreCreateControllerTests(unittest.TestCase):
 
         def process_launcher(*args, **_kwargs):
             process_launches.append((args[7], tuple(args[8]), args[9]))
+            if setup_failure is not None and args[7] == "setup.py":
+                if setup_failure == "invalid":
+                    return object()
+                class SetupFailureProcess:
+                    polls = 0
+
+                    def poll(self):
+                        self.polls += 1
+                        if setup_failure == "poll" and self.polls == 1:
+                            return None
+                        if setup_failure == "poll":
+                            raise OSError("synthetic local process query failure")
+                        if setup_failure == "nonzero":
+                            return 17
+                        if setup_failure == "stop_failure":
+                            return 17 if self.polls == 1 else None
+                        if setup_failure == "supervisor":
+                            supervisors[0].returncode = 17
+                        return None
+
+                    def terminate(self):
+                        if setup_failure == "stop_failure":
+                            raise OSError("synthetic terminate failure")
+                        self.terminated = True
+
+                    def wait(self, timeout=None):
+                        return 0
+
+                    def kill(self):
+                        if setup_failure == "stop_failure":
+                            raise OSError("synthetic kill failure")
+                        self.killed = True
+
+                return SetupFailureProcess()
             return SimpleNamespace(returncode=0, poll=lambda: 0)
 
         engine = SerialExecutionEngine(
@@ -666,7 +735,8 @@ class StoreCreateControllerTests(unittest.TestCase):
             self.root / "serial-artifacts", upload_timeout_seconds=1200,
             upload_chunk_bytes=262_144, collection_timeout_seconds=600,
             collection_chunk_bytes=262_144, setup_script="setup.py",
-            setup_arguments=("--verify-archive",), setup_timeout_seconds=900)
+            setup_arguments=("--verify-archive",),
+            setup_timeout_seconds=1 if setup_failure == "timeout" else 900)
         self.assertTrue(self.key_path.is_file())
         (self.root / "id_ed25519").write_bytes(b"private-key-fixture")
         (self.root / "known_hosts").write_text(
@@ -674,6 +744,16 @@ class StoreCreateControllerTests(unittest.TestCase):
         result = engine.run_attempt(
             plan, attempt_id, workload, local_public_key_path=self.key_path,
             cleanup_timeout_seconds=3)
+        if setup_failure is not None:
+            self.assertEqual(result.pod_id, "pod-engine-001")
+            self.assertEqual(self.store.get_attempt(attempt_id)["state"], "terminated")
+            expected_timeout = 1 if setup_failure == "timeout" else 5
+            self.assertEqual(process_launches, [
+                ("setup.py", ("--verify-archive",), expected_timeout)])
+            stages = [event.stage for event in result.stage_events]
+            self.assertNotIn("collector", stages)
+            self.assertNotIn("workload", stages)
+            return result
         self.assertEqual(result.pod_id, "pod-engine-001",
                          msg=f"{result.outcome}; stages={result.stage_events}; "
                              f"events={[(e['entity_type'], e['event_type'], e['entity_id']) for e in self.store.events()]}")

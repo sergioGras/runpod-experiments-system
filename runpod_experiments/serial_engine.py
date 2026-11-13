@@ -454,6 +454,7 @@ class SerialExecutionEngine:
         current_stage = None
         failure_stage = None
         primary_error: BaseException | None = None
+        setup_stop_unconfirmed = False
         cleanup_status = CleanupStatus.NOT_REQUIRED
         try:
             controller = self.create_controller_factory(
@@ -687,16 +688,31 @@ class SerialExecutionEngine:
                     pass
                 current_stage = None
         finally:
-            if setup_process is not None and setup_process.poll() is None:
+            if setup_process is not None:
                 try:
-                    setup_process.terminate()
-                    setup_process.wait(timeout=5)
-                except (OSError, subprocess.SubprocessError):
+                    setup_running = setup_process.poll() is None
+                except Exception:
+                    setup_running = True
+                    if primary_error is None:
+                        primary_error = ExecutionError(
+                            FailureCategory.RECONCILIATION_REQUIRED,
+                            "setup_process_poll_failed")
+                        failure_stage = "setup"
+                if setup_running:
                     try:
-                        setup_process.kill()
+                        setup_process.terminate()
                         setup_process.wait(timeout=5)
-                    except (OSError, subprocess.SubprocessError):
-                        pass
+                    except Exception:
+                        try:
+                            setup_process.kill()
+                            setup_process.wait(timeout=5)
+                        except Exception:
+                            setup_stop_unconfirmed = True
+                            if primary_error is None:
+                                primary_error = ExecutionError(
+                                    FailureCategory.RECONCILIATION_REQUIRED,
+                                    "setup_process_stop_unconfirmed")
+                                failure_stage = "setup"
             if supervisor_process is not None or attempt["create_claimed"] or attempt["state"] == "reserved":
                 try:
                     self._record(attempt_id, "cleanup", StageStatus.STARTED)
@@ -732,7 +748,10 @@ class SerialExecutionEngine:
             status = (OperationalStatus.RECONCILIATION_REQUIRED
                       if category is FailureCategory.RECONCILIATION_REQUIRED
                       or cleanup_status in (CleanupStatus.PENDING, CleanupStatus.FAILED)
+                      or setup_stop_unconfirmed
                       else OperationalStatus.FAILED)
+            if setup_stop_unconfirmed:
+                category = FailureCategory.RECONCILIATION_REQUIRED
         if (final_attempt["state"] == "cancelled" and final_attempt["pod_id"] is None):
             billing_status = BillingStatus.NOT_APPLICABLE
         else:

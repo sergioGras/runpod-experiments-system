@@ -71,16 +71,17 @@ approval to another project.
 Source review at `5fec8af` identified a concrete setup-cleanup risk:
 `run_attempt` calls `setup_process.poll()` outside its cleanup error guard in
 `finally`. A poll exception, or a launcher result without a callable poll method,
-can escape before `_cleanup` requests provider termination. This is a source
-control-flow finding; a regression reproduction has not yet been run. The
-previous continuation inspected source only and added no tests or fixes.
+could escape before `_cleanup` requested provider termination. This was fixed in
+`runpod_experiments/serial_engine.py`; failure is retained and the independent
+provider cleanup path still runs. An unconfirmed local process stop escalates
+the outcome to reconciliation required.
 
 The next focused milestone should:
 
-1. Reproduce invalid setup handles and poll errors with a fake provider, then
+1. Reproduce invalid setup handles and poll errors with a fake provider, and
    ensure local setup-process inspection/termination errors cannot bypass the
    independent provider cleanup path. Preserve the original setup failure and
-   record useful sanitized cleanup evidence.
+   report an unconfirmed local stop as reconciliation required.
 2. Exercise nonzero setup exit, configured setup timeout and supervisor loss
    during setup. Assert that collector/workload launch never follows failure,
    exact provider cleanup runs, and accounting exposure remains pending until
@@ -92,6 +93,21 @@ The next focused milestone should:
 5. Run focused regressions and the relevant store/engine suites. A source fix
    then warrants the broader offline suite and a fresh installed artifact check;
    record the actual results before committing the completed milestone.
+
+Setup cleanup milestone (2026-11-13): the regression suite now covers invalid
+process handles, poll errors, nonzero setup exit, configured timeout, supervisor
+loss, and terminate/kill failure. All seven setup tests passed. They verify the
+collector and workload do not start after setup failure and provider cleanup is
+still attempted; an unconfirmed local process stop is reported for
+reconciliation. WAL tests cover transient text locks, extended
+`SQLITE_BUSY_SNAPSHOT`, non-retryable I/O errors and deadline exhaustion. The
+full suite passed 206 tests with one platform-capability skip before the
+additional invalid-handle regression was added; all seven focused setup tests
+passed afterward. A fresh wheel
+installed into a clean venv; execution-store and serial-engine imports were
+asserted to originate under that venv's `site-packages`, and the collector CLI
+loaded. Wheel `0.2.0.dev0` SHA-256:
+`61fb65f5a349440b8c5d1acea61a25ce3e73c7eccfbc73383bbb4114e90dfd9d`.
 
 This milestone changes common behavior only. Consumer adapters can be prepared
 in isolated checkouts after these cleanup guarantees are established; production
