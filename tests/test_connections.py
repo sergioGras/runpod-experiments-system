@@ -17,6 +17,7 @@ from runpod_experiments.ssh import SSHFetcher, bootstrap_tofu, ssh_public_key_fi
 from runpod_experiments.attempts import AttemptLedger, AttemptError
 from runpod_experiments.run_collection import collect_owned_once
 from runpod_experiments.upload import upload_bundle
+from upload_test_support import direct_upload_runner
 from runpod_experiments.remote_process import start_python
 
 
@@ -269,8 +270,7 @@ class ConnectionTests(unittest.TestCase):
                 def pod(self, pod_id):
                     return {"id": pod_id, "name": "hybrid-test", "status": "RUNNING", "ssh": {"direct": {"host": "host", "port": 22, "username": "root"}}}
             calls = []
-            def runner(*args, **kwargs):
-                calls.append((args, kwargs))
+            runner = direct_upload_runner(calls)
             manifest = {"one.py": hashlib.sha256(b"source").hexdigest(), "two.py": hashlib.sha256(b"old").hexdigest()}
             with self.assertRaises(AttemptError):
                 upload_bundle(Client(), ledger, "a", "hyybrid-inference", root, manifest, root / "key", root / "hosts", "/work", runner=runner)
@@ -279,7 +279,7 @@ class ConnectionTests(unittest.TestCase):
             self.assertFalse(calls)
             manifest["two.py"] = hashlib.sha256(b"changed").hexdigest()
             self.assertEqual(upload_bundle(Client(), ledger, "a", "hybrid-inference", root, manifest, root / "key", root / "hosts", "/work", runner=runner), 2)
-            self.assertEqual(len(calls), 2)
+            self.assertEqual(len(calls), 6)
 
     def test_remote_execution_quotes_arguments_and_checks_identity(self):
         with tempfile.TemporaryDirectory() as directory:

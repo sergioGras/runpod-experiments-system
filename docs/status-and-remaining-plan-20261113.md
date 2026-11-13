@@ -23,7 +23,7 @@ These statuses are separate; a test count alone does not establish coverage.
 | Provider boundary | `tests/test_provider.py`: synthetic inventory, quotes, billing and sanitized errors | Account responses, delayed billing finality and current API compatibility unqualified |
 | Store/admission | `tests/test_execution_store.py`: actual SQLite, independent-process cap races, crash rollback, holds, adjustments and event integrity | One configured host; no hierarchical budgets or production legacy-state bridge |
 | Supervision | Store tests include a real detached child surviving launcher-parent exit; GPU supervision tests bind runtime evidence before SSH | Not a complete supported-host/interpreter/package qualification matrix |
-| Transfers | `tests/test_connections.py`, `tests/test_proxy_ssh.py`, `tests/test_store_create.py`: exact identity, direct/proxy framing, chunks, hashes and bounds | Shared transfers do not resume interrupted files; proxy is finite PTY commands, not binary interactive workload transport |
+| Transfers | `tests/test_connections.py`, `tests/test_proxy_ssh.py`, `tests/test_store_create.py`: exact identity, direct/proxy framing, chunks, hashes and bounds | Isolated candidate adds offline-verified resume for direct uploads; proxy resume and all live transport behavior remain unqualified |
 | Serial engine | `tests/test_store_create.py`, `tests/test_gpu_supervision.py`: complete fake CPU/GPU attempts, finite retries, deadline failures and restart cleanup | No integrated live qualification or consumer acceptance |
 | Setup | Success before workload, timeout clamping and interrupted-stage recovery are covered in store-create tests | Dedicated nonzero-exit, configured-timeout, supervisor-loss and process-stop-failure regressions are not established by those success/restart cases |
 | Interactive I/O | `tests/test_interactive_workload.py`, `tests/test_interactive_ssh.py`, `tests/test_binary_process.py`: bounded sessions and process I/O | No consumer protocol or scientific-equivalence proof |
@@ -163,3 +163,40 @@ the library with synthetic regressions and revalidate affected consumers.
 No private consumer source, state, scientific outputs or provider identities are
 included in this report. Current live reconciliation status must be checked in
 each consumer's own records and authorized operational context.
+
+## Isolated direct-resume candidate — 2026-11-13
+
+Branch `codex/resumable-transfer`, based on `508c181280161c9b0b6a798e3a13ce39e77bfb35`,
+prototypes resumable direct SSH uploads. A per-file partial name is bound to the
+reviewed SHA-256. Each invocation probes the remote destination and prefix,
+compares the prefix hash with the local source, and resumes at the verified
+offset. A corrupt prefix resets; an oversized prefix is rejected. Publication
+uses a same-directory hard link for no-clobber atomicity, and a lost publication
+acknowledgement is reconciled by checking the exact destination size and hash.
+The behavior now applies to small and chunked files on the direct route. The
+proxy route is unchanged.
+
+Offline evidence: `tests/test_upload_resume.py` runs the actual receiver shell
+commands through Git Bash with local temporary files and no SSH/provider
+networking. Seven cases pass, including a real partial write, corrupt and
+oversized partials, mismatched destination protection, idempotent completed
+files, lost publish acknowledgement and transfer-guard stopping. Also passed
+`test_connections.py` (14 tests) and `test_store_create.py` (32 tests) on
+Python 3.12.10. These checks do not qualify SSH, RunPod's remote shell, transfer
+latency or billing.
+
+The broad run reported 214 tests, one skipped, and one failed test with a cleanup
+error. The detached-supervisor test relies on a temporary `sitecustomize.py`
+loaded through `PYTHONPATH`; this workstation's embeddable Python
+`python312._pth` ignores that variable in child interpreters. The test child
+therefore missed its fake provider opener and remained in stopping/unresolved
+state after provider-read errors. No provider create or model transfer was
+performed. The runtime configuration was restored. Re-run the full suite under
+a supported interpreter/test bootstrap before treating this branch as a
+complete library candidate.
+
+Consumer disposition: none adopts this branch. Hybrid retains its current
+resumable uploader and pinned shared revision; MIAP and Partition require their
+own direct-route conformance checks before any pin change. Same-Pod partials do
+not survive Pod replacement. No installed artifact, live SSH test, proxy resume,
+release or consumer cutover is established.

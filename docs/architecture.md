@@ -184,7 +184,9 @@ Use bounded direct SSH first, with a qualified proxy transport for required
 consumers. Unify small bundles, streaming files and archives under manifests with
 path validation, per-file/total byte limits, local/remote hashes, atomic publication,
 timeouts and bounded output. Interactive process framing remains workload-owned.
-Transfer resume is a later capability unless needed and separately qualified.
+Direct upload resume is now prototyped on an isolated candidate branch; proxy
+upload resume remains open. Neither route is remotely qualified, and the direct
+candidate must pass installed-artifact and consumer conformance before adoption.
 
 The serial workload adapter owns finite upload and collection timeout/chunk
 settings. The library validates them against a one-hour operation ceiling and a

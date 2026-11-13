@@ -35,6 +35,7 @@ from runpod_experiments.state_config import StateStoreConfig
 from runpod_experiments.store_create import StoreCreateController
 from runpod_experiments.supervision import StoreCleanupMonitor
 from runpod_experiments.upload import upload_bundle
+from upload_test_support import direct_upload_runner
 
 
 ZERO = "0" * 64
@@ -347,17 +348,19 @@ class StoreCreateControllerTests(unittest.TestCase):
         source = self.root / "worker.py"
         source.write_bytes(worker)
         uploaded = []
+        response_runner = direct_upload_runner()
 
         def upload_runner(argv, **kwargs):
             uploaded.append((argv, kwargs["input"]))
-            return SimpleNamespace(stdout=b"", returncode=0)
+            return response_runner(argv, **kwargs)
 
         with patch("runpod_experiments.upload.subprocess.run", upload_runner):
             self.assertEqual(upload_bundle(
                 self.client, self.store, self.attempt["attempt_id"], self.project.project_id,
                 self.root, {"worker.py": sha256_bytes(worker)}, private_key, known_hosts,
-                "/tmp/nebula"), 1)
-        self.assertEqual(uploaded[0][1], worker)
+                "/tmp/nebula", runner=upload_runner), 1)
+        self.assertEqual(uploaded[1][1], worker)
+        self.assertEqual(len(uploaded), 3)
         self.assertIn("root@127.0.0.1", uploaded[0][0])
 
         large_worker = bytes((index % 233 for index in range(1_000_137)))
@@ -436,10 +439,7 @@ class StoreCreateControllerTests(unittest.TestCase):
         payload = bytes((index % 233 for index in range(2_000_123)))
         (source_root / "worker.bin").write_bytes(payload)
         calls = []
-
-        def upload_runner(argv, **kwargs):
-            calls.append((argv, kwargs))
-            return SimpleNamespace(stdout=b"", stderr=b"", returncode=0)
+        upload_runner = direct_upload_runner(calls)
 
         def transfer_check():
             if len(calls) >= 2:
@@ -455,11 +455,11 @@ class StoreCreateControllerTests(unittest.TestCase):
                 transfer_check=transfer_check, chunk_bytes=262_144,
                 timeout_seconds=1200)
 
-        # Initialization and one data chunk ran; the failed health check prevented
-        # another chunk and the final atomic publish command.
+        # The receiver probe and one data append ran; the health check prevented
+        # the final atomic publish command.
         self.assertEqual(len(calls), 2)
         self.assertEqual(len(calls[1][1]["input"]), 262_144)
-        self.assertTrue(all("mv --" not in call[0][-1] for call in calls))
+        self.assertTrue(all("ln --" not in call[0][-1] for call in calls))
 
     def test_store_proxy_route_supports_bounded_upload_and_collection_resolution(self):
         receipt = self.create()

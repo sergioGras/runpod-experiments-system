@@ -20,13 +20,28 @@ from runpod_experiments.transfer import (
 )
 
 
+class _DirectUploadCommandError(RuntimeError):
+    """An SSH command may have failed after applying its remote side effect."""
+
+
 def _upload_direct_chunks(fetcher, source, destination, expected_sha256, size,
                           transfer_check, runner, *, deadline, chunk_bytes):
-    temporary = destination + ".tmp-" + uuid.uuid4().hex
+    """Resume a hash-pinned direct upload and publish without replacing a file."""
+    source = Path(source)
+    partial = destination + ".partial-" + expected_sha256
     parent = str(PurePosixPath(destination).parent)
+    quoted_destination = shlex.quote(destination)
+    quoted_partial = shlex.quote(partial)
+    quoted_parent = shlex.quote(parent)
+    marker = "RPE1"
+
+    def check_transfer_deadline():
+        transfer_check()
+        if deadline - time.monotonic() <= 0:
+            raise TimeoutError("SSH upload exceeded its finite transfer window")
 
     def execute(command, data=b""):
-        transfer_check()
+        check_transfer_deadline()
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("SSH upload exceeded its finite transfer window")
@@ -42,41 +57,167 @@ def _upload_direct_chunks(fetcher, source, destination, expected_sha256, size,
                       runner(argv, input=data, capture_output=True,
                              timeout=min(90, remaining), check=False))
         except (subprocess.SubprocessError, OSError):
-            raise RuntimeError("SSH upload failed") from None
+            raise _DirectUploadCommandError("SSH upload command failed") from None
         stdout = getattr(result, "stdout", b"") or b""
         stderr = getattr(result, "stderr", b"") or b""
-        if (result.returncode != 0 or len(stdout) > 65536 or len(stderr) > 65536):
-            raise RuntimeError("SSH upload failed")
-        transfer_check()
+        out_bytes = stdout.encode("utf-8") if isinstance(stdout, str) else stdout
+        err_bytes = stderr.encode("utf-8") if isinstance(stderr, str) else stderr
+        if (result.returncode != 0 or len(out_bytes) > 65536 or len(err_bytes) > 65536):
+            raise _DirectUploadCommandError("SSH upload command failed")
+        check_transfer_deadline()
+        try:
+            return out_bytes.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            raise _DirectUploadCommandError("SSH upload returned invalid status") from None
 
-    quoted_temporary = shlex.quote(temporary)
-    execute("set -e; umask 077; mkdir -p -- " + shlex.quote(parent) +
-            "; set -C; : > " + quoted_temporary + "; set +C")
-    digest = hashlib.sha256()
-    offset = 0
-    with Path(source).open("rb") as stream:
-        while True:
-            transfer_check()
-            block = stream.read(chunk_bytes)
-            if not block:
-                break
-            digest.update(block)
-            command = ("set -e; actual=$(wc -c < " + quoted_temporary +
-                       "); test \"$actual\" -eq " + str(offset) +
-                       " && cat >> " + quoted_temporary +
-                       " && actual=$(wc -c < " + quoted_temporary +
-                       ") && test \"$actual\" -eq " + str(offset + len(block)))
-            execute(command, block)
-            offset += len(block)
-    if offset != size or digest.hexdigest() != expected_sha256:
-        raise ValueError("Export file changed while streaming")
-    finalize = ("set -e; actual=$(wc -c < " + quoted_temporary +
-                "); test \"$actual\" -eq " + str(size) +
-                " && printf '%s  %s\\n' " + shlex.quote(expected_sha256) +
-                " " + quoted_temporary + " | sha256sum -c - && mv -- " +
-                quoted_temporary + " " + shlex.quote(destination))
-    execute(finalize)
-    return size
+    probe_command = (
+        "set -eu; umask 077; mkdir -p -- " + quoted_parent +
+        "; if [ -L " + quoted_destination + " ]; then exit 71; fi; "
+        "if [ -e " + quoted_destination + " ]; then "
+        "[ -f " + quoted_destination + " ] || exit 72; "
+        "actual=$(wc -c < " + quoted_destination + " | tr -d '[:space:]'); "
+        "digest=$(sha256sum -- " + quoted_destination + " | awk '{print $1}'); "
+        "printf '%s PUBLISHED %s %s\\n' " + marker +
+        " \"$actual\" \"$digest\"; exit 0; fi; "
+        "if [ -L " + quoted_partial + " ]; then exit 73; fi; "
+        "if [ -e " + quoted_partial + " ]; then [ -f " + quoted_partial +
+        " ] || exit 74; else (set -C; : > " + quoted_partial +
+        ") 2>/dev/null || [ -f " + quoted_partial + " ]; fi; "
+        "chmod 600 -- " + quoted_partial + "; "
+        "actual=$(wc -c < " + quoted_partial + " | tr -d '[:space:]'); "
+        "digest=$(head -c \"$actual\" -- " + quoted_partial +
+        " | sha256sum | awk '{print $1}'); "
+        "printf '%s OFFSET %s %s\\n' " + marker + " \"$actual\" \"$digest\"")
+
+    def reset_partial():
+        command = (
+            "set -eu; if [ -L " + quoted_partial + " ]; then exit 73; fi; "
+            "if [ -e " + quoted_partial + " ]; then [ -f " + quoted_partial +
+            " ] || exit 74; rm -- " + quoted_partial + "; fi; "
+            "(set -C; : > " + quoted_partial + ") 2>/dev/null || exit 75; "
+            "printf '%s RESET\\n' " + marker)
+        if execute(command) != marker + " RESET":
+            raise _DirectUploadCommandError("SSH upload reset acknowledgement was invalid")
+
+    def probe():
+        response = execute(probe_command)
+        match = re.fullmatch(
+            marker + r" (PUBLISHED|OFFSET) (0|[1-9][0-9]*) ([0-9a-f]{64})",
+            response)
+        if not match:
+            raise _DirectUploadCommandError("SSH upload probe returned invalid status")
+        kind, raw_offset, remote_digest = match.groups()
+        offset = int(raw_offset)
+        if kind == "PUBLISHED":
+            if offset != size or remote_digest != expected_sha256:
+                raise ValueError("Existing remote destination differs from reviewed file")
+            return {"published": True, "offset": size}
+        if offset > size:
+            raise ValueError("Remote partial exceeds reviewed file size")
+        with source.open("rb") as stream:
+            local_hash = hashlib.sha256()
+            remaining = offset
+            while remaining:
+                check_transfer_deadline()
+                block = stream.read(min(chunk_bytes, remaining))
+                if not block:
+                    raise ValueError("Export file became shorter while checking resume")
+                local_hash.update(block)
+                remaining -= len(block)
+        if local_hash.hexdigest() != remote_digest:
+            reset_partial()
+            return {"published": False, "offset": 0}
+        return {"published": False, "offset": offset}
+
+    def append_command(offset, block_size):
+        end = offset + block_size
+        return (
+            "set -eu; [ ! -L " + quoted_partial + " ]; [ -f " + quoted_partial +
+            " ]; actual=$(wc -c < " + quoted_partial + " | tr -d '[:space:]'); "
+            "test \"$actual\" -eq " + str(offset) + " && cat >> " + quoted_partial +
+            " && actual=$(wc -c < " + quoted_partial +
+            " | tr -d '[:space:]') && test \"$actual\" -eq " + str(end) +
+            " && printf '%s APPENDED %s\\n' " + marker + " \"$actual\"")
+
+    def publish_command():
+        return (
+            "set -eu; [ ! -L " + quoted_partial + " ]; [ -f " + quoted_partial +
+            " ]; actual=$(wc -c < " + quoted_partial + " | tr -d '[:space:]'); "
+            "test \"$actual\" -eq " + str(size) + " && printf '%s  %s\\n' " +
+            shlex.quote(expected_sha256) + " " + quoted_partial +
+            " | sha256sum -c - >/dev/null; if [ -L " + quoted_destination +
+            " ]; then exit 71; fi; if ln -- " + quoted_partial + " " +
+            quoted_destination + " 2>/dev/null; then rm -- " + quoted_partial +
+            "; elif [ -f " + quoted_destination + " ] && [ ! -L " +
+            quoted_destination + " ] && [ \"$(wc -c < " + quoted_destination +
+            " | tr -d '[:space:]')\" -eq " + str(size) + " ] && "
+            "[ \"$(sha256sum -- " + quoted_destination +
+            " | awk '{print $1}')\" = " + shlex.quote(expected_sha256) +
+            " ]; then rm -- " + quoted_partial + "; else exit 76; fi; "
+            "printf '%s PUBLISHED %s %s\\n' " + marker + " " + str(size) +
+            " " + shlex.quote(expected_sha256))
+
+    state = probe()
+    if state["published"]:
+        return size
+    offset = state["offset"]
+    for attempt in range(3):
+        if offset < size:
+            try:
+                digest = hashlib.sha256()
+                with source.open("rb") as stream:
+                    before = os.fstat(stream.fileno())
+                    prefix_left = offset
+                    while prefix_left:
+                        check_transfer_deadline()
+                        block = stream.read(min(chunk_bytes, prefix_left))
+                        if not block:
+                            raise ValueError("Export file became shorter while checking resume")
+                        digest.update(block)
+                        prefix_left -= len(block)
+                    while offset < size:
+                        check_transfer_deadline()
+                        block = stream.read(min(chunk_bytes, size - offset))
+                        if not block:
+                            raise ValueError("Export file became shorter while streaming")
+                        digest.update(block)
+                        response = execute(append_command(offset, len(block)), block)
+                        expected = marker + " APPENDED " + str(offset + len(block))
+                        if response != expected:
+                            raise _DirectUploadCommandError(
+                                "SSH upload append acknowledgement was invalid")
+                        offset += len(block)
+                    after = os.fstat(stream.fileno())
+                before_identity = (before.st_size, before.st_mtime_ns,
+                                  before.st_dev, before.st_ino)
+                after_identity = (after.st_size, after.st_mtime_ns,
+                                  after.st_dev, after.st_ino)
+                if (offset != size or digest.hexdigest() != expected_sha256 or
+                        before_identity != after_identity):
+                    raise ValueError("Export file changed while streaming")
+            except _DirectUploadCommandError as error:
+                state = probe()
+                if state["published"]:
+                    return size
+                offset = state["offset"]
+                if attempt == 2:
+                    raise RuntimeError("SSH upload retries exhausted") from error
+                continue
+
+        try:
+            response = execute(publish_command())
+            if response != marker + " PUBLISHED " + str(size) + " " + expected_sha256:
+                raise _DirectUploadCommandError(
+                    "SSH upload publication acknowledgement was invalid")
+            return size
+        except _DirectUploadCommandError as error:
+            state = probe()
+            if state["published"]:
+                return size
+            offset = state["offset"]
+            if attempt == 2:
+                raise RuntimeError("SSH upload publication retries exhausted") from error
+    raise RuntimeError("SSH upload retries exhausted")
 
 
 def upload_bundle(client, ledger, attempt_id, project_id, source_root, manifest, key_file,
@@ -207,29 +348,9 @@ def upload_bundle(client, ledger, attempt_id, project_id, source_root, manifest,
         transfer_check()
         proxy.execute("\n".join(script), timeout=min(300, remaining_transfer_seconds()))
         return len(reviewed)
-    if total_bytes > chunk_bytes:
-        for name, path, size in reviewed:
-            destination = str(PurePosixPath(remote_root) / name)
-            _upload_direct_chunks(fetcher, path, destination, manifest[name], size,
-                                  transfer_check, runner, deadline=transfer_deadline,
-                                  chunk_bytes=chunk_bytes)
-        return len(reviewed)
     for name, path, size in reviewed:
-        transfer_check()
-        data = path.read_bytes()
-        if len(data) != size or hashlib.sha256(data).hexdigest() != manifest[name]:
-            raise ValueError("Export file changed since review")
-        destination = PurePosixPath(remote_root) / name
-        temporary = str(destination) + ".tmp-" + uuid.uuid4().hex
-        command = "umask 077; mkdir -p -- " + shlex.quote(str(destination.parent))
-        command += " && cat > " + shlex.quote(temporary) + " && mv -- " + shlex.quote(temporary) + " " + shlex.quote(str(destination))
-        argv = ["ssh", "-T", "-i", fetcher.key_file, "-p", str(fetcher.port), "-o", "BatchMode=yes",
-                "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=yes", "-o",
-                "UserKnownHostsFile=" + fetcher.known_hosts, fetcher.username + "@" + fetcher.host, command]
-        try:
-            effective_runner(argv, input=data, capture_output=True,
-                             timeout=min(30, remaining_transfer_seconds()), check=True)
-        except (subprocess.SubprocessError, OSError):
-            raise RuntimeError("SSH upload failed") from None
-        transfer_check()
+        destination = str(PurePosixPath(remote_root) / name)
+        _upload_direct_chunks(fetcher, path, destination, manifest[name], size,
+                              transfer_check, runner, deadline=transfer_deadline,
+                              chunk_bytes=chunk_bytes)
     return len(reviewed)
