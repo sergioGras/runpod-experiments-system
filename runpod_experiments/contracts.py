@@ -15,7 +15,7 @@ import re
 from typing import Any
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 MAX_DOCUMENT_BYTES = 1_048_576
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _COMMIT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
@@ -23,6 +23,7 @@ _PROJECT_ID = re.compile(r"[a-z][a-z0-9-]{2,63}\Z")
 _PREFIX = re.compile(r"[a-z][a-z0-9-]+-\Z")
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,252}\Z")
+_ENVIRONMENT_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,63}\Z")
 _PROVIDER_FACTORY = re.compile(
     r"(?:[A-Za-z_][A-Za-z0-9_]*\.)*[A-Za-z_][A-Za-z0-9_]*:"
     r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\Z")
@@ -181,6 +182,9 @@ class ApprovalScope:
     expires_epoch: int
     max_active_resources: int = 1
     schema_version: int = SCHEMA_VERSION
+    # Names only: the corresponding secret values are supplied at runtime and
+    # never become part of an approved or persisted execution document.
+    secret_environment_names: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _text(self.approval_id, "approval_id", _IDENTIFIER)
@@ -194,6 +198,9 @@ class ApprovalScope:
             _positive_int(getattr(self, field), field)
         if type(self.max_active_resources) is not int or self.max_active_resources not in (1, 2):
             raise ContractError("max_active_resources must be 1 or 2")
+        _unique_text_tuple(self.secret_environment_names,
+                           "secret_environment_names", _ENVIRONMENT_NAME,
+                           allow_empty=True)
         if type(self.schema_version) is not int or self.schema_version != SCHEMA_VERSION:
             raise ContractError("unsupported ApprovalScope schema version")
 

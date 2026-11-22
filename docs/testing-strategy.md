@@ -41,7 +41,7 @@ Never use a real account to prove that an unapproved create guard rejects a call
 | Supervisor | Failed launch, actual PID/interpreter, package mismatch, heartbeat delay, foreground/tool exit, transient/persistent telemetry failure and stop latching |
 | Reconciliation | Definitive rejection versus timeout, unknown create response, returned candidate ID, repeated detail/list absence and no optimistic release |
 | Transport | Direct/proxy host-key behavior, handshake failure, corrupt/truncated/oversized data, symlinks/path escape, stalled input/output, remote/local hash mismatch |
-| Credentials | Secret delivered only to approved exact workload, absent from serialized plans/argv/logs/artifacts, sanitized error/stage evidence |
+| Credentials | Approval-bound environment names match workload declarations; bounded secret values go only to the exact workload, stay out of serialized values/argv/logs/stage events/artifacts, and cause redacted errors; nonsecret launch behavior remains unchanged |
 | Workload | Install/start/observe/collect failures, partial evidence, scientific failed verdict, independent cleanup and no automatic scientific retries |
 | Restart | Verified output promotion once, completed-block recovery, missing/duplicate outputs, finalization without a new resource, exact prior provenance |
 | Parallel cleanup | One resource fails while another continues within policy; each child has an independent watchdog; deleting one cannot touch the other or a sibling project |

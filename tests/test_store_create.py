@@ -4,6 +4,7 @@ import json
 import re
 import os
 from pathlib import Path
+import subprocess
 import struct
 import tempfile
 import threading
@@ -398,6 +399,37 @@ class StoreCreateControllerTests(unittest.TestCase):
         self.assertIn("root@127.0.0.1", launched["argv"])
         self.assertIn("timeout 30 python3 worker.py --run", launched["argv"][-1])
 
+        secret = "synthetic-HF-token-never-in-command-or-log"
+
+        class CapturingInput:
+            def __init__(self): self.data = bytearray(); self.closed = False
+            def write(self, value): self.data.extend(value); return len(value)
+            def flush(self): pass
+            def close(self): self.closed = True
+
+        secret_stdin = CapturingInput()
+        secret_launch = {}
+
+        def secret_popen(argv, **kwargs):
+            secret_launch.update(argv=argv, kwargs=kwargs)
+            return SimpleNamespace(pid=5051, stdin=secret_stdin, kill=lambda: None)
+
+        start_python(
+            self.client, self.store, self.attempt["attempt_id"], self.project.project_id,
+            private_key, known_hosts, "/tmp/nebula", "worker.py", ["--run"], 30,
+            self.root / "secret-worker.log", secret_environment={"HF_TOKEN": secret},
+            popen=secret_popen)
+        command_text = " ".join(secret_launch["argv"])
+        self.assertNotIn(secret, command_text)
+        self.assertIn("python3 -c", secret_launch["argv"][-1])
+        self.assertEqual(bytes(secret_stdin.data),
+                         b'{"HF_TOKEN":"' + secret.encode() + b'"}')
+        self.assertTrue(secret_stdin.closed)
+        self.assertEqual(secret_launch["kwargs"]["stdin"], subprocess.PIPE)
+        self.assertEqual(secret_launch["kwargs"]["stdout"], subprocess.DEVNULL)
+        self.assertEqual(secret_launch["kwargs"]["stderr"], subprocess.DEVNULL)
+        self.assertEqual((self.root / "secret-worker.log").read_bytes(), b"")
+
         class Fetcher:
             def __init__(self, host, port, username, *_args):
                 self.endpoint = (host, port, username)
@@ -555,6 +587,18 @@ class StoreCreateControllerTests(unittest.TestCase):
     def test_store_serial_engine_runs_one_fake_attempt_and_confirms_cleanup(self):
         self._run_fake_serial_engine_attempt()
 
+    def test_serial_engine_delivers_approved_secret_only_to_opted_in_workload_launcher(self):
+        secret = "synthetic-secret-value-never-persist"
+        result, delivered, secret_names, plan = self._run_fake_serial_engine_attempt(
+            secret_required=True, secret_value=secret)
+        self.assertEqual(result.outcome.operational_status.value, "succeeded")
+        self.assertEqual(secret_names, [("HF_TOKEN",)])
+        self.assertEqual(delivered, [{"HF_TOKEN": secret}])
+        plan_document = encode_document("execution_plan", plan)
+        self.assertNotIn(secret.encode(), plan_document)
+        self.assertNotIn(secret, repr(self.store.events()))
+        self.assertTrue(self.store.verify_event_chain())
+
     def test_setup_process_poll_failure_still_confirms_provider_cleanup(self):
         result = self._run_fake_serial_engine_attempt(setup_failure="poll")
         self.assertEqual(result.outcome.operational_status.value, "failed")
@@ -590,7 +634,8 @@ class StoreCreateControllerTests(unittest.TestCase):
         self.assertEqual(result.outcome.operational_status.value, "failed")
         self.assertEqual(result.outcome.cleanup_status.value, "confirmed")
 
-    def _run_fake_serial_engine_attempt(self, *, setup_failure=None, workload_failure=None):
+    def _run_fake_serial_engine_attempt(self, *, setup_failure=None, workload_failure=None,
+                                        secret_required=False, secret_value=None):
         collector_limits = {}
         self.store.cancel_uncreated(self.attempt["attempt_id"])
         worker = b"synthetic serial worker"
@@ -601,9 +646,13 @@ class StoreCreateControllerTests(unittest.TestCase):
             ManifestFile("results.json", ZERO, 0, TransferDirection.DOWNLOAD),
         ), 4096, 8192)
         job_id, attempt_id, pod_name = "job-serial-engine", "attempt-engine", "nebula-engine-001"
-        plan = replace(self.plan, job_id=job_id, transfers=transfer)
+        approval = (replace(self.plan.approval, approval_id="approval-secret-bound",
+                            secret_environment_names=("HF_TOKEN",))
+                    if secret_required else self.plan.approval)
+        plan = replace(self.plan, job_id=job_id, transfers=transfer, approval=approval)
         attempt_plan = replace(
             self.attempt_plan, attempt_id=attempt_id, job_id=job_id,
+            approval_id=approval.approval_id,
             request_sha256=pod_create_request_sha256(
                 plan.provisioning, self.attempt_plan.selected_resource, REGION, pod_name))
         self.store.reserve_attempt(plan, attempt_plan, pod_name)
@@ -692,9 +741,12 @@ class StoreCreateControllerTests(unittest.TestCase):
 
         process_launches = []
         workload_processes = []
+        delivered_secrets = []
 
-        def process_launcher(*args, **_kwargs):
+        def process_launcher(*args, **kwargs):
             process_launches.append((args[7], tuple(args[8]), args[9]))
+            if args[7] == "worker.py" and "secret_environment" in kwargs:
+                delivered_secrets.append(dict(kwargs["secret_environment"]))
             if setup_failure is not None and args[7] == "setup.py":
                 if setup_failure == "invalid":
                     return object()
@@ -752,6 +804,8 @@ class StoreCreateControllerTests(unittest.TestCase):
                 return process
             return SimpleNamespace(returncode=0, poll=lambda: 0)
 
+        process_launcher.supports_ephemeral_secrets = True
+
         engine = SerialExecutionEngine(
             self.client, self.store, self.state_config,
             supervisor_launcher=supervisor_launcher,
@@ -766,14 +820,19 @@ class StoreCreateControllerTests(unittest.TestCase):
             upload_chunk_bytes=262_144, collection_timeout_seconds=600,
             collection_chunk_bytes=262_144, setup_script="setup.py",
             setup_arguments=("--verify-archive",),
-            setup_timeout_seconds=1 if setup_failure == "timeout" else 900)
+            setup_timeout_seconds=1 if setup_failure == "timeout" else 900,
+            secret_environment_names=("HF_TOKEN",) if secret_required else ())
         self.assertTrue(self.key_path.is_file())
         (self.root / "id_ed25519").write_bytes(b"private-key-fixture")
         (self.root / "known_hosts").write_text(
             "[127.0.0.1]:2222 ssh-ed25519 fixture\n", encoding="utf-8")
         result = engine.run_attempt(
             plan, attempt_id, workload, local_public_key_path=self.key_path,
+            secret_provider=(lambda names: ({name: secret_value for name in names})
+                             if secret_required else None),
             cleanup_timeout_seconds=3)
+        if secret_required:
+            return result, delivered_secrets, [workload.secret_environment_names], plan
         if workload_failure == "poll":
             self.assertEqual(len(workload_processes), 1)
             self.assertTrue(workload_processes[0].terminated)

@@ -3,11 +3,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 import math
 from pathlib import Path, PurePosixPath
+import re
 import subprocess
 import time
-from typing import Callable
+from typing import Callable, Mapping
 
 from runpod_experiments.collection_process import launch_execution_store
 from runpod_experiments.contracts import (
@@ -54,6 +56,7 @@ class AttemptWorkload:
     setup_script: str | None = None
     setup_arguments: tuple[str, ...] = ()
     setup_timeout_seconds: int = 900
+    secret_environment_names: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         for field in ("source_root", "key_file", "known_hosts", "artifact_directory"):
@@ -94,6 +97,12 @@ class AttemptWorkload:
         if (type(self.setup_timeout_seconds) is not int or
                 not 1 <= self.setup_timeout_seconds <= 3600):
             raise ValueError("setup_timeout_seconds must be between 1 and 3600")
+        if (not isinstance(self.secret_environment_names, tuple) or
+                any(not isinstance(name, str) or
+                    re.fullmatch(r"[A-Z_][A-Z0-9_]{0,63}", name) is None
+                    for name in self.secret_environment_names) or
+                len(set(self.secret_environment_names)) != len(self.secret_environment_names)):
+            raise ValueError("secret_environment_names must be unique environment names")
         if (not isinstance(self.result_names, tuple) or not self.result_names or
                 any(not isinstance(name, str) or not name for name in self.result_names) or
                 len(set(self.result_names)) != len(self.result_names)):
@@ -186,7 +195,8 @@ class SerialExecutionEngine:
 
     def _validate_workload(self, plan: ExecutionPlan, attempt: dict,
                            workload: AttemptWorkload,
-                           interactive_driver: InteractiveDriver | None = None) -> dict[str, str]:
+                           interactive_driver: InteractiveDriver | None = None,
+                           secret_provider: Callable | None = None) -> dict[str, str]:
         if not isinstance(plan, ExecutionPlan) or not isinstance(workload, AttemptWorkload):
             raise TypeError("plan and workload must use the shared typed contracts")
         if (interactive_driver is not None and
@@ -195,6 +205,19 @@ class SerialExecutionEngine:
         if interactive_driver is not None and workload.ssh_route != "direct":
             raise ExecutionError(FailureCategory.CONFIGURATION,
                                  "interactive_proxy_route_unsupported")
+        approved_secret_names = plan.approval.secret_environment_names
+        if workload.secret_environment_names != approved_secret_names:
+            raise ExecutionError(FailureCategory.AUTHORIZATION,
+                                 "workload_secret_scope_mismatch")
+        if workload.secret_environment_names:
+            if not callable(secret_provider):
+                raise ExecutionError(FailureCategory.CONFIGURATION,
+                                     "secret_provider_required")
+            if (interactive_driver is not None or workload.ssh_route != "direct" or
+                    (self.process_launcher is not start_python and
+                     getattr(self.process_launcher, "supports_ephemeral_secrets", False) is not True)):
+                raise ExecutionError(FailureCategory.CONFIGURATION,
+                                     "secret_transport_not_qualified")
         self.store.verify_execution_plan(attempt["attempt_id"], plan)
         if (plan.project.project_id != self.store.project_id or
                 plan.approval.controller_host != self.store.controller_host or
@@ -249,6 +272,35 @@ class SerialExecutionEngine:
             raise ExecutionError(FailureCategory.CONFIGURATION,
                                  "proxy_process_adapter_required")
         return bundle
+
+    @staticmethod
+    def _load_secret_environment(names: tuple[str, ...], provider: Callable | None
+                                 ) -> dict[str, str] | None:
+        if not names:
+            return None
+        try:
+            values = provider(names)
+            if not isinstance(values, Mapping) or set(values) != set(names):
+                raise ValueError
+            selected = {}
+            for name in names:
+                value = values[name]
+                if not isinstance(value, str) or not value or "\x00" in value:
+                    raise ValueError
+                encoded = value.encode("utf-8")
+                if len(encoded) > 8192:
+                    raise ValueError
+                selected[name] = value
+            serialized = json.dumps(selected, ensure_ascii=True, separators=(",", ":"),
+                                    allow_nan=False).encode("ascii")
+            if len(serialized) > 16_384:
+                raise ValueError
+            return selected
+        except Exception:
+            # A project callback may include sensitive values in its exception.
+            # Keep that text out of shared logs and stage events.
+            raise ExecutionError(FailureCategory.CONFIGURATION,
+                                 "secret_environment_unavailable") from None
 
     @staticmethod
     def _read_state(path: Path) -> dict:
@@ -430,6 +482,7 @@ class SerialExecutionEngine:
     def run_attempt(self, plan: ExecutionPlan, attempt_id: str, workload: AttemptWorkload, *,
                     local_public_key_path: str | Path,
                     interactive_driver: InteractiveDriver | None = None,
+                    secret_provider: Callable[[tuple[str, ...]], Mapping[str, str]] | None = None,
                     cleanup_timeout_seconds: int = 180) -> SerialAttemptResult:
         """Run one new reserved attempt; do not retry or replay a started stage."""
         if type(cleanup_timeout_seconds) is not int or not 1 <= cleanup_timeout_seconds <= 3600:
@@ -444,7 +497,10 @@ class SerialExecutionEngine:
                                  "attempt_stage_recovery_required")
         try:
             bundle = self._validate_workload(plan, attempt, workload,
-                                             interactive_driver=interactive_driver)
+                                             interactive_driver=interactive_driver,
+                                             secret_provider=secret_provider)
+            secret_environment = self._load_secret_environment(
+                workload.secret_environment_names, secret_provider)
             attempt_directory, supervisor_directory = self._prepare_attempt_directory(attempt_id)
             client = (self.client if self.client is not None else
                       provider_client_for_attempt(self.store, attempt_id, "controller"))
@@ -633,11 +689,17 @@ class SerialExecutionEngine:
                 remaining = end - self.monotonic()
                 workload_timeout = min(
                     workload.timeout_seconds, max(1, math.ceil(remaining)))
-                workload_process = self.process_launcher(
-                    client, self.store, attempt_id, project, workload.key_file,
-                    workload.known_hosts, workload.remote_root, workload.script,
-                    list(workload.arguments), workload_timeout,
-                    attempt_directory / "workload.log")
+                try:
+                    workload_process = self.process_launcher(
+                        client, self.store, attempt_id, project, workload.key_file,
+                        workload.known_hosts, workload.remote_root, workload.script,
+                        list(workload.arguments), workload_timeout,
+                        attempt_directory / "workload.log",
+                        **({"secret_environment": secret_environment}
+                           if secret_environment is not None else {}))
+                finally:
+                    if secret_environment is not None:
+                        secret_environment.clear()
             else:
                 check_workload_deadline()
                 remaining = end - self.monotonic()

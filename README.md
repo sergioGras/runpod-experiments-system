@@ -14,8 +14,9 @@ fresh quote, selected region, registered SSH-key fingerprint, project inventory,
 and independent supervisor state to a durable one-use create claim. The create
 path is connected to the internal serial engine, with passing complete fake
 CPU and GPU attempt scenarios. It has not been qualified against a RunPod account.
-The internal M10 preview now adds a schema-v5 parent admission scope, explicit
-quiescent v4 migration, and a bounded runner that executes separately approved
+The internal M10 preview uses execution-store schema v6, adds a parent
+admission scope, retains an explicit quiescent serial-store v4 migration, and
+provides a bounded runner that executes separately approved
 child jobs through independent serial-engine supervisors. Parent/child admission,
 process-race, installed wheel/sdist and focused consumer adapter tests pass with
 synthetic fixtures. Same-group concurrent create claims verify sibling
@@ -29,6 +30,13 @@ worker lifecycle are not cut over. M3 through M6 qualification remains open;
 no active consumer entrypoint or package pin adopts the preview. These changes
 are not part of the pinned 0.1.0 package; existing consumers and their current
 package pins remain unchanged.
+
+The latest isolated candidate uses contract schema v4 and execution-store
+schema v6 (the M10 parent/child extension is retained). Approval scopes can
+bind an allowlist of secret environment-variable names; values are supplied at
+runtime through a bounded direct-SSH stdin channel
+and are excluded from command arguments and worker logs. This is synthetic-only
+engineering evidence, not a released or consumer-adopted capability.
 
 Detailed design and development documents:
 

@@ -91,6 +91,16 @@ def attempt(plan=None, **changes):
 
 
 class ProjectAndApprovalContracts(unittest.TestCase):
+    def test_approval_scope_allows_only_unique_environment_variable_names(self):
+        scoped = approval(secret_environment_names=("HF_TOKEN", "MODEL_ACCESS_TOKEN"))
+        document = encode_document("approval_scope", scoped)
+        self.assertIn(b'"secret_environment_names":["HF_TOKEN","MODEL_ACCESS_TOKEN"]',
+                      document)
+        self.assertNotIn(b"synthetic-secret", document)
+        for names in (("hf_token",), ("HF_TOKEN", "HF_TOKEN"), ["HF_TOKEN"]):
+            with self.subTest(names=names), self.assertRaises(ContractError):
+                approval(secret_environment_names=names)
+
     def test_parent_admission_group_is_finite_and_binds_unique_children(self):
         scope = AdmissionGroupScope("group-001", "synthetic-nebula", "WINDOWS-TEST",
                                     ZERO, ONE, "2" * 64, 1_000_000, 500_000,

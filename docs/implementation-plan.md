@@ -7,10 +7,12 @@ they are not current capability summaries.
 
 Status: M0 design and M1 are complete. M2 remains open pending account-level
 qualification of billing and resource quotes. The isolated
-`design/unified-execution` worktree now has an internal schema-v4 SQLite store,
-store-backed cleanup supervisor and one-shot create controller, store-verified
-direct/proxy transfer paths, durable stage events and an internal serial
-coordinator for one attempt, finite job retries and controller-restart cleanup.
+`design/unified-execution` worktree now has contract schema v4, execution-store
+schema v6, an approval-bound ephemeral secret-name allowlist, an internal SQLite
+store, store-backed cleanup supervisor and one-shot create controller,
+store-verified direct/proxy transfer paths, durable stage events, and an
+internal serial coordinator for one attempt, finite job retries and
+controller-restart cleanup.
 M3 through M6 exit criteria remain open; this is not a qualified production
 engine or consumer migration. Read
 [architecture](architecture.md), [testing](testing-strategy.md) and

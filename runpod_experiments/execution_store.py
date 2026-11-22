@@ -30,7 +30,7 @@ from runpod_experiments.resource_policy import request_hash
 
 
 SERIAL_STORE_SCHEMA_VERSION = 4
-STORE_SCHEMA_VERSION = 5
+STORE_SCHEMA_VERSION = 6
 SQLITE_MAX_INTEGER = 9_223_372_036_854_775_807
 _POD_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 _POD_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,127}\Z")

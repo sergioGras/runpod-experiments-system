@@ -143,8 +143,13 @@ publication, timed I/O and output limits. Resume requires its own tested integri
 contract. Keep host-key policy explicit; TOFU is not independent authentication.
 
 Use a deliberate ephemeral secret-delivery interface for authorized model access.
-Credentials must not enter command diagnostics, argument logs, manifests, bundles,
-telemetry or returned artifacts. Preserve private journals and collect permitted
+The current internal contract binds allowed environment-variable names in the
+approval scope and matches them exactly against each workload declaration;
+secret values are fetched at runtime through a consumer callback. The built-in
+direct-SSH path sends a bounded payload over encrypted SSH stdin and suppresses
+worker stdout/stderr. Values must not enter command diagnostics, argument logs,
+manifests, bundles, telemetry or returned artifacts. Proxy/interactive secret
+delivery remains unqualified. Preserve private journals and collect permitted
 partial/failure artifacts before cleanup whenever possible. A numerical failure
 is an experiment outcome; it need not suppress collection or trigger a retry.
 

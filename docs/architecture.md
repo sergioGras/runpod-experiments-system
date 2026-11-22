@@ -59,7 +59,7 @@ explicitly before exposing the facade. The names below are design proposals.
 | Contract | Responsibility |
 | --- | --- |
 | `ProjectPolicy` | Project ID, namespace registry digest, allowed host, provider-factory identity, state root and configured ceilings |
-| `ApprovalScope` | Validated approval evidence, stable objective/disclosure digests, cumulative limits and any owner-imposed deadline |
+| `ApprovalScope` | Validated approval evidence, stable objective/disclosure digests, cumulative limits, any owner-imposed deadline, and approved secret environment-variable names |
 | `ExecutionPlan` | Immutable job recipe: approved CPU-only or GPU-only resource choices, source/package/config digests, transfer manifests and finite retry policy |
 | `Workload` | Bounded prepare/start/observe/collect/verify stages using an attempt context |
 | `Engine` | Preflight, finite execution, inspection and reconciliation |
@@ -147,7 +147,7 @@ and fixes the parent deadline at first reservation. Each child retains its own
 serial engine and provider watchdog. Provider billing delay or failure can
 defeat a strict monetary ceiling; record the remaining uncertainty.
 
-New parallel stores use schema v5. Opening a serial v4 store never upgrades it;
+New parallel stores use schema v6. Opening a serial v4 store never upgrades it;
 the explicit migration preserves existing rows and refuses unresolved attempts
 or incomplete billing. Run it only after a reviewed reconciliation boundary.
 The internal runner accepts a bounded wave of already-reserved child jobs and
@@ -233,10 +233,20 @@ the stage, and cleans up before the collector or workload starts on failure.
 Controller recovery records an interrupted setup as not replayed. The script's
 contents and package policy stay with the consumer.
 
-Host-key trust is explicit policy. Approved model credentials use an ephemeral
-delivery channel and never enter plan serialization, argument logs, diagnostics,
-manifests or returned artifacts. Journals/results are private by default with
-allowlisted export fields. Collect permitted failure evidence before cleanup
+Host-key trust is explicit policy. Contract schema v4 lets an approval scope bind
+the exact environment-variable names a workload may receive. The matching
+`AttemptWorkload` declaration must match that allowlist exactly. The engine
+loads bounded values through a consumer-supplied callback before create; values
+are never part of the plan, approval document, arguments or stage events. The
+built-in direct-SSH launcher sends a bounded JSON payload over encrypted SSH
+stdin to a small remote bootstrap, which starts the exact workload with those
+environment values. Worker stdout and stderr are suppressed for secret-bearing
+runs so they cannot copy a credential into the controller's workload log.
+Interactive and proxy secret transport is unsupported unless a consumer launcher
+explicitly qualifies the same contract. A consumer remains responsible for
+approval validation, not placing secret values in its allowlisted artifacts, and
+not logging them in a custom launcher. Journals/results are private by default
+with allowlisted export fields. Collect permitted failure evidence before cleanup
 where possible; collection failure must not prevent independent termination.
 
 ## Package and release boundary

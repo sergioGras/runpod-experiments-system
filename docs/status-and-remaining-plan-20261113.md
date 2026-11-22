@@ -20,7 +20,7 @@ These statuses are separate; a test count alone does not establish coverage.
 
 | Area | Evidence | Limit |
 | --- | --- | --- |
-| Contracts | `tests/test_contracts.py`: immutable specifications, bounded values and serialization | Internal APIs and schemas; compatibility policy still needs release review |
+| Contracts | `tests/test_contracts.py`: schema-v4 immutable specifications, bounded values and serialization; approval scopes bind secret environment-variable names | Internal APIs and schemas; no general upgrade from contract v3 or store v5, and release compatibility review remains open |
 | Provider boundary | `tests/test_provider.py`: synthetic inventory, quotes, billing and sanitized errors | Account responses, delayed billing finality and current API compatibility unqualified |
 | Store/admission | `tests/test_execution_store.py`: actual SQLite, independent-process serial/group cap races, crash rollback, holds, adjustments, immutable parent/child admission and explicit v4 migration; two-child fake-provider execution confirms independent watchdogs and exact cleanup | One configured host; private-store migration and cross-host coordination remain unverified |
 | Supervision | Store tests include a real detached child surviving launcher-parent exit; GPU supervision tests bind runtime evidence before SSH | Not a complete supported-host/interpreter/package qualification matrix |
@@ -28,8 +28,9 @@ These statuses are separate; a test count alone does not establish coverage.
 | Serial engine | `tests/test_store_create.py`, `tests/test_gpu_supervision.py`: complete fake CPU/GPU attempts, finite retries, deadline failures and restart cleanup | No integrated live qualification or consumer acceptance |
 | Setup | `tests/test_store_create.py`: invalid process handle, poll error, nonzero exit, timeout, supervisor loss, and terminate/kill failure all fail before collection/workload and still attempt provider cleanup | A local process stop that cannot be confirmed still requires reconciliation |
 | Interactive I/O | `tests/test_interactive_workload.py`, `tests/test_interactive_ssh.py`, `tests/test_binary_process.py`: bounded sessions and process I/O | No consumer protocol or scientific-equivalence proof |
+| Secret delivery | Synthetic approval/workload scope matching, bounded callback, direct-SSH stdin framing and no-value-in-argv/log/event checks | No actual model credential or provider path; proxy/interactive secret delivery unqualified |
 | Packaging | Candidate wheel and sdist install outside checkout; installed contract/admission tests and focused consumer slices pass; detached supervisor/collector import policy-bound consumer factories; archive contents were reviewed | Temporary candidates are not release assets; supported-host, ACL, and live provider qualification remain open |
-| Consumers | Isolated opt-in adapters in Hybrid, MIAP, and Partition pass focused offline acceptance against installed artifacts; Partition maps P020 parent/child limits and completes synthetic CPU-only parallel-engine and exact ambiguous-Pod recovery paths | No active entrypoint or dependency pin adopts the engine; MIAP approval/credential mapping, Hybrid phase mapping, and Partition's full worker lifecycle and coordinator cutover remain open |
+| Consumers | Isolated opt-in adapters in Hybrid, MIAP, and Partition pass focused offline acceptance against installed artifacts; Partition maps P020 parent/child limits and completes synthetic CPU-only parallel-engine and exact ambiguous-Pod recovery paths | No active entrypoint or dependency pin adopts the engine; MIAP's helper maps `hf_token_delivery` to the v4 scope/callback, but the new experiment workflow is not wired; Hybrid phase mapping and Partition's full worker lifecycle/coordinator cutover remain open |
 
 M10 parent/child admission follow-up (2026-11-22; local development candidate,
 not a release):
@@ -457,3 +458,38 @@ the active controllers and local run state remain untouched. No provider call,
 Pod mutation, paid run, upload or disclosure occurred. Deployment/live
 qualification, interrupted-service parity, reconciled cutover, M10 and release
 remain open.
+
+### Approval-bound ephemeral secret transport — 2026-11-22
+
+The isolated shared branch now uses contract schema v4 and execution-store
+schema v6. `ApprovalScope.secret_environment_names` binds environment names
+only; values stay outside persisted documents. `AttemptWorkload` must declare
+the exact same tuple, and a project callback supplies bounded values after
+plan/workload validation but before provider create. The built-in direct SSH
+launcher sends a bounded JSON payload over encrypted SSH stdin, never puts
+values in command arguments, and suppresses secret-bearing worker stdout/stderr.
+Values are cleared from the engine's mapping as soon as the launcher returns.
+Interactive and proxy delivery remain unqualified unless a consumer supplies
+an explicitly capable launcher.
+
+The latest source validation passed **247 tests with one Windows
+directory-symlink capability skip**. The built wheel
+`runpod_experiments_system-0.2.0.dev0-py3-none-any.whl` (134,527 bytes, SHA-256
+`2ddbfeb9bcb19d2ec930620c388318ba42e5c9c578067ce2e241a36a2b4e1f1d`) installs
+and passes the full suite from an isolated target. The sdist
+`runpod_experiments_system-0.2.0.dev0.tar.gz` (189,522 bytes, SHA-256
+`ad1a69eb0aca791a9abcac684a4a49ac18fe2bf603133d5bac6c8ab049432176`) installs
+and passes 134 focused contract, store, proxy and serial-engine tests. Archive
+review found no consumer source, private research artifacts, weights,
+checkpoints, run records or secrets in either artifact.
+
+Installed-wheel consumer suites also passed: MIAP 26 tests, Partition 26, and
+Hybrid 30. MIAP uses a lazy consumer-owned callback to map its approved
+`hf_token_delivery` flag to the shared `HF_TOKEN` name; the test supplies only a
+synthetic token and confirms values are absent from plans, events and create
+payloads. These are isolated preview branches; active entrypoints and package
+pins are unchanged. No actual MIAP token was read, no provider was contacted,
+and no active integration cutover is authorized by these tests. Proxy and
+interactive secret delivery remain unqualified. Contract v3 and store schema
+v5 do not have a general upgrade path; the explicit serial-store schema-v4
+migration remains available under its reconciliation preconditions.
