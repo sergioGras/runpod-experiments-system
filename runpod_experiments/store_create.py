@@ -196,6 +196,37 @@ class StoreCreateController:
         except Exception:
             return
 
+    def _check_project_inventory(self, attempt_id: str, attempt: dict,
+                                 observations) -> None:
+        """Allow only exact, already-claimed siblings in the same parent group."""
+        policy = self.store.project_policy_for_attempt(attempt_id)
+        project_pods = [item for item in observations if any(
+            item.name.startswith(prefix) and len(item.name) > len(prefix)
+            for prefix in policy.pod_name_prefixes)]
+        if any(item.name == attempt["pod_name"] for item in observations):
+            raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                 "pod_name_already_exists")
+        active_project_pods = [item for item in project_pods
+                               if item.status != "TERMINATED"]
+        if not active_project_pods:
+            return
+
+        allowed_peers = {}
+        for peer in self.store.admission_group_peer_attempts(attempt_id):
+            if (peer["create_claimed"] == 1 and peer["state"] in
+                    ("create_claimed", "reconciliation_required", "active", "stopping")):
+                if peer["pod_name"] in allowed_peers:
+                    raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                         "admission_group_peer_ambiguous")
+                allowed_peers[peer["pod_name"]] = peer
+
+        for observed in active_project_pods:
+            peer = allowed_peers.get(observed.name)
+            if (peer is None or
+                    (peer["pod_id"] is not None and peer["pod_id"] != observed.pod_id)):
+                raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                     "project_resource_already_present")
+
     def _require_reconciliation(self, attempt_id: str, reason: str) -> None:
         try:
             self.store.require_reconciliation(attempt_id, reason)
@@ -226,14 +257,7 @@ class StoreCreateController:
             self._wait_for_supervisor(directory, supervisor_process, attempt, policy_sha256)
 
             observations = self.provider.list_account_pods()
-            project_pods = [item for item in observations if any(
-                item.name.startswith(prefix) and len(item.name) > len(prefix)
-                for prefix in policy.pod_name_prefixes)]
-            if any(item.name == attempt["pod_name"] for item in observations):
-                raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED, "pod_name_already_exists")
-            if any(item.status != "TERMINATED" for item in project_pods):
-                raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
-                                     "project_resource_already_present")
+            self._check_project_inventory(attempt_id, attempt, observations)
 
             local_fingerprint = self._local_ssh_key_fingerprint(local_public_key_path)
             try:

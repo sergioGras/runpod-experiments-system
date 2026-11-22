@@ -916,6 +916,22 @@ class ExecutionStore:
         if type(max_preflight_age_seconds) is not int or not 1 <= max_preflight_age_seconds <= 3600:
             raise ValueError("max_preflight_age_seconds must be between 1 and 3600")
         self.verify_attempt_lifecycle_projection(attempt_id)
+        verified_group_id = None
+        verified_group_peer_ids = set()
+        if self._schema_version >= STORE_SCHEMA_VERSION:
+            with closing(self._connect()) as db:
+                binding = db.execute("""SELECT c.group_id
+                    FROM execution_attempts a
+                    JOIN execution_admission_children c
+                      ON c.project_id=a.project_id AND c.approval_id=a.approval_id
+                    WHERE a.attempt_id=? AND a.project_id=?""",
+                    (attempt_id, self.project_id)).fetchone()
+            if binding is not None:
+                verified_group_id = binding["group_id"]
+                verified_group_peer_ids = {
+                    peer["attempt_id"]
+                    for peer in self.admission_group_peer_attempts(attempt_id)
+                }
         now = self._now()
         with self._transaction() as db:
             row = db.execute("""SELECT a.state,a.create_claimed,a.deadline_epoch,
@@ -927,6 +943,7 @@ class ExecutionStore:
                 raise ExecutionError(FailureCategory.AMBIGUOUS_OPERATION, "create_claim_unavailable")
             if now >= row["deadline_epoch"] or now >= row["expires_epoch"]:
                 raise ExecutionError(FailureCategory.CONFIGURATION, "attempt_expired_before_create")
+            admission_group_id = None
             if self._schema_version >= STORE_SCHEMA_VERSION:
                 group = db.execute("""SELECT g.* FROM execution_admission_groups g
                     JOIN execution_admission_children c
@@ -944,6 +961,10 @@ class ExecutionStore:
                     if row["deadline_epoch"] > group_deadline:
                         raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
                                              "attempt_admission_group_deadline_mismatch")
+                    admission_group_id = group_scope.group_id
+            if admission_group_id != verified_group_id:
+                raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                     "admission_group_binding_changed")
             preflight = db.execute("""SELECT created_epoch,payload FROM execution_events
                 WHERE entity_type='attempt' AND entity_id=? AND event_type='create_preflight_checked'
                 ORDER BY sequence DESC LIMIT 1""", (attempt_id,)).fetchone()
@@ -969,11 +990,14 @@ class ExecutionStore:
                     now - created_epoch > max_preflight_age_seconds or
                     quote.observed_epoch > now or now - quote.observed_epoch > max_preflight_age_seconds):
                 raise ExecutionError(FailureCategory.CONFIGURATION, "create_preflight_stale")
-            other_claimed = db.execute("""SELECT 1 FROM execution_attempts
+            in_flight = db.execute("""SELECT attempt_id FROM execution_attempts
                 WHERE project_id=? AND attempt_id<>? AND state IN
-                  ('create_claimed','reconciliation_required','active','stopping') LIMIT 1""",
-                (row["project_id"], attempt_id)).fetchone()
-            if other_claimed is not None:
+                  ('create_claimed','reconciliation_required','active','stopping')""",
+                (row["project_id"], attempt_id)).fetchall()
+            if (admission_group_id is None and in_flight or
+                    admission_group_id is not None and any(
+                        item["attempt_id"] not in verified_group_peer_ids
+                        for item in in_flight)):
                 raise ExecutionError(FailureCategory.CONFIGURATION,
                                      "project_create_already_in_flight")
             db.execute("""UPDATE execution_attempts SET state='create_claimed',create_claimed=1,
@@ -1318,6 +1342,47 @@ class ExecutionStore:
             raise ExecutionError(FailureCategory.AUTHORIZATION,
                                  "admission_group_scope_changed")
         return True
+
+    def admission_group_peer_attempts(self, attempt_id: str) -> tuple[dict[str, Any], ...]:
+        """Return verified sibling attempts sharing this attempt's parent scope.
+
+        The create preflight uses this exact set to distinguish another
+        concurrently admitted child Pod from an unknown project resource. An
+        ungrouped serial attempt has no peers.
+        """
+        self.verify_attempt_lifecycle_projection(attempt_id)
+        if self._schema_version < STORE_SCHEMA_VERSION:
+            return ()
+        with closing(self._connect()) as db:
+            current = db.execute("""SELECT a.project_id,a.approval_id,g.*
+                FROM execution_attempts a
+                JOIN execution_admission_children c
+                  ON c.project_id=a.project_id AND c.approval_id=a.approval_id
+                JOIN execution_admission_groups g
+                  ON g.project_id=c.project_id AND g.group_id=c.group_id
+                WHERE a.attempt_id=? AND a.project_id=?""",
+                (attempt_id, self.project_id)).fetchone()
+            if current is None:
+                return ()
+            group = _admission_group_from_row(current)
+            if (group.project_id != self.project_id or
+                    group.controller_host != self.controller_host or
+                    current["approval_id"] not in group.child_approval_ids):
+                raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                     "admission_group_attempt_binding_invalid")
+            self._admission_group_deadline(current, self._now())
+            rows = db.execute("""SELECT a.attempt_id,a.approval_id,a.pod_name,a.pod_id,
+                    a.state,a.create_claimed
+                FROM execution_attempts a
+                JOIN execution_admission_children c
+                  ON c.project_id=a.project_id AND c.approval_id=a.approval_id
+                WHERE c.project_id=? AND c.group_id=? AND a.attempt_id<>?
+                ORDER BY a.created_epoch,a.attempt_id""",
+                (self.project_id, group.group_id, attempt_id)).fetchall()
+        peers = tuple(dict(row) for row in rows)
+        for peer in peers:
+            self.verify_attempt_lifecycle_projection(peer["attempt_id"])
+        return peers
 
     def plan_sha256_for_attempt(self, attempt_id: str) -> str:
         """Return the verified immutable execution-plan digest for one attempt."""

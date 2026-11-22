@@ -1807,6 +1807,70 @@ class AdmissionGroupTests(unittest.TestCase):
         self.assertEqual(state["state"], "reserved")
         self.assertEqual(state["create_claimed"], 0)
 
+    def test_create_claims_allow_same_parent_children_but_block_other_groups(self):
+        first = self.plan("child-a")
+        second = self.plan("child-b")
+        group = self.group(first, child_ids=("child-a", "child-b"))
+        attempts = (attempt_for(first, "claim-child-a", 1, self.now),
+                    attempt_for(second, "claim-child-b", 2, self.now))
+        self.store.reserve_attempt(first, attempts[0], pod_name(1),
+                                   admission_group=group)
+        self.store.reserve_attempt(second, attempts[1], pod_name(2),
+                                   admission_group=group)
+        for attempt in attempts:
+            prepare_test_preflight(self.store, attempt.attempt_id)
+        self.store.claim_create(attempts[0].attempt_id)
+        self.store.claim_create(attempts[1].attempt_id)
+        self.assertEqual([self.store.get_attempt(item.attempt_id)["state"]
+                          for item in attempts], ["create_claimed", "create_claimed"])
+
+        other_path = self.path.parent / "different-parent-claims.sqlite"
+        other_store = ExecutionStore(
+            str(other_path), project_id="synthetic-nebula",
+            controller_host="TEST-HOST", clock=lambda: self.now,
+            monotonic=lambda: self.mono[0])
+        third, fourth = self.plan("child-c"), self.plan("child-d")
+        group_c = self.group(third, slots=1, child_ids=("child-c",))
+        group_d = replace(self.group(fourth, slots=1, child_ids=("child-d",)),
+                          group_id="parallel-round-other")
+        attempt_c = replace(attempt_for(third, "claim-child-c", 3, self.now),
+                            attempt_number=1)
+        attempt_d = replace(attempt_for(fourth, "claim-child-d", 4, self.now),
+                            attempt_number=1)
+        other_store.reserve_attempt(third, attempt_c, pod_name(3),
+                                    admission_group=group_c)
+        other_store.reserve_attempt(fourth, attempt_d, pod_name(4),
+                                    admission_group=group_d)
+        prepare_test_preflight(other_store, attempt_c.attempt_id)
+        prepare_test_preflight(other_store, attempt_d.attempt_id)
+        other_store.claim_create(attempt_c.attempt_id)
+        with self.assertRaises(ExecutionError) as caught:
+            other_store.claim_create(attempt_d.attempt_id)
+        self.assertEqual(caught.exception.code, "project_create_already_in_flight")
+
+    def test_group_claim_rejects_corrupt_same_group_peer_projection(self):
+        first = self.plan("child-a")
+        second = self.plan("child-b")
+        group = self.group(first, child_ids=("child-a", "child-b"))
+        attempts = (attempt_for(first, "corrupt-peer-a", 1, self.now),
+                    attempt_for(second, "corrupt-peer-b", 2, self.now))
+        for plan, attempt, number in zip((first, second), attempts, (1, 2)):
+            self.store.reserve_attempt(plan, attempt, pod_name(number),
+                                       admission_group=group)
+            prepare_test_preflight(self.store, attempt.attempt_id)
+        self.store.claim_create(attempts[0].attempt_id)
+        with closing(sqlite3.connect(self.path)) as db:
+            db.execute("""UPDATE execution_attempts
+                SET state='reserved',create_claimed=0,create_claimed_epoch=NULL
+                WHERE attempt_id=?""", (attempts[0].attempt_id,))
+            db.commit()
+
+        with self.assertRaises(ExecutionError) as caught:
+            self.store.claim_create(attempts[1].attempt_id)
+        self.assertEqual(caught.exception.code, "attempt_projection_mismatch")
+        self.assertEqual(self.store.get_attempt(attempts[1].attempt_id)["state"],
+                         "reserved")
+
     def test_separate_processes_cannot_over_admit_parent_slot_or_total_cap(self):
         child = r"""
 import sys, time

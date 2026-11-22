@@ -710,29 +710,45 @@ fallbacks.
 jobs and runs each through the existing serial engine. Each child therefore
 keeps its own independent provider supervisor and cleanup path. A child's
 exception is returned as a sanitized outcome and does not cancel its sibling.
-The source suite and installed-artifact admission checks use synthetic fixtures;
-they do not yet prove a full two-child fake-provider lifecycle.
+The follow-up acceptance below now covers a full two-child fake-provider
+lifecycle, including independent watchdogs and exact sibling cleanup.
 
-M10 candidate validation (2026-11-22): the full source suite passed 239 tests
+Initial M10 candidate validation (2026-11-22; superseded by follow-up below):
+the full source suite passed 239 tests
 with one Windows directory-symlink capability skip. The candidate wheel and
 sdist were installed/tested locally; installed sdist checks passed the 28
 contract tests and 11 `AdmissionGroupTests`, including cross-process parent
 slot and total-cap races. Focused acceptance against the installed candidate
 wheel passed MIAP 7, Partition 14, and Hybrid 28 tests. Artifact hashes and
 limitations are recorded in the [evidence audit](status-and-remaining-plan-20261113.md).
-No provider was contacted and no resource was created. Still required are a
-two-child fake-provider test proving independent watchdogs and exact cleanup,
-Partition P020 adapter parity, consumer lifecycle gates and separately
-authorized live qualification. Leave the current parallel controller untouched
-until its resource reconciliation and migration gates pass.
+No provider was contacted and no resource was created. At that initial
+candidate point, the two-child fake-provider lifecycle and Partition P020
+adapter parity were still open; the follow-up results in the evidence audit
+close those synthetic preview gates. Consumer-specific lifecycle gates, private
+store reconciliation, live qualification and cutover remain open. Leave active
+consumer controllers untouched until their resource reconciliation and
+migration gates pass.
+
+Final local M10 revalidation (2026-11-22): the peer lifecycle projections are
+verified before same-parent concurrent create claims, and a corrupt sibling
+projection blocks admission. The source suite passes 242 tests with one
+Windows capability skip; the final wheel and sdist each pass 41 installed
+contract/admission tests. The installed-wheel consumer slices pass MIAP 7,
+Partition 18 and Hybrid 28 tests. Final artifact hashes and archive review are
+recorded in the [evidence audit](status-and-remaining-plan-20261113.md). This
+closes local synthetic preview checks only; active consumer cutover, private
+store reconciliation and live qualification remain open.
 
 M10 acceptance must use independent processes (not only threads) racing for the
 last group slot and total commitment; test child approval reuse, over-cap hourly
 admission, parent deadline continuity, restart/crash at reserve and create
 claim, ambiguous-create holds, each child's independent watchdog and exact
-cleanup, and one-child failure while another completes. Include mixed CPU/GPU
-child plans with fake quotes and providers, asserting the CPU child never
-creates a GPU request. No provider call is needed for these checks.
+cleanup, and one-child failure while another completes. Follow-up tests now
+cover the two-child cleanup/failure case and Partition's synthetic shared-store
+adapter mapping; remaining consumer lifecycle and active cutover work is tracked
+below and in the evidence audit. Include mixed CPU/GPU child plans with fake
+quotes and providers, asserting a CPU child never creates a GPU request. No
+provider call is needed for these checks.
 
 Execute the final acceptance matrix in [testing](testing-strategy.md). Qualify live
 CPU/GPU and proxy capabilities only within applicable finite authorizations; a

@@ -41,13 +41,39 @@ class StoreProjectRunGuard:
                    type(attempt.get("create_claimed")) is int and
                    attempt.get("create_claimed") == 1)
         if (scope.project_id != policy.project_id or attempt["state"] != "create_claimed" or
-                not claimed or not isinstance(inventory, list) or inventory or
+                not claimed or not isinstance(inventory, list) or
                 request != expected or request.get("name") != attempt["pod_name"] or
                 not any(attempt["pod_name"].startswith(prefix) and
                         len(attempt["pod_name"]) > len(prefix)
                         for prefix in policy.pod_name_prefixes)):
             raise ExecutionError(FailureCategory.AUTHORIZATION,
                                  "project_api_create_outside_attempt")
+        if len(inventory) >= policy.max_active_resources:
+            raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                 "project_api_resource_limit_reached")
+
+        allowed_peers = {}
+        for peer in self.store.admission_group_peer_attempts(self.attempt_id):
+            if (peer["create_claimed"] == 1 and peer["state"] in
+                    ("create_claimed", "reconciliation_required", "active", "stopping")):
+                if peer["pod_name"] in allowed_peers:
+                    raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                         "project_api_peer_ambiguous")
+                allowed_peers[peer["pod_name"]] = peer
+
+        seen_names = set()
+        for pod in inventory:
+            if (not isinstance(pod, dict) or not isinstance(pod.get("name"), str) or
+                    not isinstance(pod.get("id"), str) or
+                    _POD_ID.fullmatch(pod["id"]) is None or pod["name"] in seen_names):
+                raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                     "project_api_resource_identity_invalid")
+            seen_names.add(pod["name"])
+            peer = allowed_peers.get(pod["name"])
+            if (peer is None or
+                    (peer["pod_id"] is not None and peer["pod_id"] != pod["id"])):
+                raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                     "project_api_resource_already_present")
 
     def created(self, response):
         attempt, _policy = self._identity()

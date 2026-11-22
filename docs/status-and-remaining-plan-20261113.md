@@ -1,6 +1,6 @@
 # Evidence audit and remaining implementation plan
 
-Audit date: 2026-11-13. The CPU/GPU resource-kind change is at `8654afe` on
+Current audit date: 2026-11-22. The CPU/GPU resource-kind change is at `8654afe` on
 `design/unified-execution`; following commits update this evidence report.
 This report records offline implementation and preview evidence, not a
 production cutover. Earlier milestone paragraphs describe their source
@@ -22,14 +22,14 @@ These statuses are separate; a test count alone does not establish coverage.
 | --- | --- | --- |
 | Contracts | `tests/test_contracts.py`: immutable specifications, bounded values and serialization | Internal APIs and schemas; compatibility policy still needs release review |
 | Provider boundary | `tests/test_provider.py`: synthetic inventory, quotes, billing and sanitized errors | Account responses, delayed billing finality and current API compatibility unqualified |
-| Store/admission | `tests/test_execution_store.py`: actual SQLite, independent-process serial/group cap races, crash rollback, holds, adjustments, immutable parent/child admission and explicit v4 migration | One configured host; full two-child lifecycle and cross-host coordination remain unverified |
+| Store/admission | `tests/test_execution_store.py`: actual SQLite, independent-process serial/group cap races, crash rollback, holds, adjustments, immutable parent/child admission and explicit v4 migration; two-child fake-provider execution confirms independent watchdogs and exact cleanup | One configured host; private-store migration and cross-host coordination remain unverified |
 | Supervision | Store tests include a real detached child surviving launcher-parent exit; GPU supervision tests bind runtime evidence before SSH | Not a complete supported-host/interpreter/package qualification matrix |
 | Transfers | `tests/test_connections.py`, `tests/test_proxy_ssh.py`, `tests/test_store_create.py`: exact identity, direct/proxy framing, chunks, hashes and bounds | Shared transfers do not resume interrupted files; proxy is finite PTY commands, not binary interactive workload transport |
 | Serial engine | `tests/test_store_create.py`, `tests/test_gpu_supervision.py`: complete fake CPU/GPU attempts, finite retries, deadline failures and restart cleanup | No integrated live qualification or consumer acceptance |
 | Setup | `tests/test_store_create.py`: invalid process handle, poll error, nonzero exit, timeout, supervisor loss, and terminate/kill failure all fail before collection/workload and still attempt provider cleanup | A local process stop that cannot be confirmed still requires reconciliation |
 | Interactive I/O | `tests/test_interactive_workload.py`, `tests/test_interactive_ssh.py`, `tests/test_binary_process.py`: bounded sessions and process I/O | No consumer protocol or scientific-equivalence proof |
 | Packaging | Candidate wheel and sdist install outside checkout; installed contract/admission tests and focused consumer slices pass; detached supervisor/collector import policy-bound consumer factories; archive contents were reviewed | Temporary candidates are not release assets; supported-host, ACL, and live provider qualification remain open |
-| Consumers | Isolated opt-in adapters in Hybrid, MIAP, and Partition pass focused offline acceptance against installed artifacts; MIAP's synthetic batch exercises real verifier/config/absence code and safe unclaimed/ambiguous restart mapping; Partition's CPU proxy/archive slice is covered | No active entrypoint or dependency pin adopts the engine; MIAP active-Pod restart/credential delivery, Hybrid phase mapping, Partition supervised worker launch/progress parity, and parallel M10 parity remain open |
+| Consumers | Isolated opt-in adapters in Hybrid, MIAP, and Partition pass focused offline acceptance against installed artifacts; Partition now maps P020 parent/child limits to shared admission and tests same-group guarded creation | No active entrypoint or dependency pin adopts the engine; MIAP active-Pod restart/credential delivery, Hybrid phase mapping, and Partition's custom worker lifecycle and coordinator cutover remain open |
 
 M10 parent/child admission follow-up (2026-11-22; local development candidate,
 not a release):
@@ -48,10 +48,71 @@ not a release):
   MIAP **7**, Partition **14**, and Hybrid **28** tests. Hybrid's test-only
   detached-supervisor fixture was aligned to the shared bootstrap/provider
   protocol; consumer runtime code and active package pins were not changed.
-- Still open: a complete two-child fake-provider run proving independent
-  watchdogs and exact cleanup, Partition P020 parent/child adapter parity, all
+- At that initial checkpoint, still open: a complete two-child fake-provider
+  run proving independent watchdogs and exact cleanup, Partition P020
+  parent/child adapter parity, all
   consumer-specific lifecycle gates, live qualification and cutover. No provider
   call or paid resource was used.
+
+M10 interim follow-up validation (2026-11-22; superseded by final artifact revalidation below):
+
+- After fixing project-wide create serialization for verified parent-group
+  siblings, the full source suite passed **241 tests, with one Windows
+  directory-symlink capability skip**. Five repeated two-child lifecycle runs
+  also passed; one child failed at the workload boundary while its sibling
+  completed and both exact Pods were independently stopped and confirmed.
+- The final preview wheel is 132,070 bytes, SHA-256
+  `f64f9a8c9ce9fb11eccecc66c2eb7f2415fa9773a4d480eccdfbbe8e90f5af0e`; the
+  sdist is 185,415 bytes, SHA-256
+  `2584bbb87e2dee1f5ce6710dc0cbf256e3286ae5e578e34156c28fc258cab6be`. The
+  archives contain 47 and 78 entries respectively; the wheel and sdist each
+  pass 40 installed-artifact contract/admission tests. Their imports were
+  verified outside the checkout, and the archive review found no consumer
+  source paths.
+- Against that installed wheel, focused tests pass MIAP **7**, Partition **18**,
+  and Hybrid **28**. Partition's four new synthetic parity tests map one-use
+  child approvals to `AdmissionGroupScope`, reserve separate CPU/GPU plans in
+  the shared store, allow only an exact active group sibling through its
+  project guard, and reject an unknown project Pod before sending a create.
+- P020's active dispatcher and SQLite coordinator remain unchanged. Its proxy
+  worker/progress/collection lifecycle, ambiguous-create adoption parity,
+  shared-store cutover and private-store reconciliation are still open. No
+  provider, credential, paid compute or private result was used.
+
+These interim follow-up results supersede the 239-test candidate checkpoint.
+The final peer-integrity and artifact revalidation below supersedes its counts,
+hashes and installed consumer evidence. Live qualification, schema migration
+and consumer cutover remain separate reviewed gates.
+
+M10 final peer-integrity and artifact revalidation (2026-11-22; local
+development candidate, not a release):
+
+- The final source suite passed **242 tests, with one Windows directory-symlink
+  capability skip**. Same-group create claims now verify every sibling's
+  lifecycle projection before admitting concurrent claims; a corrupt peer
+  projection fails closed. The two-child fake-provider lifecycle passed five
+  repeated runs, including independent watchdogs, exact cleanup and sibling
+  failure isolation.
+- Final wheel: 132,162 bytes, SHA-256
+  `63447bdf948e4498fe51d9eee507656e38d8eb9247669d7aef53215ceca12475`.
+  Final sdist: 185,716 bytes, SHA-256
+  `93cce134c9c971f4434e6d346121955e1e1c09e3071b7a3707d38bd7d5fe50ae`.
+  The archives contain 47 and 78 entries. The wheel and sdist were installed
+  outside the checkout and each passed all 41 installed-artifact contract and
+  admission tests. Archive review confirmed the parallel engine is packaged,
+  the sdist includes the source tests, and neither artifact contains consumer
+  checkout paths.
+- Against the final installed wheel, the focused consumer slices passed MIAP
+  **7**, Partition **18**, and Hybrid **28** tests. Partition's synthetic
+  adapter also asserts that the CPU child create request contains no GPU field
+  while the GPU child request contains no CPU field.
+- P020's active dispatcher and SQLite coordinator remain unchanged. Its proxy
+  worker/progress/collection lifecycle, ambiguous-create adoption parity,
+  shared-store cutover and private-store reconciliation are still open. No
+  provider, credential, paid compute or private result was used.
+
+Live qualification, schema migration and consumer cutover remain separate
+reviewed gates.
 
 The earlier candidate passed 226 tests with one Windows directory-symlink
 capability skip. It also passed the focused MIAP, Partition, and Hybrid slices
@@ -97,7 +158,7 @@ approval to another project.
 | M4 | Detached process and supervision components verified; host qualification open | Exact installed candidate survives foreground exit on every supported controlling host; failure/reboot behavior recorded |
 | M5–M6 | Internal serial CPU/GPU/interactive implementation and enumerated setup/WAL fault paths verified offline; installed wheel/sdist reviewed | Public API/schema, credential-delivery and supported-host review; complete consumer lifecycle acceptance; then authorized live qualification |
 | M7–M9 | Isolated adapters exist; Hybrid's interactive path runs through the serial engine; MIAP's synthetic batch, promotion, finalizer and bounded restart mapping and Partition's CPU proxy/archive slice pass offline; CPU/GPU plans cannot mix; no active consumer adopts an adapter | Map actual workload phases and GPU need; finish MIAP active-Pod restart/credential acceptance, Hybrid phase-specific CPU/GPU and failure/integrity parity, Partition supervised worker launch/progress and GPU workload acceptance; reconcile before cutover |
-| M10 | Parent admission and bounded parallel runner implemented; full source regression and installed wheel/sdist admission tests pass; focused MIAP/Partition/Hybrid preview slices pass against the candidate wheel | Add Partition P020 adapter parity and a full two-child fake-provider run proving independent watchdogs and exact cleanup; live qualification and cutover remain separate gates |
+| M10 | Parent admission and bounded parallel runner verified; installed wheel/sdist and all three focused consumer slices pass; Partition P020 admission/API parity has an opt-in synthetic adapter | Map P020's proxy worker/progress/ambiguous-create lifecycle, reconcile private state, complete consumer cutovers, and separately qualify live provider/host behavior |
 | M11 | Open | Integrated acceptance, duplication retirement, rollback and release evidence |
 
 ## Ordered remaining work

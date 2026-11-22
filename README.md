@@ -18,12 +18,17 @@ The internal M10 preview now adds a schema-v5 parent admission scope, explicit
 quiescent v4 migration, and a bounded runner that executes separately approved
 child jobs through independent serial-engine supervisors. Parent/child admission,
 process-race, installed wheel/sdist and focused consumer adapter tests pass with
-synthetic fixtures. The CPU/GPU rule is per child: a CPU-suitable child remains
-CPU even when a sibling requires a GPU. Full fake-provider parallel watchdog and
-cleanup acceptance plus Partition P020 adapter parity remain open. M3 through M6
-qualification remains open; no active consumer entrypoint or package pin adopts
-the preview. These changes are not part of the pinned 0.1.0 package; existing
-consumers and their current package pins remain unchanged.
+synthetic fixtures. Same-group concurrent create claims verify sibling
+lifecycle projections and fail closed on a corrupt peer. The two-child
+fake-provider path confirms independent watchdogs, exact cleanup and sibling
+failure isolation. Partition also has an
+opt-in adapter preview mapping its P020 parent/child limits and guarded API to
+the shared store. The CPU/GPU rule is per child: a CPU-suitable child remains
+CPU even when a sibling requires a GPU. P020's active coordinator and custom
+worker lifecycle are not cut over. M3 through M6 qualification remains open;
+no active consumer entrypoint or package pin adopts the preview. These changes
+are not part of the pinned 0.1.0 package; existing consumers and their current
+package pins remain unchanged.
 
 Detailed design and development documents:
 

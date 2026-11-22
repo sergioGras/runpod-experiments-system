@@ -6,13 +6,15 @@ import os
 from pathlib import Path
 import struct
 import tempfile
+import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from dataclasses import replace
 
 from runpod_experiments.contracts import (
-    ApprovalScope, AttemptPlan, BillingStatus, CleanupStatus, ExecutionOutcome,
+    AdmissionGroupScope, ApprovalScope, AttemptPlan, BillingStatus, CleanupStatus, ExecutionOutcome,
     ExecutionPlan, FailureCategory, OperationalStatus, PodProvisioningSpec,
     ManifestFile, ProjectPolicy, QuoteObservation, ResourceKind, ResourceProfile,
     RetryPolicy, ScientificVerdict, TransferDirection, TransferManifest,
@@ -30,6 +32,7 @@ from runpod_experiments.run_collection import collect_owned_once
 from runpod_experiments.serial_engine import (
     AttemptWorkload, SerialAttemptResult, SerialExecutionEngine,
 )
+from runpod_experiments.parallel_engine import ParallelExecutionEngine, ParallelJob
 from runpod_experiments.ssh import ssh_public_key_fingerprint
 from runpod_experiments.state_config import StateStoreConfig
 from runpod_experiments.store_create import StoreCreateController
@@ -1708,6 +1711,225 @@ class StoreCreateControllerTests(unittest.TestCase):
         self.assertIn(caught.exception.code,
                       {"preflight_quote_mismatch", "selected_region_not_available"})
         self.assertEqual(self.client.create_calls, [])
+
+    def test_parallel_engine_runs_two_grouped_children_with_isolated_cleanup(self):
+        self.store.cancel_uncreated(self.attempt["attempt_id"])
+        now = self.now
+        project = replace(self.project, max_active_resources=2)
+        policy_hash = sha256_bytes(encode_document("project_policy", project))
+        profile = ResourceProfile(
+            ResourceKind.CPU, "cpu-small", 300_000, (REGION,),
+            "sha256:" + ZERO, 20, 4, 8)
+        worker = b"synthetic parallel worker"
+        transfer = TransferManifest((
+            ManifestFile("worker.py", sha256_bytes(worker), len(worker),
+                         TransferDirection.UPLOAD),
+            ManifestFile("results.json", ZERO, 0, TransferDirection.DOWNLOAD),
+        ), 4096, 8192)
+        approval_ids = ("parallel-left-approval", "parallel-right-approval")
+        group = AdmissionGroupScope(
+            "parallel-pair", project.project_id, "TEST-HOST", ZERO, ONE, "2" * 64,
+            4_000_000, 700_000, 600, now + 1200, 2, approval_ids)
+        plans, attempts, names, workloads = [], [], [], []
+        private_key = self.root / "id_ed25519"
+        known_hosts = self.root / "known_hosts"
+        private_key.write_bytes(b"synthetic private key fixture")
+        known_hosts.write_text(
+            "[127.0.0.1]:2222 ssh-ed25519 fixture\n", encoding="utf-8")
+
+        for label, approval_id in zip(("left", "right"), approval_ids):
+            job_id = "parallel-job-" + label
+            pod_name = "nebula-parallel-" + label
+            approval = ApprovalScope(
+                approval_id, project.project_id, "TEST-HOST", ZERO, policy_hash,
+                ONE, "2" * 64, 2_000_000, 400_000, 600, 1, now + 1200, 1)
+            plan = ExecutionPlan(
+                job_id, project, approval, "a" * 40, "3" * 64, "4" * 64,
+                "5" * 64, (profile,),
+                PodProvisioningSpec("runpod/base@sha256:" + ZERO, ("22/tcp",)),
+                transfer, RetryPolicy(1, 600, (FailureCategory.TRANSIENT_READ,)))
+            quote = QuoteObservation(
+                ResourceKind.CPU, profile.resource_id, 4, 4,
+                profile.hourly_micro_usd, 0, True, (REGION,), now - 1, ONE, 8)
+            attempt_id = "parallel-attempt-" + label
+            attempt = AttemptPlan(
+                attempt_id, job_id, approval_id, 1,
+                pod_create_request_sha256(plan.provisioning, profile, REGION, pod_name),
+                sha256_bytes(encode_document("quote_observation", quote)), quote,
+                policy_hash, plan.source_sha256, plan.config_sha256,
+                plan.package_sha256, profile, REGION, 300, 60, now, now + 360)
+            self.store.reserve_attempt(plan, attempt, pod_name, admission_group=group)
+            source_root = self.root / ("parallel-source-" + label)
+            source_root.mkdir()
+            (source_root / "worker.py").write_bytes(worker)
+            workload = AttemptWorkload(
+                source_root, private_key, known_hosts, "/tmp/nebula", "worker.py",
+                (), 30, ("results.json",), self.root / ("parallel-artifacts-" + label))
+            plans.append(plan)
+            attempts.append(attempt)
+            names.append(pod_name)
+            workloads.append(workload)
+
+        class FakeParallelClient:
+            def __init__(inner_self):
+                inner_self.lock = threading.RLock()
+                inner_self.inventory = {}
+                inner_self.details = {}
+                inner_self.create_calls = []
+                inner_self.delete_calls = []
+                inner_self.keys = frozenset({self.key_fingerprint})
+
+            def pods(inner_self):
+                with inner_self.lock:
+                    return [dict(item) for item in inner_self.inventory.values()]
+
+            def pod(inner_self, pod_id):
+                with inner_self.lock:
+                    return dict(inner_self.details[pod_id])
+
+            def cpu_offer(inner_self, resource_id, vcpu_count):
+                return {
+                    "id": resource_id,
+                    "price": {"securePerVcpu": 0.075},
+                    "ramGbPerVcpu": 2,
+                    "vcpu": {"min": vcpu_count, "max": vcpu_count},
+                    "availability": "HIGH",
+                    "dataCenters": [{"id": REGION, "availability": "HIGH"}],
+                }
+
+            def ssh_key_fingerprints(inner_self):
+                return inner_self.keys
+
+            def _create_pod(inner_self, request):
+                with inner_self.lock:
+                    inner_self.create_calls.append(dict(request))
+                    label = request["name"].rsplit("-", 1)[-1]
+                    pod_id = "pod-parallel-" + label
+                    detail = {
+                        "id": pod_id, "name": request["name"], "status": "RUNNING",
+                        "cost": 0.3, "cloud": "SECURE", "disk": 20,
+                        "dataCenterId": REGION,
+                        "image": "runpod/base@sha256:" + ZERO, "mounts": {},
+                        "cpu": {"id": "cpu-small", "vcpuCount": 4, "memory": 8},
+                        "ports": ["22/tcp"],
+                        "ssh": {"direct": {"host": "127.0.0.1", "port": 2222,
+                                              "username": "root"}},
+                    }
+                    inner_self.details[pod_id] = detail
+                    inner_self.inventory[pod_id] = {
+                        "id": pod_id, "name": request["name"], "status": "RUNNING"}
+                    return {"id": pod_id, "name": request["name"]}
+
+            def _delete_pod(inner_self, pod_id):
+                with inner_self.lock:
+                    inner_self.delete_calls.append(pod_id)
+                    inner_self.inventory.pop(pod_id, None)
+                    inner_self.details[pod_id]["status"] = "TERMINATED"
+                    return {"deleted": True}
+
+        client = FakeParallelClient()
+        supervisor_instances = {}
+        next_pid = iter((8101, 8102))
+        left_attempt_id = attempts[0].attempt_id
+
+        def supervisor_launcher(_config, attempt_id, project_id, directory):
+            directory = Path(directory)
+            directory.mkdir(parents=True, exist_ok=True)
+            if attempt_id == attempts[1].attempt_id:
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    record = self.store.get_attempt(left_attempt_id)
+                    if record["state"] == "active" and record["pod_id"]:
+                        break
+                    time.sleep(0.005)
+                else:
+                    raise TimeoutError("first grouped child did not become active")
+            monitor = StoreCleanupMonitor(
+                client, self.store, attempt_id, project_id, clock=lambda: now)
+            attempt_record = self.store.get_attempt(attempt_id)
+            policy_digest = self.store.project_policy_sha256_for_attempt(attempt_id)
+
+            class FakeSupervisor:
+                pid = next(next_pid)
+                returncode = None
+
+                def poll(inner_process):
+                    if inner_process.returncode is not None:
+                        return inner_process.returncode
+                    outcome = monitor.observe(
+                        stop=(directory / "stop.request").exists())
+                    state = {
+                        "ready": True, "stopping": monitor.stopping,
+                        "terminated": outcome == "terminated", "pid": inner_process.pid,
+                        "attempt_id": attempt_id, "project_id": project_id,
+                        "deadline_epoch": attempt_record["deadline_epoch"],
+                        "attempt_sha256": attempt_record["attempt_sha256"],
+                        "policy_sha256": policy_digest, "heartbeat_epoch": now,
+                    }
+                    (directory / "supervisor.json").write_text(
+                        json.dumps(state) + "\n", encoding="utf-8")
+                    if outcome in ("terminated", "not_created"):
+                        inner_process.returncode = 0
+                    return inner_process.returncode
+
+            supervisor = FakeSupervisor()
+            supervisor_instances[attempt_id] = (supervisor, monitor)
+            return supervisor
+
+        class FakeCollector:
+            def poll(inner_self):
+                return None
+
+            def wait(inner_self, timeout=None):
+                return 0
+
+        workload_gate = threading.Barrier(2)
+
+        def process_launcher(_client, _store, attempt_id, *_args, **_kwargs):
+            workload_gate.wait(timeout=10)
+            returncode = 17 if attempt_id == attempts[0].attempt_id else 0
+            return SimpleNamespace(returncode=returncode,
+                                   poll=lambda: returncode)
+
+        engine = SerialExecutionEngine(
+            client, self.store, self.state_config,
+            supervisor_launcher=supervisor_launcher,
+            create_controller_factory=StoreCreateController,
+            collector_launcher=lambda *_args, **_kwargs: FakeCollector(),
+            uploader=lambda *args, **kwargs: (kwargs["transfer_check"]() or 1),
+            process_launcher=process_launcher,
+            clock=lambda: now, sleep=lambda delay: time.sleep(min(delay, 0.005)))
+        runner = ParallelExecutionEngine(engine, self.store)
+        jobs = tuple(
+            ParallelJob(plan, attempt.attempt_id, workload, self.key_path,
+                        cleanup_timeout_seconds=5)
+            for plan, attempt, workload in zip(plans, attempts, workloads))
+
+        result = runner.run_group(group, jobs)
+
+        self.assertEqual(len(result.outcomes), 2)
+        self.assertTrue(all(item.result is not None for item in result.outcomes))
+        left_result = result.outcomes[0].result.attempt_results[0]
+        right_result = result.outcomes[1].result.attempt_results[0]
+        self.assertEqual(left_result.outcome.operational_status,
+                         OperationalStatus.FAILED)
+        self.assertEqual(left_result.outcome.failure_category,
+                         FailureCategory.WORKLOAD_FAILURE)
+        self.assertEqual(right_result.outcome.operational_status,
+                         OperationalStatus.SUCCEEDED)
+        self.assertEqual(left_result.outcome.cleanup_status, CleanupStatus.CONFIRMED)
+        self.assertEqual(right_result.outcome.cleanup_status, CleanupStatus.CONFIRMED)
+        self.assertEqual({self.store.get_attempt(item.attempt_id)["state"]
+                          for item in attempts}, {"terminated"})
+        self.assertEqual({call["name"] for call in client.create_calls}, set(names))
+        self.assertEqual(set(client.delete_calls),
+                         {"pod-parallel-left", "pod-parallel-right"})
+        self.assertEqual(len(client.delete_calls), 2)
+        self.assertEqual(set(supervisor_instances),
+                         {item.attempt_id for item in attempts})
+        self.assertIsNot(supervisor_instances[attempts[0].attempt_id][1],
+                         supervisor_instances[attempts[1].attempt_id][1])
+        self.assertTrue(self.store.verify_event_chain())
 
 
 if __name__ == "__main__":
