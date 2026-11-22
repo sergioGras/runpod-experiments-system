@@ -75,7 +75,7 @@ approval to another project.
 | M4 | Detached process and supervision components verified; host qualification open | Exact installed candidate survives foreground exit on every supported controlling host; failure/reboot behavior recorded |
 | M5–M6 | Internal serial CPU/GPU/interactive implementation and enumerated setup/WAL fault paths verified offline; installed wheel/sdist reviewed | Public API/schema, credential-delivery and supported-host review; complete consumer lifecycle acceptance; then authorized live qualification |
 | M7–M9 | Isolated adapters exist; Hybrid's interactive path runs through the serial engine; MIAP's synthetic batch, promotion, finalizer and bounded restart mapping and Partition's CPU proxy/archive slice pass offline; CPU/GPU plans cannot mix; no active consumer adopts an adapter | Map actual workload phases and GPU need; finish MIAP active-Pod restart/credential acceptance, Hybrid phase-specific CPU/GPU and failure/integrity parity, Partition supervised worker launch/progress and GPU workload acceptance; reconcile before cutover |
-| M10 | Hierarchical parallel admission not delivered by the serial store | Atomic parent/child caps, two-slot process races and independent resource cleanup |
+| M10 | Hierarchical parallel admission not delivered by the serial store; Partition's legacy coordinator contract was source-reviewed on 2026-11-22 | Implement a parent admission scope in the common transactional store; prove aggregate caps, two-slot process races, restart recovery, per-resource watchdog and cleanup isolation |
 | M11 | Open | Integrated acceptance, duplication retirement, rollback and release evidence |
 
 ## Ordered remaining work
@@ -177,6 +177,44 @@ the library with synthetic regressions and revalidate affected consumers.
 - The shared package owns reusable provider, ownership, accounting, supervision,
   transport, operational retry/recovery and evidence behavior. Reusable fixes
   belong here; consumers upgrade through pinned artifacts and conformance checks.
+
+### M10 source contract confirmed on 2026-11-22
+
+Partition's P020 coordinator is a Windows, single-controlling-host SQLite
+coordinator. A finite parent approval binds a list of one-use child approvals.
+Reservations are serialized with `BEGIN IMMEDIATE`; a competing reservation
+cannot take a slot after the parent ceiling is reached. A child commits its
+entire `max_total` against the parent on first reservation, including a
+recognized no-Pod rejection; the aggregate hourly ceiling is checked against
+currently active children. Parent runtime starts on the first reservation and
+does not restart for later children. A sent or ambiguous create never frees its
+slot optimistically. Lost create responses can be adopted by exact random name
+for cleanup only. Each child gets its own watchdog and exact-Pod cleanup.
+Failures in one child are caught at its execution boundary so the other child
+can complete; sibling or foreign Pods cannot be deleted through that child's
+guard.
+
+The shared store already enforces project-wide slots across approvals and
+per-approval total/hourly budgets, but has no parent scope binding multiple
+approvals. M10 must place the parent and child admission rows in the same
+transactional project store as attempt reservations; a second independent
+ledger would create a crash window between parent admission and attempt
+reservation. Parent total should conservatively commit each child approval's
+full ceiling once, while active hourly use should sum selected attempt rates.
+Each child attempt retains its own resource policy and watchdog. A group may
+contain CPU-only or GPU-only plans according to each approved workload's actual
+need; no plan may mix resource kinds, and a CPU-capable phase must not request
+a GPU merely because another child requires one.
+
+The store is schema-pinned and deliberately does not migrate existing state on
+open. Before M10 code is added, define an explicit v4-to-parallel schema
+transition that preserves existing serial records and leaves old store files
+untouched until an operator invokes the migration at a reconciled boundary.
+M10 acceptance must include independent-process last-slot and parent-budget
+races, one-use child binding, crash/reopen at reservation and create claim,
+parent deadline continuity, ambiguous-create hold, one-child failure while the
+sibling completes, and exact cleanup isolation. A thread-only race or the
+legacy coordinator's own tests does not establish shared-engine parity.
 
 No private consumer source, state, scientific outputs or provider identities are
 included in this report. Current live reconciliation status must be checked in

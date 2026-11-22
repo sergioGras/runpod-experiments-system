@@ -684,9 +684,32 @@ controllers, and pending accounting in that project's own namespace.
 ## M10 and M11: parallelism and completion
 
 Implement the two-resource profile only after serial recovery works. Reserve
-parent/child limits and slots atomically across processes, recheck unreconciled
-provider resources, and give every resource independent supervision. Several
-roles on one Pod remain a workload choice rather than an instance allowance.
+parent/child limits and slots atomically across processes in the same project
+store as child attempts; do not split admission and create reservation across
+two ledgers. Bind a finite parent scope to an explicit set of one-use child
+approvals. Commit each child's full total ceiling once against the parent,
+enforce the aggregate hourly ceiling over active selected resource rates, and
+arm one nonrenewable parent deadline from the first child reservation. Preserve
+each child's existing attempt budget, workload-specific CPU/GPU plan, and
+independent watchdog. A failed child does not cancel a sibling unless an
+explicit approved group policy requires it. Several roles on one Pod remain a
+workload choice rather than an instance allowance.
+
+The store schema is intentionally version-pinned and does not mutate old state
+on open. Define and test an explicit v4-to-parallel schema migration before
+adding parent tables; it must retain all serial records and require a
+reconciled operator boundary. The old schema remains usable by the serial
+candidate until a consumer opts into the new parallel schema. A CPU workload
+must select an eligible CPU shape even when another child in the same group
+requires a GPU; plans continue to reject mixed CPU/GPU fallbacks.
+
+M10 acceptance must use independent processes (not only threads) racing for the
+last group slot and total commitment; test child approval reuse, over-cap hourly
+admission, parent deadline continuity, restart/crash at reserve and create
+claim, ambiguous-create holds, each child's independent watchdog and exact
+cleanup, and one-child failure while another completes. Include mixed CPU/GPU
+child plans with fake quotes and providers, asserting the CPU child never
+creates a GPU request. No provider call is needed for these checks.
 
 Execute the final acceptance matrix in [testing](testing-strategy.md). Qualify live
 CPU/GPU and proxy capabilities only within applicable finite authorizations; a
