@@ -350,16 +350,23 @@ class SerialExecutionEngine:
                  cleanup_timeout_seconds: int, *, gpu_ssh_key_file=None,
                  gpu_known_hosts=None) -> CleanupStatus:
         attempt_id = attempt["attempt_id"]
-        if workload_process is not None and workload_process.poll() is None:
+        if workload_process is not None:
             try:
-                workload_process.terminate()
-                workload_process.wait(timeout=5)
-            except (OSError, subprocess.SubprocessError):
+                workload_running = workload_process.poll() is None
+            except Exception:
+                # A remote process status can be temporarily unavailable. Treat
+                # that as indeterminate and request stop before provider cleanup.
+                workload_running = True
+            if workload_running:
                 try:
-                    workload_process.kill()
+                    workload_process.terminate()
                     workload_process.wait(timeout=5)
                 except (OSError, subprocess.SubprocessError):
-                    pass
+                    try:
+                        workload_process.kill()
+                        workload_process.wait(timeout=5)
+                    except (OSError, subprocess.SubprocessError):
+                        pass
         if collector_process is not None:
             try:
                 (supervisor_directory.parent / "collector" / "collection.stop").touch(exist_ok=True)

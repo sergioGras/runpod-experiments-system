@@ -87,25 +87,31 @@ and consumer cutover remain separate reviewed gates.
 M10 final peer-integrity and artifact revalidation (2026-11-22; local
 development candidate, not a release):
 
-- The final source suite passed **242 tests, with one Windows directory-symlink
+- The final source suite passed **245 tests, with one Windows directory-symlink
   capability skip**. Same-group create claims now verify every sibling's
   lifecycle projection before admitting concurrent claims; a corrupt peer
   projection fails closed. The two-child fake-provider lifecycle passed five
   repeated runs, including independent watchdogs, exact cleanup and sibling
   failure isolation.
-- Final wheel: 132,162 bytes, SHA-256
-  `63447bdf948e4498fe51d9eee507656e38d8eb9247669d7aef53215ceca12475`.
-  Final sdist: 185,716 bytes, SHA-256
-  `93cce134c9c971f4434e6d346121955e1e1c09e3071b7a3707d38bd7d5fe50ae`.
+- Final wheel: 132,802 bytes, SHA-256
+  `85d0e10579931f61eb1d8cdfbc4229a91911ac80f069cc5fa80869748a6cef04`.
+  Final sdist: 186,983 bytes, SHA-256
+  `caa2ad54253b3d257b44891c6461602f90158c305727b4a10ec1a2b202776755`.
   The archives contain 47 and 78 entries. The wheel and sdist were installed
-  outside the checkout and each passed all 41 installed-artifact contract and
-  admission tests. Archive review confirmed the parallel engine is packaged,
-  the sdist includes the source tests, and neither artifact contains consumer
-  checkout paths.
+  outside the checkout and each passed all 99 installed-artifact contract,
+  execution-store, proxy transport and serial cleanup tests. Archive review confirmed the
+  parallel engine and optional proxy-file reader are packaged, the sdist
+  includes the source tests, and neither artifact contains consumer checkout
+  paths.
 - Against the final installed wheel, the focused consumer slices passed MIAP
-  **7**, Partition **18**, and Hybrid **28** tests. Partition's synthetic
+  **7**, Partition **23**, and Hybrid **30** tests. Partition's synthetic
   adapter also asserts that the CPU child create request contains no GPU field
-  while the GPU child request contains no CPU field.
+  while the GPU child request contains no CPU field. Four additional
+  Partition-only tests cover its consumer proxy worker launcher contract,
+  delayed identity-bound application progress, bounded status/error handling
+  and subprocess-compatible stop/wait/kill controls; remote deadline/termination
+  and full worker collection remain open. Shared cleanup now proceeds when a
+  workload status poll is indeterminate, as verified by a synthetic regression.
 - P020's active dispatcher and SQLite coordinator remain unchanged. Its proxy
   worker/progress/collection lifecycle, ambiguous-create adoption parity,
   shared-store cutover and private-store reconciliation are still open. No

@@ -344,6 +344,63 @@ class SSHProxySession:
             raise SSHProxyError("Remote file changed during collection")
         return bytes(output)
 
+    def read_optional_file(self, remote_path: str, *, max_bytes: int = 1_000_000,
+                           timeout: int | float = 30) -> bytes | None:
+        """Read one bounded file, returning None only when it does not exist.
+
+        The remote helper distinguishes a missing file from an empty file,
+        rejects non-regular/symlink targets, and snapshots the bytes before
+        they are framed back through the proxy PTY.
+        """
+        remote_path = self._remote_path(remote_path)
+        if (type(max_bytes) is not int or max_bytes <= 0 or
+                max_bytes > self.chunk_bytes or isinstance(timeout, bool) or
+                not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or
+                timeout <= 0 or timeout > 3600):
+            raise ValueError("Invalid optional proxy file read limit or timeout")
+        temporary = str(PurePosixPath(remote_path).parent /
+                        (".runpod-optional-" + secrets.token_hex(12)))
+        python_program = (
+            "import os,stat\n"
+            f"source={remote_path!r}; target={temporary!r}; limit={max_bytes}\n"
+            "marker=b'\\x00'\n"
+            "try:\n"
+            " fd=os.open(source,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))\n"
+            "except FileNotFoundError:\n"
+            " data=marker\n"
+            "else:\n"
+            " try:\n"
+            "  before=os.fstat(fd)\n"
+            "  if not stat.S_ISREG(before.st_mode) or before.st_size>limit: raise ValueError('invalid_file')\n"
+            "  content=bytearray()\n"
+            "  while len(content)<=limit:\n"
+            "   block=os.read(fd,min(1048576,limit+1-len(content)))\n"
+            "   if not block: break\n"
+            "   content.extend(block)\n"
+            "  after=os.fstat(fd)\n"
+            "  identity=lambda value:(value.st_size,value.st_mtime_ns,value.st_dev,value.st_ino)\n"
+            "  if identity(before)!=identity(after) or len(content)!=before.st_size or len(content)>limit: raise ValueError('file_changed')\n"
+            "  data=b'\\x01'+bytes(content)\n"
+            " finally: os.close(fd)\n"
+            "out=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)\n"
+            "try:\n"
+            " view=memoryview(data)\n"
+            " while view:\n"
+            "  written=os.write(out,view)\n"
+            "  view=view[written:]\n"
+            "finally: os.close(out)\n"
+        )
+        script = "python3 - <<'RUNPOD_OPTIONAL_FILE'\n" + python_program + "RUNPOD_OPTIONAL_FILE"
+        result = self._request(script, temporary, max_bytes + 1, timeout,
+                               result_cleanup=temporary)
+        payload = result.payload
+        if payload == b"\x00":
+            return None
+        if (not isinstance(payload, bytes) or not payload.startswith(b"\x01") or
+                len(payload) - 1 > max_bytes):
+            raise SSHProxyError("SSH proxy optional-file response is invalid")
+        return payload[1:]
+
     def _remaining(self, deadline: float) -> float:
         remaining = deadline - self.monotonic()
         if remaining <= 0:

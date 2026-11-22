@@ -731,10 +731,16 @@ migration gates pass.
 
 Final local M10 revalidation (2026-11-22): the peer lifecycle projections are
 verified before same-parent concurrent create claims, and a corrupt sibling
-projection blocks admission. The source suite passes 242 tests with one
-Windows capability skip; the final wheel and sdist each pass 41 installed
-contract/admission tests. The installed-wheel consumer slices pass MIAP 7,
-Partition 18 and Hybrid 28 tests. Final artifact hashes and archive review are
+projection blocks admission. The source suite passes 245 tests with one
+Windows capability skip; the final wheel and sdist each pass 99 installed
+contract, execution-store, proxy transport and serial cleanup tests. Shared
+cleanup treats a workload status-read failure as indeterminate and still
+requests process stop before provider cleanup. The installed-wheel consumer
+slices pass MIAP 7, Partition 23 and Hybrid 30 tests. Partition's
+consumer-specific proxy worker launch validates and records delayed,
+identity-bound bootstrap progress and implements the shared stop/wait/kill
+contract; full worker/collection parity remains open.
+Final artifact hashes and archive review are
 recorded in the [evidence audit](status-and-remaining-plan-20261113.md). This
 closes local synthetic preview checks only; active consumer cutover, private
 store reconciliation and live qualification remain open.

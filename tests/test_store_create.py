@@ -560,6 +560,11 @@ class StoreCreateControllerTests(unittest.TestCase):
         self.assertEqual(result.outcome.operational_status.value, "failed")
         self.assertEqual(result.outcome.cleanup_status.value, "confirmed")
 
+    def test_workload_process_poll_failure_still_requests_stop_and_provider_cleanup(self):
+        result = self._run_fake_serial_engine_attempt(workload_failure="poll")
+        self.assertEqual(result.outcome.operational_status.value, "failed")
+        self.assertEqual(result.outcome.cleanup_status.value, "confirmed")
+
     def test_invalid_setup_process_handle_does_not_skip_provider_cleanup(self):
         result = self._run_fake_serial_engine_attempt(setup_failure="invalid")
         self.assertEqual(result.outcome.operational_status.value, "reconciliation_required")
@@ -585,7 +590,7 @@ class StoreCreateControllerTests(unittest.TestCase):
         self.assertEqual(result.outcome.operational_status.value, "failed")
         self.assertEqual(result.outcome.cleanup_status.value, "confirmed")
 
-    def _run_fake_serial_engine_attempt(self, *, setup_failure=None):
+    def _run_fake_serial_engine_attempt(self, *, setup_failure=None, workload_failure=None):
         collector_limits = {}
         self.store.cancel_uncreated(self.attempt["attempt_id"])
         worker = b"synthetic serial worker"
@@ -686,6 +691,7 @@ class StoreCreateControllerTests(unittest.TestCase):
             return 1
 
         process_launches = []
+        workload_processes = []
 
         def process_launcher(*args, **_kwargs):
             process_launches.append((args[7], tuple(args[8]), args[9]))
@@ -723,6 +729,27 @@ class StoreCreateControllerTests(unittest.TestCase):
                         self.killed = True
 
                 return SetupFailureProcess()
+            if workload_failure == "poll" and args[7] == "worker.py":
+                class WorkloadPollFailureProcess:
+                    returncode = None
+                    terminated = False
+
+                    def poll(self):
+                        raise OSError("synthetic workload process status unavailable")
+
+                    def terminate(self):
+                        self.terminated = True
+                        self.returncode = -15
+
+                    def wait(self, timeout=None):
+                        return self.returncode
+
+                    def kill(self):
+                        self.returncode = -9
+
+                process = WorkloadPollFailureProcess()
+                workload_processes.append(process)
+                return process
             return SimpleNamespace(returncode=0, poll=lambda: 0)
 
         engine = SerialExecutionEngine(
@@ -747,6 +774,9 @@ class StoreCreateControllerTests(unittest.TestCase):
         result = engine.run_attempt(
             plan, attempt_id, workload, local_public_key_path=self.key_path,
             cleanup_timeout_seconds=3)
+        if workload_failure == "poll":
+            self.assertEqual(len(workload_processes), 1)
+            self.assertTrue(workload_processes[0].terminated)
         if setup_failure is not None:
             self.assertEqual(result.pod_id, "pod-engine-001")
             self.assertEqual(self.store.get_attempt(attempt_id)["state"], "terminated")
@@ -756,6 +786,11 @@ class StoreCreateControllerTests(unittest.TestCase):
             stages = [event.stage for event in result.stage_events]
             self.assertNotIn("collector", stages)
             self.assertNotIn("workload", stages)
+            return result
+        if workload_failure == "poll":
+            self.assertEqual(result.pod_id, "pod-engine-001")
+            self.assertEqual(self.store.get_attempt(attempt_id)["state"], "terminated")
+            self.assertEqual(result.outcome.cleanup_status.value, "confirmed")
             return result
         self.assertEqual(result.pod_id, "pod-engine-001",
                          msg=f"{result.outcome}; stages={result.stage_events}; "

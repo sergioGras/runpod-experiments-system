@@ -85,6 +85,47 @@ class ProxySSHTests(unittest.TestCase):
         self.assertEqual(session.read_file("/work/result.bin", max_bytes=64), payload)
         self.assertEqual(len(calls), 1)
 
+    def test_read_optional_file_distinguishes_missing_empty_and_present(self):
+        calls = []
+        payloads = [b"\x00", b"\x01", b"\x01status"]
+
+        def runner(_argv, **kwargs):
+            calls.append(kwargs)
+            token = self.token_from(kwargs["input"])
+            output = token + "_STATUS:0\n" + token + "_BEGIN\n"
+            output += base64.b64encode(payloads.pop(0)).decode() + "\n"
+            output += token + "_END\n"
+            return SimpleNamespace(stdout=output.encode(), stderr=b"", returncode=0)
+
+        session = SSHProxySession(self.endpoint, self.key, self.known_hosts, runner=runner)
+        self.assertIsNone(session.read_optional_file("/work/progress.json", max_bytes=64))
+        self.assertEqual(session.read_optional_file("/work/progress.json", max_bytes=64), b"")
+        self.assertEqual(session.read_optional_file("/work/progress.json", max_bytes=64), b"status")
+        self.assertEqual(len(calls), 3)
+        for call in calls:
+            remote = self.remote_script_from_request(call["input"])
+            match = re.search(r"python3 - <<'([^']+)'\n(.*?)\n\1", remote, re.DOTALL)
+            self.assertIsNotNone(match)
+            compile(match.group(2), "<proxy-remote-optional-file>", "exec")
+            self.assertIn("O_NOFOLLOW", match.group(2))
+            self.assertIn("rm -f -- /work/.runpod-optional-", call["input"].decode())
+
+    def test_read_optional_file_rejects_invalid_marker_and_oversized_bound(self):
+        def invalid_runner(_argv, **kwargs):
+            token = self.token_from(kwargs["input"])
+            payload = base64.b64encode(b"\\x02invalid").decode()
+            output = (token + "_STATUS:0\n" + token + "_BEGIN\n" + payload +
+                      "\n" + token + "_END\n")
+            return SimpleNamespace(stdout=output.encode(), stderr=b"", returncode=0)
+
+        session = SSHProxySession(self.endpoint, self.key, self.known_hosts,
+                                  runner=invalid_runner)
+        with self.assertRaises(SSHProxyError):
+            session.read_optional_file("/work/progress.json", max_bytes=64)
+        with self.assertRaises(ValueError):
+            session.read_optional_file(
+                "/work/progress.json", max_bytes=session.chunk_bytes + 1)
+
     def test_read_large_file_uses_bounded_chunks_and_checks_the_complete_digest(self):
         payload = bytes((index % 251 for index in range(1_000_137)))
         metadata = {
