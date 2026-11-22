@@ -29,7 +29,7 @@ These statuses are separate; a test count alone does not establish coverage.
 | Setup | `tests/test_store_create.py`: invalid process handle, poll error, nonzero exit, timeout, supervisor loss, and terminate/kill failure all fail before collection/workload and still attempt provider cleanup | A local process stop that cannot be confirmed still requires reconciliation |
 | Interactive I/O | `tests/test_interactive_workload.py`, `tests/test_interactive_ssh.py`, `tests/test_binary_process.py`: bounded sessions and process I/O | No consumer protocol or scientific-equivalence proof |
 | Packaging | Candidate wheel and sdist install outside checkout; installed contract/admission tests and focused consumer slices pass; detached supervisor/collector import policy-bound consumer factories; archive contents were reviewed | Temporary candidates are not release assets; supported-host, ACL, and live provider qualification remain open |
-| Consumers | Isolated opt-in adapters in Hybrid, MIAP, and Partition pass focused offline acceptance against installed artifacts; Partition now maps P020 parent/child limits to shared admission and tests same-group guarded creation | No active entrypoint or dependency pin adopts the engine; MIAP active-Pod restart/credential delivery, Hybrid phase mapping, and Partition's custom worker lifecycle and coordinator cutover remain open |
+| Consumers | Isolated opt-in adapters in Hybrid, MIAP, and Partition pass focused offline acceptance against installed artifacts; Partition maps P020 parent/child limits and completes synthetic CPU-only parallel-engine and exact ambiguous-Pod recovery paths | No active entrypoint or dependency pin adopts the engine; MIAP approval/credential mapping, Hybrid phase mapping, and Partition's full worker lifecycle and coordinator cutover remain open |
 
 M10 parent/child admission follow-up (2026-11-22; local development candidate,
 not a release):
@@ -104,24 +104,25 @@ development candidate, not a release):
   includes the source tests, and neither artifact contains consumer checkout
   paths.
 - Against the final installed wheel, the focused consumer slices passed MIAP
-  **10**, Partition **24**, and Hybrid **30** tests. MIAP now exercises active
+  **10**, Partition **26**, and Hybrid **30** tests. MIAP now exercises active
   Pod restart with matching collector/supervisor state, exact synthetic cleanup,
   an unresolved delete-transport failure and a full GPU-required fake attempt.
   Partition's synthetic adapter also asserts that the CPU child create request
-  contains no GPU field while the GPU child request contains no CPU field. Four
+  contains no GPU field while the GPU child request contains no CPU field. Five
   Partition tests cover its proxy worker launcher contract, delayed
-  identity-bound application progress, bounded status/error handling and
-  subprocess-compatible stop/wait/kill controls; remote deadline/termination
-  and full worker collection remain open. One further Partition test completes
-  two CPU-only child jobs through the shared parallel engine, project guard,
-  proxy worker adapter, independent fake watchdogs and exact cleanup, and
-  verifies both provider create requests contain CPU without GPU. Full
+  identity-bound application progress, bounded status/error handling,
+  stop/wait/kill and deadline-triggered remote kill. Another synthetic test
+  adopts an exact orphan Pod after an ambiguous create, deletes only that Pod
+  and leaves a foreign Pod untouched. A full consumer test completes two
+  CPU-only child jobs through the shared parallel engine, project guard, proxy
+  worker adapter, independent fake watchdogs and exact cleanup, and verifies
+  both provider create requests contain CPU without GPU. Full
   installed-wheel discovery passed 245 tests with one Windows capability skip.
   Shared cleanup proceeds when a workload status poll is indeterminate, as
   verified by a synthetic regression.
 - P020's active dispatcher and SQLite coordinator remain unchanged. Its proxy
-  worker/progress/collection lifecycle, ambiguous-create adoption parity,
-  shared-store cutover and private-store reconciliation are still open. No
+  worker/progress/collection lifecycle, complete ambiguous-create/restart
+  parity, shared-store cutover and private-store reconciliation remain open. No
   provider, credential, paid compute or private result was used.
 
 Live qualification, schema migration and consumer cutover remain separate

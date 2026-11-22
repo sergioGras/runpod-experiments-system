@@ -737,12 +737,14 @@ wheel and sdist each pass 99 focused installed contract, execution-store, proxy
 transport and serial cleanup tests. Shared cleanup treats a workload
 status-read failure as indeterminate and still requests process stop before
 provider cleanup. The installed-wheel consumer slices pass MIAP 10, Partition
-24 and Hybrid 30 tests. MIAP now has synthetic active-Pod restart recovery,
+26 and Hybrid 30 tests. MIAP now has synthetic active-Pod restart recovery,
 cleanup-failure hold and a complete GPU-required shared-engine attempt. The
 Partition adapter now runs two CPU-only children through the shared parallel
 engine, its project guard, proxy worker launcher, independent watchdogs and
-exact cleanup; both create requests omit GPU. Partition's full worker and
-collection parity remains open.
+exact cleanup; both create requests omit GPU. Its synthetic ambiguity test
+adopts and cleans only the exact orphan Pod, and the worker deadline test sends
+the remote kill request. Full deadline-to-provider termination, worker and
+collection parity remain open.
 Final artifact hashes and archive review are
 recorded in the [evidence audit](status-and-remaining-plan-20261113.md). This
 closes local synthetic preview checks only; active consumer cutover, private
