@@ -104,14 +104,21 @@ development candidate, not a release):
   includes the source tests, and neither artifact contains consumer checkout
   paths.
 - Against the final installed wheel, the focused consumer slices passed MIAP
-  **7**, Partition **23**, and Hybrid **30** tests. Partition's synthetic
-  adapter also asserts that the CPU child create request contains no GPU field
-  while the GPU child request contains no CPU field. Four additional
-  Partition-only tests cover its consumer proxy worker launcher contract,
-  delayed identity-bound application progress, bounded status/error handling
-  and subprocess-compatible stop/wait/kill controls; remote deadline/termination
-  and full worker collection remain open. Shared cleanup now proceeds when a
-  workload status poll is indeterminate, as verified by a synthetic regression.
+  **10**, Partition **24**, and Hybrid **30** tests. MIAP now exercises active
+  Pod restart with matching collector/supervisor state, exact synthetic cleanup,
+  an unresolved delete-transport failure and a full GPU-required fake attempt.
+  Partition's synthetic adapter also asserts that the CPU child create request
+  contains no GPU field while the GPU child request contains no CPU field. Four
+  Partition tests cover its proxy worker launcher contract, delayed
+  identity-bound application progress, bounded status/error handling and
+  subprocess-compatible stop/wait/kill controls; remote deadline/termination
+  and full worker collection remain open. One further Partition test completes
+  two CPU-only child jobs through the shared parallel engine, project guard,
+  proxy worker adapter, independent fake watchdogs and exact cleanup, and
+  verifies both provider create requests contain CPU without GPU. Full
+  installed-wheel discovery passed 245 tests with one Windows capability skip.
+  Shared cleanup proceeds when a workload status poll is indeterminate, as
+  verified by a synthetic regression.
 - P020's active dispatcher and SQLite coordinator remain unchanged. Its proxy
   worker/progress/collection lifecycle, ambiguous-create adoption parity,
   shared-store cutover and private-store reconciliation are still open. No
@@ -163,8 +170,8 @@ approval to another project.
 | M3 | Serial transactional core verified; deployment/migration open | Canonical state root/actual-host/ACL checks and explicit legacy-state handling |
 | M4 | Detached process and supervision components verified; host qualification open | Exact installed candidate survives foreground exit on every supported controlling host; failure/reboot behavior recorded |
 | M5–M6 | Internal serial CPU/GPU/interactive implementation and enumerated setup/WAL fault paths verified offline; installed wheel/sdist reviewed | Public API/schema, credential-delivery and supported-host review; complete consumer lifecycle acceptance; then authorized live qualification |
-| M7–M9 | Isolated adapters exist; Hybrid's interactive path runs through the serial engine; MIAP's synthetic batch, promotion, finalizer and bounded restart mapping and Partition's CPU proxy/archive slice pass offline; CPU/GPU plans cannot mix; no active consumer adopts an adapter | Map actual workload phases and GPU need; finish MIAP active-Pod restart/credential acceptance, Hybrid phase-specific CPU/GPU and failure/integrity parity, Partition supervised worker launch/progress and GPU workload acceptance; reconcile before cutover |
-| M10 | Parent admission and bounded parallel runner verified; installed wheel/sdist and all three focused consumer slices pass; Partition P020 admission/API parity has an opt-in synthetic adapter | Map P020's proxy worker/progress/ambiguous-create lifecycle, reconcile private state, complete consumer cutovers, and separately qualify live provider/host behavior |
+| M7–M9 | Isolated adapters exist; Hybrid's interactive path runs through the serial engine; MIAP's synthetic batch/finalizer, active-Pod restart recovery and GPU-required fake attempt pass offline; Partition's CPU proxy/archive slice passes; CPU/GPU plans cannot mix; no active consumer adopts an adapter | Map actual workload phases and GPU need; finish MIAP credential/approval mapping, Hybrid phase-specific CPU/GPU and failure/integrity parity, Partition supervised worker/progress and workload acceptance; reconcile before cutover |
+| M10 | Parent admission and bounded parallel runner verified; installed wheel/sdist and consumer slices pass; Partition P020 adapter completes a two-child CPU-only shared-engine fake run | Map remaining P020 proxy worker/progress/ambiguous-create lifecycle, reconcile private state, complete consumer cutovers, and separately qualify live provider/host behavior |
 | M11 | Open | Integrated acceptance, duplication retirement, rollback and release evidence |
 
 ## Ordered remaining work

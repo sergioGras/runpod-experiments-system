@@ -731,15 +731,18 @@ migration gates pass.
 
 Final local M10 revalidation (2026-11-22): the peer lifecycle projections are
 verified before same-parent concurrent create claims, and a corrupt sibling
-projection blocks admission. The source suite passes 245 tests with one
-Windows capability skip; the final wheel and sdist each pass 99 installed
-contract, execution-store, proxy transport and serial cleanup tests. Shared
-cleanup treats a workload status-read failure as indeterminate and still
-requests process stop before provider cleanup. The installed-wheel consumer
-slices pass MIAP 7, Partition 23 and Hybrid 30 tests. Partition's
-consumer-specific proxy worker launch validates and records delayed,
-identity-bound bootstrap progress and implements the shared stop/wait/kill
-contract; full worker/collection parity remains open.
+projection blocks admission. The source suite and full installed-wheel test
+discovery each pass 245 tests with one Windows capability skip; the final
+wheel and sdist each pass 99 focused installed contract, execution-store, proxy
+transport and serial cleanup tests. Shared cleanup treats a workload
+status-read failure as indeterminate and still requests process stop before
+provider cleanup. The installed-wheel consumer slices pass MIAP 10, Partition
+24 and Hybrid 30 tests. MIAP now has synthetic active-Pod restart recovery,
+cleanup-failure hold and a complete GPU-required shared-engine attempt. The
+Partition adapter now runs two CPU-only children through the shared parallel
+engine, its project guard, proxy worker launcher, independent watchdogs and
+exact cleanup; both create requests omit GPU. Partition's full worker and
+collection parity remains open.
 Final artifact hashes and archive review are
 recorded in the [evidence audit](status-and-remaining-plan-20261113.md). This
 closes local synthetic preview checks only; active consumer cutover, private
@@ -749,12 +752,15 @@ M10 acceptance must use independent processes (not only threads) racing for the
 last group slot and total commitment; test child approval reuse, over-cap hourly
 admission, parent deadline continuity, restart/crash at reserve and create
 claim, ambiguous-create holds, each child's independent watchdog and exact
-cleanup, and one-child failure while another completes. Follow-up tests now
-cover the two-child cleanup/failure case and Partition's synthetic shared-store
-adapter mapping; remaining consumer lifecycle and active cutover work is tracked
-below and in the evidence audit. Include mixed CPU/GPU child plans with fake
-quotes and providers, asserting a CPU child never creates a GPU request. No
-provider call is needed for these checks.
+cleanup, and one-child failure while another completes. Follow-up tests cover
+the two-child cleanup/failure case and Partition's synthetic shared-store
+adapter mapping; the installed Partition consumer test also completes a CPU-only
+two-child run through the shared parallel engine. MIAP's installed consumer
+tests cover active-Pod restart, cleanup failure and a GPU-required fake attempt.
+Include mixed CPU/GPU child plans with fake quotes and providers, asserting a
+CPU child never creates a GPU request. Remaining workload-specific acceptance
+and active cutover work is tracked below and in the evidence audit. No provider
+call is needed for these checks.
 
 Execute the final acceptance matrix in [testing](testing-strategy.md). Qualify live
 CPU/GPU and proxy capabilities only within applicable finite authorizations; a
