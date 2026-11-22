@@ -29,7 +29,7 @@ These statuses are separate; a test count alone does not establish coverage.
 | Setup | `tests/test_store_create.py`: invalid process handle, poll error, nonzero exit, timeout, supervisor loss, and terminate/kill failure all fail before collection/workload and still attempt provider cleanup | A local process stop that cannot be confirmed still requires reconciliation |
 | Interactive I/O | `tests/test_interactive_workload.py`, `tests/test_interactive_ssh.py`, `tests/test_binary_process.py`: bounded sessions and process I/O | No consumer protocol or scientific-equivalence proof |
 | Packaging | Candidate wheel and sdist install outside checkout; the wheel suite passes from site-packages; detached supervisor/collector import policy-bound consumer factories; archive contents were reviewed | Temporary candidates are not release assets; supported-host, ACL, and live provider qualification remain open |
-| Consumers | Isolated opt-in adapters in Hybrid, MIAP, and Partition pass focused offline acceptance against the installed current sdist; MIAP's five-block fake batch/finalizer and Partition's CPU proxy/archive slice are now covered | No active entrypoint or dependency pin adopts the engine; MIAP recovery/credential mapping, Hybrid phase mapping, Partition service/restart, and parallel M10 parity remain open |
+| Consumers | Isolated opt-in adapters in Hybrid, MIAP, and Partition pass focused offline acceptance against the installed current sdist; MIAP's fake batch, promotion and finalizer path, and Partition's CPU proxy/archive slice are covered | No active entrypoint or dependency pin adopts the engine; MIAP restart reconciliation/credential mapping, Hybrid phase mapping, Partition supervised worker launch/progress parity, and parallel M10 parity remain open |
 
 The earlier candidate passed 226 tests with one Windows directory-symlink
 capability skip. It also passed the focused MIAP, Partition, and Hybrid slices
@@ -74,7 +74,7 @@ approval to another project.
 | M3 | Serial transactional core verified; deployment/migration open | Canonical state root/actual-host/ACL checks and explicit legacy-state handling |
 | M4 | Detached process and supervision components verified; host qualification open | Exact installed candidate survives foreground exit on every supported controlling host; failure/reboot behavior recorded |
 | M5–M6 | Internal serial CPU/GPU/interactive implementation and enumerated setup/WAL fault paths verified offline; installed wheel/sdist reviewed | Public API/schema, credential-delivery and supported-host review; complete consumer lifecycle acceptance; then authorized live qualification |
-| M7–M9 | Isolated adapters exist; Hybrid's interactive path runs through the serial engine; MIAP's synthetic serial batch/finalizer and Partition's CPU proxy/archive slice pass offline; CPU/GPU plans cannot mix; no active consumer adopts an adapter | Map actual workload phases and GPU need; finish MIAP verified-block recovery and credential delivery, Hybrid phase-specific CPU/GPU and failure/integrity parity, Partition service/restart and GPU workload acceptance; reconcile before cutover |
+| M7–M9 | Isolated adapters exist; Hybrid's interactive path runs through the serial engine; MIAP's synthetic batch, promotion and finalizer path and Partition's CPU proxy/archive slice pass offline; CPU/GPU plans cannot mix; no active consumer adopts an adapter | Map actual workload phases and GPU need; finish MIAP unresolved-attempt restart reconciliation and credential delivery, Hybrid phase-specific CPU/GPU and failure/integrity parity, Partition supervised worker launch/progress and GPU workload acceptance; reconcile before cutover |
 | M10 | Hierarchical parallel admission not delivered by the serial store | Atomic parent/child caps, two-slot process races and independent resource cleanup |
 | M11 | Open | Integrated acceptance, duplication retirement, rollback and release evidence |
 
@@ -254,7 +254,7 @@ Hybrid's 14 protocol/watchdog tests passed against the earlier installed wheel;
 one runs the real Hybrid bridge through `SerialExecutionEngine` with fake setup,
 interactive transport and cleanup.
 
-### Consumer acceptance extension — 2026-11-13
+### Consumer acceptance extension — 2026-11-13; follow-up review — 2026-11-22
 
 The current shared sdist candidate (`95d0443`, SHA-256
 `50a0720cba8972f8d71e0b3ff39094c350c4425eb9dfedbd6ef7cb460eefb22a`) was used
@@ -266,18 +266,26 @@ for additive offline acceptance in the isolated preview branches:
   its encrypted-compute phase is CPU; it needs separate single-kind plans. The
   preview has not mapped those phases into one approved workflow.
 - **MIAP:** all five adapter tests pass. The new fixture serially admits five
-  CPU-only synthetic attempts and sends five files through MIAP's atomic,
-  idempotent finalizer. Analysis and frozen-config validation are stubbed due to
-  the missing local NumPy dependency. This does not integrate interrupted
-  verified-block recovery or private model-token delivery. The active text job
-  remains GPU-required (48 GB and CUDA 12.8 floors); the CPU fixture does not
-  classify that workload as CPU-capable.
+  CPU-only synthetic attempts under one hash-bound upload manifest. A
+  read-only recovery view maps only shared `terminated` attempts into MIAP's
+  pending/billed vocabulary, then exercises MIAP's promotion and atomic
+  finalizer path. The test supplies synthetic watchdog identity and matching
+  hashes; worker-output verification and provider-absence callbacks are
+  stubbed, as are analysis and frozen-config validation, because the preview
+  environment lacks NumPy. This does not validate science or provider state.
+  Unresolved-attempt restart reconciliation and private model-token delivery
+  remain open. The active text job remains GPU-required (48 GB and CUDA 12.8
+  floors); the CPU fixture does not classify that workload as CPU-capable.
 - **Partition:** five adapter tests plus four archive and five proxy regressions
   pass (14 total). The new serial fixture matches P028's CPU3c shape, verifies
   framed proxy chunks and archive/per-file hashes, then confirms exact cleanup.
   P028's actual workload is explicitly CPU-only; GPU-only plans remain available
-  for accelerator-required studies. The P020 service topology, restarts, and
-  two-Pod dispatcher are not covered by this serial fixture.
+  for accelerator-required studies. P014/P028 use one Pod per attempt; the
+  worker's head evaluator is a nested child process, while its body/tail roles
+  execute within the worker. Their legacy controller launches a detached
+  bootstrap and polls status/progress. Shared proxy upload and archive collection
+  are covered, but the shared engine's supervised workload-launch/progress path
+  is not. P020's separate two-Pod dispatcher and M10 caps are also not covered.
 
 This confirms useful compatibility seams, not production plan/approval mapping.
 Each project must bind its own workload requirement and finite approval into
