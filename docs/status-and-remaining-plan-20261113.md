@@ -106,7 +106,8 @@ development candidate, not a release):
 - Against the final installed wheel, the focused consumer slices passed MIAP
   **10**, Partition **26**, and Hybrid **30** tests. MIAP now exercises active
   Pod restart with matching collector/supervisor state, exact synthetic cleanup,
-  an unresolved delete-transport failure and a full GPU-required fake attempt.
+  a GPU-shaped unresolved delete-transport failure and a full GPU-required fake
+  attempt.
   Partition's synthetic adapter also asserts that the CPU child create request
   contains no GPU field while the GPU child request contains no CPU field. Five
   Partition tests cover its proxy worker launcher contract, delayed

@@ -738,7 +738,7 @@ transport and serial cleanup tests. Shared cleanup treats a workload
 status-read failure as indeterminate and still requests process stop before
 provider cleanup. The installed-wheel consumer slices pass MIAP 10, Partition
 26 and Hybrid 30 tests. MIAP now has synthetic active-Pod restart recovery,
-cleanup-failure hold and a complete GPU-required shared-engine attempt. The
+GPU cleanup-failure hold and a complete GPU-required shared-engine attempt. The
 Partition adapter now runs two CPU-only children through the shared parallel
 engine, its project guard, proxy worker launcher, independent watchdogs and
 exact cleanup; both create requests omit GPU. Its synthetic ambiguity test
