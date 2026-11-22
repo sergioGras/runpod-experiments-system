@@ -9,22 +9,31 @@ import sys
 import tempfile
 import time
 from types import ModuleType
+import threading
 import unittest
 import uuid
 from unittest.mock import patch
 
 from runpod_experiments.contracts import (
-    ApprovalScope, AttemptPlan, BillingObservation, ExecutionPlan,
-    ContractError, FailureCategory, ManifestFile, PodProvisioningSpec, ProjectPolicy,
-    QuoteObservation, ResourceKind, ResourceProfile, RetryPolicy, StageStatus,
+    AdmissionGroupScope, ApprovalScope, AttemptPlan, BillingObservation, BillingStatus,
+    CleanupStatus, ExecutionOutcome, ExecutionPlan, ContractError, FailureCategory,
+    ManifestFile, OperationalStatus, PodProvisioningSpec, ProjectPolicy,
+    QuoteObservation, ResourceKind, ResourceProfile, RetryPolicy, ScientificVerdict, StageStatus,
     TransferDirection, TransferManifest,
     canonical_json_bytes, encode_document, sha256_bytes,
 )
 from runpod_experiments.collection_process import launch_execution_store as launch_collector
 from runpod_experiments.errors import ExecutionError
 from runpod_experiments.execution_store import (
-    ExecutionStore, _execution_plan_matches_document, _project_policy_digest,
+    ExecutionStore, SERIAL_STORE_SCHEMA_VERSION, STORE_SCHEMA_VERSION,
+    _execution_plan_matches_document, _project_policy_digest,
     _project_policy_from_payload,
+)
+from runpod_experiments.parallel_engine import (
+    ParallelExecutionEngine, ParallelJob, ParallelJobOutcome,
+)
+from runpod_experiments.serial_engine import (
+    AttemptWorkload, SerialAttemptResult, SerialJobResult, SerialExecutionEngine,
 )
 from runpod_experiments.guarded_project_api import GuardedProjectApiClient
 from runpod_experiments.ownership import request_delete_for_store_attempt
@@ -47,19 +56,24 @@ COMMIT = "d" * 40
 
 
 def plan_for(now: int, *, max_total: int = 1_000_000, max_slots: int = 1,
-             max_hourly: int = 700_000, hourly_rate: int = 300_000) -> ExecutionPlan:
+             approval_slots: int | None = None, max_hourly: int = 700_000,
+             hourly_rate: int = 300_000, approval_id: str = "approval-one",
+             job_id: str = "research-job", gpu: bool = False) -> ExecutionPlan:
     project = ProjectPolicy("synthetic-nebula", ("nebula-",), ZERO,
                             ("TEST-HOST",), max_active_resources=max_slots)
     approval = ApprovalScope(
-        "approval-one", project.project_id, "TEST-HOST", ZERO,
+        approval_id, project.project_id, "TEST-HOST", ZERO,
         sha256_bytes(encode_document("project_policy", project)), ONE, "2" * 64,
-        max_total, max_hourly, 3600, 3, now + 7200, max_slots)
+        max_total, max_hourly, 3600, 3, now + 7200,
+        max_slots if approval_slots is None else approval_slots)
     resource = ResourceProfile(
-        ResourceKind.CPU, "cpu-small", hourly_rate, ("EU-TEST-1",),
-        "sha256:" + ZERO, 20, 4, 8)
+        ResourceKind.GPU if gpu else ResourceKind.CPU,
+        "gpu-small" if gpu else "cpu-small", hourly_rate, ("EU-TEST-1",),
+        "sha256:" + ZERO, 20, 8 if gpu else 4, 16 if gpu else 8,
+        1 if gpu else 0, 24 if gpu else 0, "12.8" if gpu else None)
     provisioning = PodProvisioningSpec("runpod/base@sha256:" + ZERO, ("22/tcp",))
     return ExecutionPlan(
-        "research-job", project, approval, COMMIT, SOURCE, CONFIG, PACKAGE,
+        job_id, project, approval, COMMIT, SOURCE, CONFIG, PACKAGE,
         (resource,), provisioning, TransferManifest((), 1024, 4096),
         RetryPolicy(3, 3600, (FailureCategory.TRANSIENT_READ,
                                FailureCategory.VERIFIED_CAPACITY_REJECTION)))
@@ -67,10 +81,12 @@ def plan_for(now: int, *, max_total: int = 1_000_000, max_slots: int = 1,
 
 def attempt_for(plan: ExecutionPlan, attempt_id: str, number: int, now: int) -> AttemptPlan:
     resource = plan.resource_options[0]
+    units = resource.gpu_count if resource.kind is ResourceKind.GPU else resource.cpu_count
+    memory = resource.gpu_memory_gb if resource.kind is ResourceKind.GPU else resource.memory_gb
     quote = QuoteObservation(
-        resource.kind, resource.resource_id, resource.cpu_count, resource.cpu_count,
+        resource.kind, resource.resource_id, units, units,
         resource.hourly_micro_usd, 0, True, resource.region_ids, now - 1, ONE,
-        resource.memory_gb)
+        memory, resource.minimum_cuda)
     return AttemptPlan(
         attempt_id, plan.job_id, plan.approval.approval_id, number,
         pod_create_request_sha256(plan.provisioning, resource,
@@ -1501,6 +1517,7 @@ os._exit(25)
                             "SELECT COUNT(*) FROM execution_billing").fetchone()[0], 0)
                 self.assertTrue(reopened.verify_event_chain())
 
+
     def test_process_exit_at_lifecycle_event_boundaries_rolls_back_each_transaction(self):
         child = r"""
 import os, sys
@@ -1611,6 +1628,308 @@ else:
                     exposure if action == "billing_complete" else prior_accounting.reserved_micro_usd)
                 self.assertTrue(reopened.verify_event_chain())
 
+
+
+class AdmissionGroupTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="admission-group-test-")
+        self.addCleanup(self.temp.cleanup)
+        self.now = int(time.time())
+        self.mono = [500.0]
+        self.path = Path(self.temp.name) / "execution.sqlite"
+        self.store = ExecutionStore(str(self.path), project_id="synthetic-nebula",
+                                    controller_host="TEST-HOST", clock=lambda: self.now,
+                                    monotonic=lambda: self.mono[0])
+
+    def plan(self, approval_id, *, total=600_000, gpu=False, rate=300_000):
+        return plan_for(self.now, max_total=total, max_slots=2, approval_slots=1,
+                        max_hourly=700_000, hourly_rate=rate,
+                        approval_id=approval_id, job_id="job-" + approval_id,
+                        gpu=gpu)
+
+    def group(self, plan, *, total=1_200_000, hourly=700_000,
+              slots=2, runtime=3600, child_ids=None):
+        return AdmissionGroupScope(
+            "parallel-round", plan.project.project_id, "TEST-HOST", ZERO, ONE,
+            "2" * 64, total, hourly, runtime, self.now + 7200, slots,
+            tuple(child_ids or ("child-a", "child-b", "child-c")))
+
+    def reserve(self, plan, number, *, group=None, attempt_id=None):
+        attempt_id = attempt_id or f"attempt-{plan.approval.approval_id}-{number}"
+        attempt = attempt_for(plan, attempt_id, number, self.now)
+        return self.store.reserve_attempt(plan, attempt, pod_name(number),
+                                          admission_group=group)
+
+    def test_mixed_cpu_gpu_children_keep_independent_single_kind_plans(self):
+        cpu = self.plan("child-a", gpu=False)
+        gpu = self.plan("child-b", gpu=True)
+        group = self.group(cpu)
+        self.reserve(cpu, 1, group=group)
+        self.reserve(gpu, 2, group=group)
+        self.assertEqual(cpu.resource_options[0].kind, ResourceKind.CPU)
+        self.assertEqual(gpu.resource_options[0].kind, ResourceKind.GPU)
+        self.assertEqual(self.store.get_attempt("attempt-child-a-1")["state"], "reserved")
+        self.assertEqual(self.store.get_attempt("attempt-child-b-2")["state"], "reserved")
+        self.assertTrue(self.store.verify_event_chain())
+
+    def test_parallel_runner_keeps_sibling_running_after_one_child_raises(self):
+        first = self.plan("child-a")
+        second = self.plan("child-b", gpu=True)
+        group = self.group(first)
+        first_attempt = attempt_for(first, "attempt-child-a-1", 1, self.now)
+        second_attempt = attempt_for(second, "attempt-child-b-2", 2, self.now)
+        self.store.reserve_attempt(first, first_attempt, pod_name(1),
+                                   admission_group=group)
+        self.store.reserve_attempt(second, second_attempt, pod_name(2),
+                                   admission_group=group)
+        workload = AttemptWorkload(
+            Path("."), Path("test-key"), Path("test-known-hosts"), "/work",
+            "worker.py", (), 300, ("result.json",), Path("artifacts"))
+        start = threading.Barrier(2)
+
+        def run_job(plan, first_attempt_id, *_args, **_kwargs):
+            start.wait(timeout=5)
+            if plan.approval.approval_id == "child-a":
+                raise RuntimeError("synthetic child failure")
+            item = SerialAttemptResult(
+                first_attempt_id, None,
+                ExecutionOutcome(OperationalStatus.SUCCEEDED,
+                                 ScientificVerdict.NOT_EVALUATED,
+                                 CleanupStatus.NOT_REQUIRED, BillingStatus.PENDING), ())
+            return SerialJobResult(plan.job_id, (item,), "completed")
+
+        engine = object.__new__(SerialExecutionEngine)
+        engine.store = self.store
+        engine.run_job = run_job
+        runner = ParallelExecutionEngine(engine, self.store)
+        result = runner.run_group(group, (
+            ParallelJob(first, first_attempt.attempt_id, workload, Path("public-key")),
+            ParallelJob(second, second_attempt.attempt_id, workload, Path("public-key")),
+        ))
+        self.assertEqual([item.approval_id for item in result.outcomes],
+                         ["child-a", "child-b"])
+        self.assertEqual(result.outcomes[0].failure_category, FailureCategory.INTERNAL)
+        self.assertEqual(result.outcomes[0].error_code, "parallel_child_unhandled")
+        self.assertIsNotNone(result.outcomes[1].result)
+
+    def test_full_child_ceiling_is_committed_once_and_survives_no_create_cancel(self):
+        plan = self.plan("child-a")
+        group = self.group(plan, total=600_000, slots=1)
+        self.reserve(plan, 1, group=group)
+        self.store.cancel_uncreated("attempt-child-a-1")
+        self.reserve(plan, 2, group=group)
+        with closing(self.store._connect()) as db:
+            row = db.execute("""SELECT COUNT(*),SUM(committed_total_micro_usd)
+                FROM execution_admission_children WHERE group_id=?""",
+                (group.group_id,)).fetchone()
+        self.assertEqual(tuple(row), (1, 600_000))
+
+    def test_parent_total_commits_each_child_scope_and_rolls_back_over_cap(self):
+        first = self.plan("child-a", total=600_000)
+        second = self.plan("child-b", total=400_000)
+        group = self.group(first, total=900_000)
+        self.reserve(first, 1, group=group)
+        with self.assertRaises(ExecutionError) as caught:
+            self.reserve(second, 2, group=group)
+        self.assertEqual(caught.exception.code, "admission_group_total_cap_exceeded")
+        with closing(self.store._connect()) as db:
+            count = db.execute("""SELECT COUNT(*) FROM execution_admission_children
+                WHERE project_id=? AND approval_id=?""",
+                (self.store.project_id, second.approval.approval_id)).fetchone()[0]
+        self.assertEqual(count, 0)
+
+    def test_parent_hourly_and_slot_caps_cover_distinct_child_approvals(self):
+        first = self.plan("child-a")
+        second = self.plan("child-b")
+        hourly_group = self.group(first, hourly=500_000)
+        self.reserve(first, 1, group=hourly_group)
+        with self.assertRaises(ExecutionError) as caught:
+            self.reserve(second, 2, group=hourly_group)
+        self.assertEqual(caught.exception.code, "admission_group_hourly_cap_exceeded")
+
+        path = Path(self.temp.name) / "slot.sqlite"
+        slot_store = ExecutionStore(str(path), project_id="synthetic-nebula",
+                                    controller_host="TEST-HOST", clock=lambda: self.now,
+                                    monotonic=lambda: self.mono[0])
+        slot_group = self.group(first, slots=1)
+        slot_store.reserve_attempt(first, attempt_for(first, "slot-a", 1, self.now),
+                                   pod_name(1), admission_group=slot_group)
+        with self.assertRaises(ExecutionError) as caught:
+            slot_store.reserve_attempt(second, attempt_for(second, "slot-b", 2, self.now),
+                                       pod_name(2), admission_group=slot_group)
+        self.assertEqual(caught.exception.code, "admission_group_slots_exhausted")
+
+    def test_child_binding_cannot_be_reused_ungrouped_or_under_changed_parent(self):
+        plan = self.plan("child-a")
+        group = self.group(plan)
+        self.reserve(plan, 1, group=group)
+        with self.assertRaises(ExecutionError) as caught:
+            self.reserve(plan, 2)
+        self.assertEqual(caught.exception.code, "admission_group_binding_required")
+        with self.assertRaises(ExecutionError) as caught:
+            self.reserve(plan, 2, group=self.group(plan, total=1_100_000))
+        self.assertEqual(caught.exception.code, "admission_group_scope_changed")
+
+    def test_parent_deadline_is_fixed_at_first_reservation_and_monotonic_rollback_fails_closed(self):
+        first = self.plan("child-a")
+        group = self.group(first, runtime=1500)
+        attempt = replace(attempt_for(first, "attempt-child-a-1", 1, self.now),
+                          deadline_epoch=self.now + 1300)
+        self.store.reserve_attempt(first, attempt, pod_name(1), admission_group=group)
+        self.now += 800
+        self.mono[0] += 800
+        second = self.plan("child-b")
+        later = replace(attempt_for(second, "attempt-child-b-2", 2, self.now),
+                        deadline_epoch=self.now + 1300)
+        with self.assertRaises(ExecutionError) as caught:
+            self.store.reserve_attempt(second, later, pod_name(2), admission_group=group)
+        self.assertEqual(caught.exception.code,
+                         "attempt_exceeds_admission_group_deadline")
+
+        self.mono[0] = 0
+        with self.assertRaises(ExecutionError) as caught:
+            self.reserve(second, 2, group=group)
+        self.assertEqual(caught.exception.code, "admission_group_clock_invalid")
+
+    def test_create_claim_rechecks_parent_monotonic_deadline(self):
+        plan = self.plan("child-a")
+        group = self.group(plan, runtime=1500)
+        attempt = replace(attempt_for(plan, "attempt-child-a-1", 1, self.now),
+                          deadline_epoch=self.now + 1300)
+        self.store.reserve_attempt(plan, attempt, pod_name(1), admission_group=group)
+        prepare_test_preflight(self.store, attempt.attempt_id)
+        self.now += 10
+        self.mono[0] += 1500
+        with self.assertRaises(ExecutionError) as caught:
+            self.store.claim_create(attempt.attempt_id)
+        self.assertEqual(caught.exception.code, "admission_group_expired")
+        state = self.store.get_attempt(attempt.attempt_id)
+        self.assertEqual(state["state"], "reserved")
+        self.assertEqual(state["create_claimed"], 0)
+
+    def test_separate_processes_cannot_over_admit_parent_slot_or_total_cap(self):
+        child = r"""
+import sys, time
+from pathlib import Path
+sys.path.insert(0, str(Path.cwd() / 'tests'))
+from test_execution_store import plan_for, attempt_for, pod_name
+from runpod_experiments.contracts import AdmissionGroupScope
+from runpod_experiments.errors import ExecutionError
+from runpod_experiments.execution_store import ExecutionStore
+path, now_text, group_id, ready_text, start_text, approval_id, attempt_id, number_text, total_text, slots_text = sys.argv[1:]
+now, number = int(now_text), int(number_text)
+plan = plan_for(now, max_total=600000, max_slots=2, approval_slots=1,
+                max_hourly=700000, hourly_rate=300000, approval_id=approval_id,
+                job_id='job-' + approval_id)
+group = AdmissionGroupScope(group_id, plan.project.project_id, 'TEST-HOST',
+                            '0' * 64, '1' * 64, '2' * 64, int(total_text),
+                            700000, 3600, now + 7200, int(slots_text),
+                            ('race-a', 'race-b'))
+store = ExecutionStore(path, project_id=plan.project.project_id,
+                       controller_host='TEST-HOST', clock=lambda: now)
+Path(ready_text).touch()
+start = Path(start_text)
+deadline = time.monotonic() + 15
+while not start.exists() and time.monotonic() < deadline:
+    time.sleep(.005)
+if not start.exists(): raise TimeoutError('race start signal missing')
+try:
+    store.reserve_attempt(plan, attempt_for(plan, attempt_id, number, now),
+                          pod_name(number), admission_group=group)
+except ExecutionError as error:
+    print('denied:' + error.code)
+else:
+    print('reserved')
+"""
+        for case, total, slots, expected in (
+                ("slot", 1_200_000, 1, "admission_group_slots_exhausted"),
+                ("total", 900_000, 2, "admission_group_total_cap_exceeded")):
+            with self.subTest(case=case):
+                case_path = self.path.parent / f"race-{case}.sqlite"
+                ExecutionStore(str(case_path), project_id="synthetic-nebula",
+                               controller_host="TEST-HOST", clock=lambda: self.now)
+                start = self.path.parent / f"{case}.go"
+                ready = [self.path.parent / f"{case}-{side}.ready" for side in ("a", "b")]
+                processes = []
+                for index, approval_id in enumerate(("race-a", "race-b"), start=1):
+                    env = dict(os.environ)
+                    env["RUNPOD_EXPERIMENTS_TEST_MODE"] = "1"
+                    env["USERPROFILE"] = str(self.path.parent)
+                    env["HOME"] = str(self.path.parent)
+                    processes.append(subprocess.Popen(
+                        [sys.executable, "-c", child, str(case_path), str(self.now),
+                         "group-" + case, str(ready[index - 1]), str(start),
+                         approval_id, "attempt-" + approval_id, str(index),
+                         str(total), str(slots)],
+                        cwd=Path(__file__).resolve().parents[1], env=env,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
+                deadline = time.monotonic() + 20
+                while not all(path.exists() for path in ready) and time.monotonic() < deadline:
+                    time.sleep(.01)
+                self.assertTrue(all(path.exists() for path in ready),
+                                "child processes did not reach the admission barrier")
+                start.touch()
+                outputs = []
+                for process in processes:
+                    stdout, stderr = process.communicate(timeout=30)
+                    self.assertEqual(process.returncode, 0, stderr)
+                    outputs.append(stdout.strip())
+                self.assertEqual(outputs.count("reserved"), 1, outputs)
+                self.assertEqual(outputs.count("denied:" + expected), 1, outputs)
+
+    def _downgrade_to_v4_fixture(self, path):
+        with closing(sqlite3.connect(path)) as db:
+            for name in ("execution_admission_groups_no_update",
+                         "execution_admission_groups_no_delete",
+                         "execution_admission_children_no_update",
+                         "execution_admission_children_no_delete"):
+                db.execute(f"DROP TRIGGER {name}")
+            db.execute("DROP INDEX execution_admission_child_group")
+            db.execute("DROP TABLE execution_admission_children")
+            db.execute("DROP TABLE execution_admission_groups")
+            db.execute(f"PRAGMA user_version={SERIAL_STORE_SCHEMA_VERSION}")
+            db.commit()
+
+    def test_explicit_v4_migration_preserves_serial_rows_and_event_chain(self):
+        plan = plan_for(self.now)
+        attempt = attempt_for(plan, "legacy-cancelled", 1, self.now)
+        self.store.reserve_attempt(plan, attempt, pod_name(1))
+        self.store.cancel_uncreated(attempt.attempt_id)
+        expected = self.store.get_attempt(attempt.attempt_id)
+        self._downgrade_to_v4_fixture(self.path)
+
+        serial = ExecutionStore(str(self.path), project_id="synthetic-nebula",
+                                controller_host="TEST-HOST", clock=lambda: self.now)
+        self.assertEqual(serial._schema_version, SERIAL_STORE_SCHEMA_VERSION)
+        group_plan = plan_for(self.now, max_slots=2, approval_slots=1,
+                              approval_id="child-a", job_id="job-child-a")
+        group_attempt = attempt_for(group_plan, "attempt-child-a-1", 1, self.now)
+        with self.assertRaises(ExecutionError) as caught:
+            serial.reserve_attempt(
+                group_plan, group_attempt, pod_name(1),
+                admission_group=self.group(group_plan))
+        self.assertEqual(caught.exception.code, "parallel_schema_migration_required")
+        self.assertTrue(serial.migrate_to_parallel_schema())
+        self.assertEqual(serial._schema_version, STORE_SCHEMA_VERSION)
+        self.assertFalse(serial.migrate_to_parallel_schema())
+        self.assertEqual(serial.get_attempt(attempt.attempt_id), expected)
+        self.assertTrue(serial.verify_event_chain())
+
+    def test_explicit_v4_migration_refuses_unresolved_attempt_without_mutation(self):
+        plan = plan_for(self.now)
+        attempt = attempt_for(plan, "legacy-reserved", 1, self.now)
+        self.store.reserve_attempt(plan, attempt, pod_name(1))
+        self._downgrade_to_v4_fixture(self.path)
+        serial = ExecutionStore(str(self.path), project_id="synthetic-nebula",
+                                controller_host="TEST-HOST", clock=lambda: self.now)
+        with self.assertRaises(ExecutionError) as caught:
+            serial.migrate_to_parallel_schema()
+        self.assertEqual(caught.exception.code, "parallel_schema_active_attempts")
+        with closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0],
+                             SERIAL_STORE_SCHEMA_VERSION)
+            self.assertIsNone(db.execute("""SELECT 1 FROM sqlite_master
+                WHERE type='table' AND name='execution_admission_groups'""").fetchone())
 
 if __name__ == "__main__":
     unittest.main()

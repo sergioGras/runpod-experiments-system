@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from runpod_experiments.contracts import (
-    ApprovalScope, AttemptPlan, BillingObservation, BillingStatus, CleanupStatus, ContractError,
+    AdmissionGroupScope, ApprovalScope, AttemptPlan, BillingObservation, BillingStatus, CleanupStatus, ContractError,
     ExecutionOutcome, ExecutionPlan, FailureCategory, ManifestFile, PodProvisioningSpec,
     QuoteObservation,
     OperationalStatus, ProjectPolicy, ResourceKind, ResourceProfile,
@@ -91,6 +91,23 @@ def attempt(plan=None, **changes):
 
 
 class ProjectAndApprovalContracts(unittest.TestCase):
+    def test_parent_admission_group_is_finite_and_binds_unique_children(self):
+        scope = AdmissionGroupScope("group-001", "synthetic-nebula", "WINDOWS-TEST",
+                                    ZERO, ONE, "2" * 64, 1_000_000, 500_000,
+                                    3600, 2_000_000_000, 2,
+                                    ("child-a", "child-b"))
+        self.assertEqual(scope.child_approval_ids, ("child-a", "child-b"))
+        with self.assertRaises(ContractError):
+            AdmissionGroupScope("group-001", "synthetic-nebula", "WINDOWS-TEST",
+                                ZERO, ONE, "2" * 64, 1_000_000, 500_000,
+                                3600, 2_000_000_000, True,
+                                ("child-a", "child-b"))
+        with self.assertRaises(ContractError):
+            AdmissionGroupScope("group-001", "synthetic-nebula", "WINDOWS-TEST",
+                                ZERO, ONE, "2" * 64, 1_000_000, 500_000,
+                                3600, 2_000_000_000, 2,
+                                ("child-a", "child-a"))
+
     def test_synthetic_project_is_not_hardcoded_and_policy_is_immutable(self):
         value = policy(project_id="fourth-independent-project")
         self.assertEqual(value.project_id, "fourth-independent-project")

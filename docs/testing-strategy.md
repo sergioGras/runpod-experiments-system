@@ -34,7 +34,7 @@ Never use a real account to prove that an unapproved create guard rejects a call
 | Resource selection | One resource kind per plan; CPU-only plans cannot select GPU profiles, and GPU plans retain VRAM/CUDA/runtime-attestation checks |
 | GPU runtime evidence | Malformed/oversized `nvidia-smi` output, duplicate cards, per-card VRAM/count floors, driver CUDA UMD floor and attempt/Pod/profile/host-key binding; synthetic bytes only |
 | Create preflight | Current quote and region, registered-key fingerprint, project inventory, supervisor readiness/heartbeat, one durable claim, post-claim supervisor change, ambiguous response with no retry and held exposure |
-| Admission | Independent-process races for the last slot/budget, serial limit, two-slot profile, parent/child hourly and total caps, previous unresolved attempts |
+| Admission | Independent-process races for the last serial/group slot and budget, two-slot profile, one-use child binding, full child ceiling committed once, parent/child hourly and total caps, deadline continuity, previous unresolved attempts, v4 migration preservation/refusal |
 | Persistence | Crash/reopen at reservation, claim, response, candidate binding, cleanup and settlement; duplicate events; schema mismatch and failed writes |
 | Accounting | Setup/work/cleanup reserves, pending bills, known candidate mismatch, posted/adjusted bills, idempotent settlement, rounding and immutable parent cap |
 | Time/host | Wrong host, wall-clock rollback/jump, reboot identity, stale proof, expired technical window and nonrenewable owner deadline |
@@ -44,7 +44,7 @@ Never use a real account to prove that an unapproved create guard rejects a call
 | Credentials | Secret delivered only to approved exact workload, absent from serialized plans/argv/logs/artifacts, sanitized error/stage evidence |
 | Workload | Install/start/observe/collect failures, partial evidence, scientific failed verdict, independent cleanup and no automatic scientific retries |
 | Restart | Verified output promotion once, completed-block recovery, missing/duplicate outputs, finalization without a new resource, exact prior provenance |
-| Parallel cleanup | One resource fails while another continues within policy; deleting one cannot touch the other or a sibling project |
+| Parallel cleanup | One resource fails while another continues within policy; each child has an independent watchdog; deleting one cannot touch the other or a sibling project |
 | Package | Wheel/sdist contents, offline install from prepared artifacts, public import examples, supervisor imports the exact installed distribution |
 
 Use property-based generation where it materially probes arithmetic/state
@@ -67,6 +67,12 @@ Partition must demonstrate a serial CPU workload, an eligible GPU workload and
 its required proxy transfer. Its separate parallel acceptance tests use competing
 parent/child reservations and one watchdog per exact resource. Logical role
 processes on one host do not count as separate Pods or establish provider isolation.
+The P020 parent policy binds one-use child approvals; the parent total commits
+each child's full cap once, while hourly exposure and slots apply to active
+attempts. A CPU child must produce a CPU request even when its sibling's approved
+workload uses a GPU. Run the two-slot fake-provider scenario through an installed
+candidate and verify that one child's failure does not stop the other child's
+workload or exact cleanup.
 
 At every consumer step run relevant existing guards against the replacement and
 the new engine conformance suite. Run the consumer's broader acceptance suite

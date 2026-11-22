@@ -695,13 +695,36 @@ independent watchdog. A failed child does not cancel a sibling unless an
 explicit approved group policy requires it. Several roles on one Pod remain a
 workload choice rather than an instance allowance.
 
-The store schema is intentionally version-pinned and does not mutate old state
-on open. Define and test an explicit v4-to-parallel schema migration before
-adding parent tables; it must retain all serial records and require a
-reconciled operator boundary. The old schema remains usable by the serial
-candidate until a consumer opts into the new parallel schema. A CPU workload
-must select an eligible CPU shape even when another child in the same group
-requires a GPU; plans continue to reject mixed CPU/GPU fallbacks.
+The initial M10 implementation adds `AdmissionGroupScope` and the parent/child
+tables in schema v5. New v5 stores admit child attempts in one transaction with
+parent total/hourly/slot checks. A v4 store remains serial-capable and is not
+changed on open; its explicit `migrate_to_parallel_schema()` method preserves
+serial records and refuses active attempts or incomplete billing. This local
+migration passed synthetic preservation/refusal tests, but is not yet exercised
+against a consumer's private store and must run only at a reconciled operator
+boundary. A CPU workload selects an eligible CPU shape even when another child
+in the same group requires a GPU; plans continue to reject mixed CPU/GPU
+fallbacks.
+
+`ParallelExecutionEngine` accepts one bounded wave of already-reserved child
+jobs and runs each through the existing serial engine. Each child therefore
+keeps its own independent provider supervisor and cleanup path. A child's
+exception is returned as a sanitized outcome and does not cancel its sibling.
+The source suite and installed-artifact admission checks use synthetic fixtures;
+they do not yet prove a full two-child fake-provider lifecycle.
+
+M10 candidate validation (2026-11-22): the full source suite passed 239 tests
+with one Windows directory-symlink capability skip. The candidate wheel and
+sdist were installed/tested locally; installed sdist checks passed the 28
+contract tests and 11 `AdmissionGroupTests`, including cross-process parent
+slot and total-cap races. Focused acceptance against the installed candidate
+wheel passed MIAP 7, Partition 14, and Hybrid 28 tests. Artifact hashes and
+limitations are recorded in the [evidence audit](status-and-remaining-plan-20261113.md).
+No provider was contacted and no resource was created. Still required are a
+two-child fake-provider test proving independent watchdogs and exact cleanup,
+Partition P020 adapter parity, consumer lifecycle gates and separately
+authorized live qualification. Leave the current parallel controller untouched
+until its resource reconciliation and migration gates pass.
 
 M10 acceptance must use independent processes (not only threads) racing for the
 last group slot and total commitment; test child approval reuse, over-cap hourly

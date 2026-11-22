@@ -22,14 +22,36 @@ These statuses are separate; a test count alone does not establish coverage.
 | --- | --- | --- |
 | Contracts | `tests/test_contracts.py`: immutable specifications, bounded values and serialization | Internal APIs and schemas; compatibility policy still needs release review |
 | Provider boundary | `tests/test_provider.py`: synthetic inventory, quotes, billing and sanitized errors | Account responses, delayed billing finality and current API compatibility unqualified |
-| Store/admission | `tests/test_execution_store.py`: actual SQLite, independent-process cap races, crash rollback, holds, adjustments and event integrity | One configured host; no hierarchical budgets or production legacy-state bridge |
+| Store/admission | `tests/test_execution_store.py`: actual SQLite, independent-process serial/group cap races, crash rollback, holds, adjustments, immutable parent/child admission and explicit v4 migration | One configured host; full two-child lifecycle and cross-host coordination remain unverified |
 | Supervision | Store tests include a real detached child surviving launcher-parent exit; GPU supervision tests bind runtime evidence before SSH | Not a complete supported-host/interpreter/package qualification matrix |
 | Transfers | `tests/test_connections.py`, `tests/test_proxy_ssh.py`, `tests/test_store_create.py`: exact identity, direct/proxy framing, chunks, hashes and bounds | Shared transfers do not resume interrupted files; proxy is finite PTY commands, not binary interactive workload transport |
 | Serial engine | `tests/test_store_create.py`, `tests/test_gpu_supervision.py`: complete fake CPU/GPU attempts, finite retries, deadline failures and restart cleanup | No integrated live qualification or consumer acceptance |
 | Setup | `tests/test_store_create.py`: invalid process handle, poll error, nonzero exit, timeout, supervisor loss, and terminate/kill failure all fail before collection/workload and still attempt provider cleanup | A local process stop that cannot be confirmed still requires reconciliation |
 | Interactive I/O | `tests/test_interactive_workload.py`, `tests/test_interactive_ssh.py`, `tests/test_binary_process.py`: bounded sessions and process I/O | No consumer protocol or scientific-equivalence proof |
-| Packaging | Candidate wheel and sdist install outside checkout; the wheel suite passes from site-packages; detached supervisor/collector import policy-bound consumer factories; archive contents were reviewed | Temporary candidates are not release assets; supported-host, ACL, and live provider qualification remain open |
+| Packaging | Candidate wheel and sdist install outside checkout; installed contract/admission tests and focused consumer slices pass; detached supervisor/collector import policy-bound consumer factories; archive contents were reviewed | Temporary candidates are not release assets; supported-host, ACL, and live provider qualification remain open |
 | Consumers | Isolated opt-in adapters in Hybrid, MIAP, and Partition pass focused offline acceptance against installed artifacts; MIAP's synthetic batch exercises real verifier/config/absence code and safe unclaimed/ambiguous restart mapping; Partition's CPU proxy/archive slice is covered | No active entrypoint or dependency pin adopts the engine; MIAP active-Pod restart/credential delivery, Hybrid phase mapping, Partition supervised worker launch/progress parity, and parallel M10 parity remain open |
+
+M10 parent/child admission follow-up (2026-11-22; local development candidate,
+not a release):
+
+- The full source suite passed **239 tests, with one Windows directory-symlink
+  capability skip**. The installed wheel and sdist each passed all 28 contract
+  tests and all 11 `AdmissionGroupTests`, including independent-process races
+  for the final parent slot and total cap.
+- Candidate wheel: 131,107 bytes; SHA-256
+  `6d4de2f29f768265914b6da9d616a452f24a01224f4ea37ac1aa30abf80c0b71`.
+  Candidate sdist: 181,843 bytes; SHA-256
+  `25906f3ee3457f56609b5e362801425045cecb47f3814cf85ab67e755faba626`.
+  Both archives were inspected; the sdist installed into a temporary target and
+  imported from that installed location.
+- Against the installed candidate wheel, the focused adapter slices passed:
+  MIAP **7**, Partition **14**, and Hybrid **28** tests. Hybrid's test-only
+  detached-supervisor fixture was aligned to the shared bootstrap/provider
+  protocol; consumer runtime code and active package pins were not changed.
+- Still open: a complete two-child fake-provider run proving independent
+  watchdogs and exact cleanup, Partition P020 parent/child adapter parity, all
+  consumer-specific lifecycle gates, live qualification and cutover. No provider
+  call or paid resource was used.
 
 The earlier candidate passed 226 tests with one Windows directory-symlink
 capability skip. It also passed the focused MIAP, Partition, and Hybrid slices
@@ -75,7 +97,7 @@ approval to another project.
 | M4 | Detached process and supervision components verified; host qualification open | Exact installed candidate survives foreground exit on every supported controlling host; failure/reboot behavior recorded |
 | M5–M6 | Internal serial CPU/GPU/interactive implementation and enumerated setup/WAL fault paths verified offline; installed wheel/sdist reviewed | Public API/schema, credential-delivery and supported-host review; complete consumer lifecycle acceptance; then authorized live qualification |
 | M7–M9 | Isolated adapters exist; Hybrid's interactive path runs through the serial engine; MIAP's synthetic batch, promotion, finalizer and bounded restart mapping and Partition's CPU proxy/archive slice pass offline; CPU/GPU plans cannot mix; no active consumer adopts an adapter | Map actual workload phases and GPU need; finish MIAP active-Pod restart/credential acceptance, Hybrid phase-specific CPU/GPU and failure/integrity parity, Partition supervised worker launch/progress and GPU workload acceptance; reconcile before cutover |
-| M10 | Hierarchical parallel admission not delivered by the serial store; Partition's legacy coordinator contract was source-reviewed on 2026-11-22 | Implement a parent admission scope in the common transactional store; prove aggregate caps, two-slot process races, restart recovery, per-resource watchdog and cleanup isolation |
+| M10 | Parent admission and bounded parallel runner implemented; full source regression and installed wheel/sdist admission tests pass; focused MIAP/Partition/Hybrid preview slices pass against the candidate wheel | Add Partition P020 adapter parity and a full two-child fake-provider run proving independent watchdogs and exact cleanup; live qualification and cutover remain separate gates |
 | M11 | Open | Integrated acceptance, duplication retirement, rollback and release evidence |
 
 ## Ordered remaining work
@@ -178,7 +200,7 @@ the library with synthetic regressions and revalidate affected consumers.
   transport, operational retry/recovery and evidence behavior. Reusable fixes
   belong here; consumers upgrade through pinned artifacts and conformance checks.
 
-### M10 source contract confirmed on 2026-11-22
+### M10 source contract and implementation status confirmed on 2026-11-22
 
 Partition's P020 coordinator is a Windows, single-controlling-host SQLite
 coordinator. A finite parent approval binds a list of one-use child approvals.
@@ -206,15 +228,32 @@ contain CPU-only or GPU-only plans according to each approved workload's actual
 need; no plan may mix resource kinds, and a CPU-capable phase must not request
 a GPU merely because another child requires one.
 
-The store is schema-pinned and deliberately does not migrate existing state on
-open. Before M10 code is added, define an explicit v4-to-parallel schema
-transition that preserves existing serial records and leaves old store files
-untouched until an operator invokes the migration at a reconciled boundary.
-M10 acceptance must include independent-process last-slot and parent-budget
-races, one-use child binding, crash/reopen at reservation and create claim,
-parent deadline continuity, ambiguous-create hold, one-child failure while the
-sibling completes, and exact cleanup isolation. A thread-only race or the
-legacy coordinator's own tests does not establish shared-engine parity.
+The shared candidate now defines `AdmissionGroupScope`, binds each child
+approval to one parent row, and reserves parent commitment, child attempt,
+project/approval/group slots and active hourly exposure in one `BEGIN IMMEDIATE`
+transaction. A child's full approval ceiling is committed once. The parent
+deadline is fixed by the first reservation and checked again before create.
+`ParallelExecutionEngine` runs a bounded wave of already reserved child jobs
+through the existing serial engine; each child keeps its own supervisor and an
+exception from one child becomes a sanitized outcome without cancelling its
+sibling. Child CPU/GPU resource kinds remain separate per plan.
+
+New stores use schema v5. Existing v4 stores still open for serial work and are
+not changed on open. `migrate_to_parallel_schema()` is an explicit operation
+that adds only the parent tables, preserves serial rows, and refuses active
+attempts or incomplete billing. It invalidates old package versions for that
+store, so it belongs only at a reviewed, reconciled cutover boundary.
+
+The full shared source regression passes 239 tests with one Windows
+directory-symlink capability skip. Installed wheel and sdist each pass 28
+contract tests plus 11 admission-group tests, including independent-process
+races for the last slot and aggregate commitment, one-use child binding, mixed
+CPU/GPU child plans, parent-clock continuity, pre-create deadline recheck, v4
+migration preservation/refusal, and sibling exception isolation. Focused
+installed-wheel consumer slices pass MIAP 7, Partition 14, and Hybrid 28 tests.
+A complete fake-provider run with two independent watchdogs and exact sibling
+cleanup, and Partition P020 adapter parity, remain open. The legacy coordinator
+tests are evidence of its old contract, not proof of new shared behavior.
 
 No private consumer source, state, scientific outputs or provider identities are
 included in this report. Current live reconciliation status must be checked in

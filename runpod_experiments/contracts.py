@@ -199,6 +199,45 @@ class ApprovalScope:
 
 
 @dataclass(frozen=True, slots=True)
+class AdmissionGroupScope:
+    """Finite parent envelope for concurrently admitted child approvals.
+
+    Child workloads keep their own immutable ApprovalScope and select their own
+    single resource kind. The group only coordinates aggregate admission and
+    binds the child approval identities that may consume its envelope.
+    """
+
+    group_id: str
+    project_id: str
+    controller_host: str
+    approval_evidence_sha256: str
+    objective_sha256: str
+    disclosure_sha256: str
+    max_total_micro_usd: int
+    max_hourly_micro_usd: int
+    max_runtime_seconds: int
+    expires_epoch: int
+    max_active_resources: int
+    child_approval_ids: tuple[str, ...]
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        _text(self.group_id, "group_id", _IDENTIFIER)
+        _text(self.project_id, "project_id", _PROJECT_ID)
+        _text(self.controller_host, "controller_host", _HOST)
+        for field in ("approval_evidence_sha256", "objective_sha256", "disclosure_sha256"):
+            _sha(getattr(self, field), field)
+        for field in ("max_total_micro_usd", "max_hourly_micro_usd",
+                      "max_runtime_seconds", "expires_epoch"):
+            _positive_int(getattr(self, field), field)
+        if type(self.max_active_resources) is not int or self.max_active_resources not in (1, 2):
+            raise ContractError("max_active_resources must be 1 or 2")
+        _unique_text_tuple(self.child_approval_ids, "child_approval_ids", _IDENTIFIER)
+        if type(self.schema_version) is not int or self.schema_version != 1:
+            raise ContractError("unsupported AdmissionGroupScope schema version")
+
+
+@dataclass(frozen=True, slots=True)
 class ResourceProfile:
     """Selected Pod shape; GPU memory is VRAM per card, `memory_gb` is host RAM."""
 

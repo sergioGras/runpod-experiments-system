@@ -14,9 +14,16 @@ fresh quote, selected region, registered SSH-key fingerprint, project inventory,
 and independent supervisor state to a durable one-use create claim. The create
 path is connected to the internal serial engine, with passing complete fake
 CPU and GPU attempt scenarios. It has not been qualified against a RunPod account.
-M3 through M6 qualification remains open; no consumer migration has begun. These changes
-are not part of the pinned 0.1.0 package; existing consumers and their current
-package pins remain unchanged.
+The internal M10 preview now adds a schema-v5 parent admission scope, explicit
+quiescent v4 migration, and a bounded runner that executes separately approved
+child jobs through independent serial-engine supervisors. Parent/child admission,
+process-race, installed wheel/sdist and focused consumer adapter tests pass with
+synthetic fixtures. The CPU/GPU rule is per child: a CPU-suitable child remains
+CPU even when a sibling requires a GPU. Full fake-provider parallel watchdog and
+cleanup acceptance plus Partition P020 adapter parity remain open. M3 through M6
+qualification remains open; no active consumer entrypoint or package pin adopts
+the preview. These changes are not part of the pinned 0.1.0 package; existing
+consumers and their current package pins remain unchanged.
 
 Detailed design and development documents:
 
@@ -98,6 +105,17 @@ Upload, bounded remote launch, and result collection now also accept an `Executi
 
 `serial_engine.SerialExecutionEngine` is an internal preview coordinator. `run_attempt` accepts one new, already reserved immutable attempt, starts the independent supervisor, uses the guarded one-shot create, performs hash-checked upload, collects allowlisted results, runs either a bounded direct workload process or a consumer-supplied `InteractiveDriver` over a direct binary SSH session, and requests cleanup. Interactive drivers declare message-size and per-I/O time limits; the engine checks supervisor and collector health around each stream operation. Consumer protocol logic and its local computation remain caller-owned and must be finite. Proxy workloads still require a workload-specific process launcher. `run_job` applies only the plan's finite retry policy and calls a consumer-supplied reservation callback for each fresh quote and immutable attempt; it retries only an allowed typed failure after the previous attempt is terminal and cleanup is confirmed. `recover_attempt` closes interrupted stage records without replaying workload code and asks the surviving collector and supervisor to finish cleanup. If the supervisor is stale or cleanup cannot be confirmed, the result remains in reconciliation. The attempt outcome deliberately leaves the scientific verdict `NOT_EVALUATED`. This is not yet a stable consumer API or production engine: scientific output verification and consumer approval adapters are open. GPU access requires the detached supervisor's attempt-bound runtime evidence before upload or SSH and remains unqualified against a live provider.
 
+`parallel_engine.ParallelExecutionEngine` is an internal M10 preview. Its
+`run_group` accepts a bounded wave of already-reserved child jobs, verifies each
+child's immutable parent binding, and runs them concurrently through the serial
+engine. A child exception is returned as a sanitized per-child outcome and does
+not cancel its sibling. Parent total commitment, active hourly rate, slots and
+deadline are enforced transactionally by `ExecutionStore.reserve_attempt` when
+each child attempt is reserved; a child retry callback must reserve under that
+same parent scope. The engine does not claim that one Pod provides isolation
+between logical worker roles, and this API is not yet stable or deployed by
+Partition.
+
 Each `ExecutionPlan` contains only CPU profiles or only GPU profiles. Use a
 CPU-only plan when CPU satisfies the workload; use GPU profiles only for an
 approved workload that requires an accelerator. Retries can choose another
@@ -113,7 +131,7 @@ Install the package into an isolated Python 3.11+ environment with `python -m pi
 
 `examples/remote_hello.py` is a deterministic synthetic workload that atomically checkpoints and verifies each completed step. `examples/remote_hello_runner.py` composes a candidate CPU request, supervisor, upload, execution, collection and cleanup. A fake-provider driver test passes; the runner has not been uploaded or run on RunPod. An approval reference is a record, not proof of owner approval. The SSH bootstrap uses trust on first use: it pins the first observed key without independently authenticating it. The project must explicitly review that boundary before disclosure.
 
-Before paid execution the system still needs account-wide coordination, qualification of the independent supervisor and collector, independent review of the runner and its trust boundary, and integration with each project's own approval policy. The CPU path rechecks a current catalog quote but storage and other cost estimates can differ from billing. The current controller supports one active instance per project and requires one shared ledger for cooperating controllers; it is not a cross-host lock. The package suite uses local subprocesses and provider test doubles; consuming projects maintain their own live qualification evidence. The Windows supervisor requests prevention of automatic idle sleep; explicit sleep, power loss or process failure can still interrupt it.
+Before paid execution the system still needs account-wide coordination, qualification of the independent supervisor and collector, independent review of the runner and its trust boundary, and integration with each project's own approval policy. The CPU path rechecks a current catalog quote but storage and other cost estimates can differ from billing. The legacy M2 controller supports one active instance; the internal v5 store can admit at most two cooperating resources on its configured host, but does not coordinate another host or uncooperative account users. The package suite uses local subprocesses and provider test doubles; consuming projects maintain their own live qualification evidence. The Windows supervisor requests prevention of automatic idle sleep; explicit sleep, power loss or process failure can still interrupt it.
 
 ## Finite interactive I/O and stage evidence
 

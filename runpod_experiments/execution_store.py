@@ -16,7 +16,7 @@ import uuid
 from typing import Any, Iterator
 
 from runpod_experiments.contracts import (
-    ApprovalScope, AttemptPlan, BillingObservation, ContractError, ExecutionPlan,
+    AdmissionGroupScope, ApprovalScope, AttemptPlan, BillingObservation, ContractError, ExecutionPlan,
     FailureCategory, PodProvisioningSpec, ProjectPolicy, QuoteObservation,
     ResourceKind, ResourceProfile, SCHEMA_VERSION, StageEvent, StageStatus,
     canonical_json_bytes, decode_document, encode_document, sha256_bytes,
@@ -29,7 +29,8 @@ from runpod_experiments.create_spec import (
 from runpod_experiments.resource_policy import request_hash
 
 
-STORE_SCHEMA_VERSION = 4
+SERIAL_STORE_SCHEMA_VERSION = 4
+STORE_SCHEMA_VERSION = 5
 SQLITE_MAX_INTEGER = 9_223_372_036_854_775_807
 _POD_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 _POD_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,127}\Z")
@@ -167,6 +168,51 @@ def _stage_event_from_payload(value: Any) -> StageEvent:
         raise ContractError("stored stage event document is invalid") from None
 
 
+def _admission_group_from_row(row: sqlite3.Row) -> AdmissionGroupScope:
+    raw = bytes(row["document"])
+    try:
+        payload = decode_document(raw, expected_kind="admission_group_scope")
+        required = {
+            "group_id", "project_id", "controller_host", "approval_evidence_sha256",
+            "objective_sha256", "disclosure_sha256", "max_total_micro_usd",
+            "max_hourly_micro_usd", "max_runtime_seconds", "expires_epoch",
+            "max_active_resources", "child_approval_ids", "schema_version",
+        }
+        if (not isinstance(payload, dict) or set(payload) != required or
+                not isinstance(payload.get("child_approval_ids"), list)):
+            raise ContractError("stored admission group is malformed")
+        scope = AdmissionGroupScope(
+            group_id=payload["group_id"], project_id=payload["project_id"],
+            controller_host=payload["controller_host"],
+            approval_evidence_sha256=payload["approval_evidence_sha256"],
+            objective_sha256=payload["objective_sha256"],
+            disclosure_sha256=payload["disclosure_sha256"],
+            max_total_micro_usd=payload["max_total_micro_usd"],
+            max_hourly_micro_usd=payload["max_hourly_micro_usd"],
+            max_runtime_seconds=payload["max_runtime_seconds"],
+            expires_epoch=payload["expires_epoch"],
+            max_active_resources=payload["max_active_resources"],
+            child_approval_ids=tuple(payload["child_approval_ids"]),
+            schema_version=payload["schema_version"],
+        )
+        columns = (
+            row["group_id"] == scope.group_id and
+            row["project_id"] == scope.project_id and
+            row["max_total_micro_usd"] == scope.max_total_micro_usd and
+            row["max_hourly_micro_usd"] == scope.max_hourly_micro_usd and
+            row["max_runtime_seconds"] == scope.max_runtime_seconds and
+            row["expires_epoch"] == scope.expires_epoch and
+            row["max_active_resources"] == scope.max_active_resources
+        )
+        if (not columns or sha256_bytes(raw) != row["scope_sha256"] or
+                encode_document("admission_group_scope", scope) != raw):
+            raise ContractError("stored admission group digest or projection differs")
+        return scope
+    except (ContractError, TypeError, ValueError, KeyError):
+        raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                             "admission_group_record_invalid") from None
+
+
 @dataclass(frozen=True, slots=True)
 class AccountingSnapshot:
     project_id: str
@@ -185,7 +231,7 @@ class ExecutionStore:
     """File-backed, schema-pinned SQLite state for one project's execution work."""
 
     def __init__(self, path: str, *, project_id: str, controller_host: str,
-                 clock=time.time, timeout_seconds: int = 15):
+                 clock=time.time, monotonic=time.monotonic, timeout_seconds: int = 15):
         if not isinstance(path, str) or not path.strip():
             raise ValueError("A dedicated execution-store path is required")
         if not isinstance(project_id, str) or _PROJECT_ID.fullmatch(project_id) is None:
@@ -198,7 +244,9 @@ class ExecutionStore:
         self.project_id = project_id
         self.controller_host = controller_host
         self._clock = clock
+        self._monotonic = monotonic
         self._timeout_seconds = timeout_seconds
+        self._schema_version = 0
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
@@ -253,6 +301,43 @@ class ExecutionStore:
                 db.rollback()
                 raise
 
+    @staticmethod
+    def _parallel_schema_statements() -> tuple[str, ...]:
+        return (
+            """CREATE TABLE execution_admission_groups (
+                project_id TEXT NOT NULL,
+                group_id TEXT NOT NULL,
+                scope_sha256 TEXT NOT NULL,
+                document BLOB NOT NULL,
+                max_total_micro_usd INTEGER NOT NULL,
+                max_hourly_micro_usd INTEGER NOT NULL,
+                max_runtime_seconds INTEGER NOT NULL,
+                expires_epoch INTEGER NOT NULL,
+                max_active_resources INTEGER NOT NULL,
+                armed_epoch INTEGER NOT NULL,
+                armed_monotonic REAL NOT NULL,
+                PRIMARY KEY(project_id, group_id))""",
+            """CREATE TABLE execution_admission_children (
+                project_id TEXT NOT NULL,
+                group_id TEXT NOT NULL,
+                approval_id TEXT NOT NULL,
+                committed_total_micro_usd INTEGER NOT NULL,
+                PRIMARY KEY(project_id, approval_id),
+                FOREIGN KEY(project_id, group_id)
+                  REFERENCES execution_admission_groups(project_id, group_id),
+                FOREIGN KEY(project_id, approval_id)
+                  REFERENCES execution_approvals(project_id, approval_id))""",
+            "CREATE INDEX execution_admission_child_group ON execution_admission_children(project_id, group_id)",
+            """CREATE TRIGGER execution_admission_groups_no_update BEFORE UPDATE ON execution_admission_groups
+                BEGIN SELECT RAISE(ABORT, 'immutable'); END""",
+            """CREATE TRIGGER execution_admission_groups_no_delete BEFORE DELETE ON execution_admission_groups
+                BEGIN SELECT RAISE(ABORT, 'immutable'); END""",
+            """CREATE TRIGGER execution_admission_children_no_update BEFORE UPDATE ON execution_admission_children
+                BEGIN SELECT RAISE(ABORT, 'immutable'); END""",
+            """CREATE TRIGGER execution_admission_children_no_delete BEFORE DELETE ON execution_admission_children
+                BEGIN SELECT RAISE(ABORT, 'immutable'); END""",
+        )
+
     def _initialize(self) -> None:
         with closing(sqlite3.connect(self.path, timeout=self._timeout_seconds,
                                      isolation_level=None)) as db:
@@ -263,10 +348,13 @@ class ExecutionStore:
                 "SELECT name FROM sqlite_master WHERE type='view'")}
             required = {"execution_store_meta", "execution_approvals", "execution_jobs", "execution_plans",
                         "execution_attempts", "execution_billing", "execution_events"}
-            if version not in (0, STORE_SCHEMA_VERSION):
+            parallel_tables = {"execution_admission_groups", "execution_admission_children"}
+            if version not in (0, SERIAL_STORE_SCHEMA_VERSION, STORE_SCHEMA_VERSION):
                 raise ExecutionError(FailureCategory.INTERNAL, "unsupported_store_schema")
-            if version == STORE_SCHEMA_VERSION:
-                if tables != required or views:
+            if version in (SERIAL_STORE_SCHEMA_VERSION, STORE_SCHEMA_VERSION):
+                expected_tables = (required if version == SERIAL_STORE_SCHEMA_VERSION
+                                   else required | parallel_tables)
+                if tables != expected_tables or views:
                     raise ExecutionError(FailureCategory.INTERNAL, "incomplete_store_schema")
                 required_columns = {
                     "execution_store_meta": {"singleton", "project_id", "controller_host"},
@@ -291,10 +379,6 @@ class ExecutionStore:
                         "created_epoch", "previous_sha256", "payload", "payload_sha256",
                         "event_sha256"},
                 }
-                for table, columns in required_columns.items():
-                    found = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
-                    if not columns.issubset(found):
-                        raise ExecutionError(FailureCategory.INTERNAL, "incomplete_store_schema")
                 meta = db.execute("""SELECT project_id,controller_host FROM execution_store_meta
                     WHERE singleton=1""").fetchone()
                 if meta is None:
@@ -312,14 +396,37 @@ class ExecutionStore:
                     "execution_jobs_no_update", "execution_jobs_no_delete",
                     "execution_attempts_identity_immutable", "execution_attempts_no_delete",
                 }
+                if version == STORE_SCHEMA_VERSION:
+                    required_columns.update({
+                        "execution_admission_groups": {
+                            "project_id", "group_id", "scope_sha256", "document",
+                            "max_total_micro_usd", "max_hourly_micro_usd",
+                            "max_runtime_seconds", "expires_epoch", "max_active_resources",
+                            "armed_epoch", "armed_monotonic"},
+                        "execution_admission_children": {
+                            "project_id", "group_id", "approval_id",
+                            "committed_total_micro_usd"},
+                    })
+                    required_triggers.update({
+                        "execution_admission_groups_no_update",
+                        "execution_admission_groups_no_delete",
+                        "execution_admission_children_no_update",
+                        "execution_admission_children_no_delete",
+                    })
+                for table, columns in required_columns.items():
+                    found = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+                    if not columns.issubset(found):
+                        raise ExecutionError(FailureCategory.INTERNAL, "incomplete_store_schema")
                 if trigger_names != required_triggers:
                     raise ExecutionError(FailureCategory.INTERNAL, "incomplete_store_schema")
+                self._schema_version = version
                 db.commit()
                 return
             if tables or views:
                 # The schema may have committed between these separate reads
                 # while another process initialized this same fresh path.
-                if db.execute("PRAGMA user_version").fetchone()[0] == STORE_SCHEMA_VERSION:
+                if db.execute("PRAGMA user_version").fetchone()[0] in (
+                        SERIAL_STORE_SCHEMA_VERSION, STORE_SCHEMA_VERSION):
                     return self._initialize()
                 raise ExecutionError(FailureCategory.INTERNAL, "unversioned_store_not_empty")
 
@@ -331,7 +438,7 @@ class ExecutionStore:
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
             views = {row[0] for row in db.execute(
                 "SELECT name FROM sqlite_master WHERE type='view'")}
-            if version == STORE_SCHEMA_VERSION:
+            if version in (SERIAL_STORE_SCHEMA_VERSION, STORE_SCHEMA_VERSION):
                 db.commit()
                 return self._initialize()
             if version != 0 or tables or views:
@@ -458,16 +565,56 @@ class ExecutionStore:
                         BEGIN SELECT RAISE(ABORT, 'immutable'); END""",
                     """CREATE TRIGGER execution_store_meta_no_delete BEFORE DELETE ON execution_store_meta
                         BEGIN SELECT RAISE(ABORT, 'immutable'); END""",
-                )
+                ) + self._parallel_schema_statements()
                 for statement in statements:
                     db.execute(statement)
                 db.execute("""INSERT INTO execution_store_meta(singleton,project_id,controller_host)
                     VALUES (1,?,?)""", (self.project_id, self.controller_host))
                 db.execute(f"PRAGMA user_version = {STORE_SCHEMA_VERSION}")
                 db.commit()
+                self._schema_version = STORE_SCHEMA_VERSION
             except BaseException:
                 db.rollback()
                 raise
+
+    def migrate_to_parallel_schema(self) -> bool:
+        """Explicitly add parent admission tables to a reconciled serial v4 store.
+
+        Opening a v4 store never invokes this migration. It preserves every
+        serial row and refuses while any resource or billing record is
+        unresolved. Old package versions intentionally reject the resulting
+        v5 store, so callers must perform this at a reviewed cutover boundary.
+        """
+        with self._transaction() as db:
+            version = db.execute("PRAGMA user_version").fetchone()[0]
+            if version == STORE_SCHEMA_VERSION:
+                self._schema_version = STORE_SCHEMA_VERSION
+                return False
+            if version != SERIAL_STORE_SCHEMA_VERSION:
+                raise ExecutionError(FailureCategory.INTERNAL,
+                                     "parallel_schema_migration_unsupported")
+            meta = db.execute("""SELECT project_id,controller_host FROM execution_store_meta
+                WHERE singleton=1""").fetchone()
+            if meta is None or (meta["project_id"], meta["controller_host"]) != (
+                    self.project_id, self.controller_host):
+                raise ExecutionError(FailureCategory.AUTHORIZATION,
+                                     "store_identity_mismatch")
+            if db.execute(f"SELECT 1 FROM execution_attempts WHERE state IN {_ACTIVE_SQL} LIMIT 1").fetchone():
+                raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                     "parallel_schema_active_attempts")
+            if db.execute("SELECT 1 FROM execution_attempts WHERE billing_complete=0 LIMIT 1").fetchone():
+                raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                     "parallel_schema_pending_billing")
+            for statement in self._parallel_schema_statements():
+                db.execute(statement)
+            integrity = db.execute("PRAGMA integrity_check").fetchone()
+            if integrity is None or integrity[0] != "ok":
+                raise ExecutionError(FailureCategory.INTERNAL,
+                                     "parallel_schema_integrity_failed")
+            db.execute(f"PRAGMA user_version = {STORE_SCHEMA_VERSION}")
+        self._schema_version = STORE_SCHEMA_VERSION
+        self._initialize()
+        return True
 
     @staticmethod
     def _ensure_sqlite_int(value: int, name: str) -> int:
@@ -481,6 +628,20 @@ class ExecutionStore:
         # but actual posted charges can exceed an approved total across rows.
         # Python integers preserve that aggregate so over-cap costs remain visible.
         return sum(values)
+
+    def _admission_group_deadline(self, row: sqlite3.Row, now: int) -> int:
+        mono = self._monotonic()
+        if (isinstance(mono, bool) or not isinstance(mono, (int, float)) or
+                not math.isfinite(mono) or mono < 0 or mono < row["armed_monotonic"]):
+            raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                 "admission_group_clock_invalid")
+        elapsed = max(0, now - row["armed_epoch"], mono - row["armed_monotonic"])
+        deadline = min(row["expires_epoch"],
+                       row["armed_epoch"] + row["max_runtime_seconds"])
+        if elapsed >= row["max_runtime_seconds"] or now >= deadline:
+            raise ExecutionError(FailureCategory.CONFIGURATION,
+                                 "admission_group_expired")
+        return deadline
 
     @staticmethod
     def _append_event(db: sqlite3.Connection, entity_type: str, entity_id: str,
@@ -504,8 +665,9 @@ class ExecutionStore:
             (sequence, entity_type, entity_id, event_type, created_epoch,
              previous_sha256, payload_bytes, payload_sha256, event_sha256))
 
-    def reserve_attempt(self, plan: ExecutionPlan, attempt: AttemptPlan, pod_name: str) -> int:
-        """Atomically persist immutable provenance, one slot and a cost exposure."""
+    def reserve_attempt(self, plan: ExecutionPlan, attempt: AttemptPlan, pod_name: str,
+                        *, admission_group: AdmissionGroupScope | None = None) -> int:
+        """Atomically persist provenance, a slot, cost exposure and optional parent admission."""
         validate_attempt(plan, attempt)
         if (plan.project.project_id != self.project_id or
                 plan.approval.controller_host != self.controller_host):
@@ -525,6 +687,22 @@ class ExecutionStore:
         scope = plan.approval
         if not isinstance(scope, ApprovalScope):
             raise ContractError("plan approval is malformed")
+        if admission_group is not None:
+            if not isinstance(admission_group, AdmissionGroupScope):
+                raise ContractError("admission_group must be an AdmissionGroupScope")
+            if (admission_group.project_id != plan.project.project_id or
+                    admission_group.controller_host != self.controller_host or
+                    scope.approval_id not in admission_group.child_approval_ids or
+                    scope.max_active_resources != 1 or
+                    admission_group.max_active_resources > plan.project.max_active_resources):
+                raise ExecutionError(FailureCategory.AUTHORIZATION,
+                                     "admission_group_scope_mismatch")
+            if self._schema_version < STORE_SCHEMA_VERSION:
+                raise ExecutionError(FailureCategory.CONFIGURATION,
+                                     "parallel_schema_migration_required")
+            if admission_group.expires_epoch <= now:
+                raise ExecutionError(FailureCategory.CONFIGURATION,
+                                     "admission_group_expired")
         self._ensure_sqlite_int(attempt.attempt_number, "attempt_number")
         self._ensure_sqlite_int(attempt.created_epoch, "attempt_created_epoch")
         self._ensure_sqlite_int(attempt.deadline_epoch, "attempt_deadline_epoch")
@@ -534,6 +712,14 @@ class ExecutionStore:
         exposure = self._ensure_sqlite_int((rate * seconds + 3599) // 3600, "exposure")
         max_total = self._ensure_sqlite_int(scope.max_total_micro_usd, "total_cap")
         max_hourly = self._ensure_sqlite_int(scope.max_hourly_micro_usd, "hourly_cap")
+        if admission_group is not None:
+            for field in ("max_total_micro_usd", "max_hourly_micro_usd",
+                          "max_runtime_seconds", "expires_epoch"):
+                self._ensure_sqlite_int(getattr(admission_group, field),
+                                        "admission_group_" + field)
+        group_document = (encode_document("admission_group_scope", admission_group)
+                          if admission_group is not None else None)
+        group_hash = sha256_bytes(group_document) if group_document is not None else None
         scope_document = encode_document("approval_scope", scope)
         policy_document = encode_document("project_policy", plan.project)
         plan_document = encode_document("execution_plan", plan)
@@ -555,6 +741,80 @@ class ExecutionStore:
                 (plan.project.project_id, scope.approval_id)).fetchone()
             if stored_scope is None or stored_scope["scope_sha256"] != scope_hash or stored_scope["policy_sha256"] != policy_hash:
                 raise ExecutionError(FailureCategory.AUTHORIZATION, "approval_scope_changed")
+
+            group_row = None
+            group_child = None
+            if self._schema_version >= STORE_SCHEMA_VERSION:
+                group_child = db.execute("""SELECT group_id,committed_total_micro_usd
+                    FROM execution_admission_children WHERE project_id=? AND approval_id=?""",
+                    (plan.project.project_id, scope.approval_id)).fetchone()
+                if group_child is not None and (admission_group is None or
+                        group_child["group_id"] != admission_group.group_id):
+                    raise ExecutionError(FailureCategory.AUTHORIZATION,
+                                         "admission_group_binding_required")
+            if admission_group is not None:
+                if group_child is None and db.execute("""SELECT 1 FROM execution_attempts
+                    WHERE project_id=? AND approval_id=? LIMIT 1""",
+                    (plan.project.project_id, scope.approval_id)).fetchone():
+                    raise ExecutionError(FailureCategory.AUTHORIZATION,
+                                         "admission_group_child_already_used")
+                group_row = db.execute("""SELECT * FROM execution_admission_groups
+                    WHERE project_id=? AND group_id=?""",
+                    (plan.project.project_id, admission_group.group_id)).fetchone()
+                if group_row is None:
+                    mono = self._monotonic()
+                    if (isinstance(mono, bool) or not isinstance(mono, (int, float)) or
+                            not math.isfinite(mono) or mono < 0):
+                        raise ExecutionError(FailureCategory.INTERNAL,
+                                             "admission_group_clock_invalid")
+                    db.execute("""INSERT INTO execution_admission_groups(
+                        project_id,group_id,scope_sha256,document,max_total_micro_usd,
+                        max_hourly_micro_usd,max_runtime_seconds,expires_epoch,
+                        max_active_resources,armed_epoch,armed_monotonic)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                        (plan.project.project_id, admission_group.group_id, group_hash,
+                         group_document, admission_group.max_total_micro_usd,
+                         admission_group.max_hourly_micro_usd,
+                         admission_group.max_runtime_seconds, admission_group.expires_epoch,
+                         admission_group.max_active_resources, now, mono))
+                    group_row = db.execute("""SELECT * FROM execution_admission_groups
+                        WHERE project_id=? AND group_id=?""",
+                        (plan.project.project_id, admission_group.group_id)).fetchone()
+                    self._append_event(db, "admission_group", admission_group.group_id,
+                                       "armed", now,
+                                       {"scope_sha256": group_hash,
+                                        "project_id": plan.project.project_id})
+                elif (group_row["scope_sha256"] != group_hash or
+                      bytes(group_row["document"]) != group_document):
+                    raise ExecutionError(FailureCategory.AUTHORIZATION,
+                                         "admission_group_scope_changed")
+                else:
+                    _admission_group_from_row(group_row)
+                group_deadline = self._admission_group_deadline(group_row, now)
+                if attempt.deadline_epoch > group_deadline:
+                    raise ExecutionError(FailureCategory.CONFIGURATION,
+                                         "attempt_exceeds_admission_group_deadline")
+                if group_child is None:
+                    committed = self._sum([row[0] for row in db.execute("""SELECT
+                        committed_total_micro_usd FROM execution_admission_children
+                        WHERE project_id=? AND group_id=?""",
+                        (plan.project.project_id, admission_group.group_id)).fetchall()])
+                    if committed + max_total > admission_group.max_total_micro_usd:
+                        raise ExecutionError(FailureCategory.CONFIGURATION,
+                                             "admission_group_total_cap_exceeded")
+                    db.execute("""INSERT INTO execution_admission_children(
+                        project_id,group_id,approval_id,committed_total_micro_usd)
+                        VALUES (?,?,?,?)""",
+                        (plan.project.project_id, admission_group.group_id,
+                         scope.approval_id, max_total))
+                    self._append_event(db, "admission_group", admission_group.group_id,
+                                       "child_bound", now,
+                                       {"approval_id": scope.approval_id,
+                                        "committed_total_micro_usd": max_total})
+                else:
+                    if group_child["committed_total_micro_usd"] != max_total:
+                        raise ExecutionError(FailureCategory.AUTHORIZATION,
+                                             "admission_group_child_scope_changed")
 
             db.execute("""INSERT OR IGNORE INTO execution_jobs(project_id,job_id,approval_id)
                 VALUES (?,?,?)""", (plan.project.project_id, plan.job_id, scope.approval_id))
@@ -586,6 +846,19 @@ class ExecutionStore:
                              [row["project_max_active_resources"] for row in active_rows])
             if len(active_rows) + 1 > slot_limit:
                 raise ExecutionError(FailureCategory.CONFIGURATION, "project_slots_exhausted")
+            if admission_group is not None:
+                group_active = db.execute(f"""SELECT a.hourly_micro_usd
+                    FROM execution_attempts a JOIN execution_admission_children c
+                      ON c.project_id=a.project_id AND c.approval_id=a.approval_id
+                    WHERE c.project_id=? AND c.group_id=? AND a.state IN {_ACTIVE_SQL}""",
+                    (plan.project.project_id, admission_group.group_id)).fetchall()
+                if len(group_active) + 1 > admission_group.max_active_resources:
+                    raise ExecutionError(FailureCategory.CONFIGURATION,
+                                         "admission_group_slots_exhausted")
+                group_hourly = self._sum([row["hourly_micro_usd"] for row in group_active])
+                if group_hourly + rate > admission_group.max_hourly_micro_usd:
+                    raise ExecutionError(FailureCategory.CONFIGURATION,
+                                         "admission_group_hourly_cap_exceeded")
             scope_active = db.execute(f"""SELECT COUNT(*) FROM execution_attempts
                 WHERE project_id=? AND approval_id=? AND state IN {_ACTIVE_SQL}""",
                 (plan.project.project_id, scope.approval_id)).fetchone()[0]
@@ -646,7 +919,7 @@ class ExecutionStore:
         now = self._now()
         with self._transaction() as db:
             row = db.execute("""SELECT a.state,a.create_claimed,a.deadline_epoch,
-                a.project_id,a.attempt_sha256,a.attempt_document,s.expires_epoch
+                a.project_id,a.approval_id,a.attempt_sha256,a.attempt_document,s.expires_epoch
                 FROM execution_attempts a JOIN execution_approvals s
                 ON s.project_id=a.project_id AND s.approval_id=a.approval_id
                 WHERE a.attempt_id=?""", (attempt_id,)).fetchone()
@@ -654,6 +927,23 @@ class ExecutionStore:
                 raise ExecutionError(FailureCategory.AMBIGUOUS_OPERATION, "create_claim_unavailable")
             if now >= row["deadline_epoch"] or now >= row["expires_epoch"]:
                 raise ExecutionError(FailureCategory.CONFIGURATION, "attempt_expired_before_create")
+            if self._schema_version >= STORE_SCHEMA_VERSION:
+                group = db.execute("""SELECT g.* FROM execution_admission_groups g
+                    JOIN execution_admission_children c
+                      ON c.project_id=g.project_id AND c.group_id=g.group_id
+                    WHERE c.project_id=? AND c.approval_id=?""",
+                    (row["project_id"], row["approval_id"])).fetchone()
+                if group is not None:
+                    group_scope = _admission_group_from_row(group)
+                    if (group_scope.project_id != row["project_id"] or
+                            group_scope.controller_host != self.controller_host or
+                            row["approval_id"] not in group_scope.child_approval_ids):
+                        raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                             "admission_group_attempt_binding_invalid")
+                    group_deadline = self._admission_group_deadline(group, now)
+                    if row["deadline_epoch"] > group_deadline:
+                        raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED,
+                                             "attempt_admission_group_deadline_mismatch")
             preflight = db.execute("""SELECT created_epoch,payload FROM execution_events
                 WHERE entity_type='attempt' AND entity_id=? AND event_type='create_preflight_checked'
                 ORDER BY sequence DESC LIMIT 1""", (attempt_id,)).fetchone()
@@ -997,6 +1287,37 @@ class ExecutionStore:
         if row is None:
             raise ExecutionError(FailureCategory.CONFIGURATION, "unknown_attempt")
         return dict(row)
+
+    def verify_admission_group_binding(self, group: AdmissionGroupScope,
+                                       approval_id: str) -> bool:
+        """Require an immutable group and child mapping before parallel dispatch."""
+        if not isinstance(group, AdmissionGroupScope):
+            raise ContractError("group must be an AdmissionGroupScope")
+        if self._schema_version < STORE_SCHEMA_VERSION:
+            raise ExecutionError(FailureCategory.CONFIGURATION,
+                                 "parallel_schema_migration_required")
+        if (group.project_id != self.project_id or
+                group.controller_host != self.controller_host or
+                approval_id not in group.child_approval_ids):
+            raise ExecutionError(FailureCategory.AUTHORIZATION,
+                                 "admission_group_scope_mismatch")
+        expected = encode_document("admission_group_scope", group)
+        with closing(self._connect()) as db:
+            row = db.execute("""SELECT g.* FROM execution_admission_groups g
+                JOIN execution_admission_children c
+                  ON c.project_id=g.project_id AND c.group_id=g.group_id
+                WHERE g.project_id=? AND g.group_id=? AND c.approval_id=?""",
+                (self.project_id, group.group_id, approval_id)).fetchone()
+        if row is None:
+            raise ExecutionError(FailureCategory.AUTHORIZATION,
+                                 "admission_group_child_not_reserved")
+        stored = _admission_group_from_row(row)
+        self._admission_group_deadline(row, self._now())
+        if (row["scope_sha256"] != sha256_bytes(expected) or
+                bytes(row["document"]) != expected or stored != group):
+            raise ExecutionError(FailureCategory.AUTHORIZATION,
+                                 "admission_group_scope_changed")
+        return True
 
     def plan_sha256_for_attempt(self, attempt_id: str) -> str:
         """Return the verified immutable execution-plan digest for one attempt."""

@@ -139,10 +139,20 @@ from an empty list. Delete retries must revalidate the same exact identity.
 
 Admission transactionally checks project slots, unresolved attempts, one immutable
 approval/round ceiling and aggregate hourly exposure. Reserve setup, work and
-cleanup, including declared storage/other cost estimates. Hierarchical
-parent/child ceilings are part of the later bounded-parallel milestone. Provider
-billing delay or failure can defeat a strict monetary ceiling; record the
-remaining uncertainty.
+cleanup, including declared storage/other cost estimates. The internal parallel
+admission extension binds a finite parent scope to one-use child approval IDs in
+the same project SQLite store as child attempts. It commits each child's full
+total ceiling once, sums selected hourly rates and active slots across the group,
+and fixes the parent deadline at first reservation. Each child retains its own
+serial engine and provider watchdog. Provider billing delay or failure can
+defeat a strict monetary ceiling; record the remaining uncertainty.
+
+New parallel stores use schema v5. Opening a serial v4 store never upgrades it;
+the explicit migration preserves existing rows and refuses unresolved attempts
+or incomplete billing. Run it only after a reviewed reconciliation boundary.
+The internal runner accepts a bounded wave of already-reserved child jobs and
+isolates ordinary failures per child. It does not provide cross-host coordination
+or automatically decide whether sibling work should stop after a failure.
 
 Initial deployment supports one controlling host per project, serial resource
 execution, then an explicitly tested two-resource profile. Independent projects
