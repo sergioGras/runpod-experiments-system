@@ -29,7 +29,7 @@ These statuses are separate; a test count alone does not establish coverage.
 | Setup | `tests/test_store_create.py`: invalid process handle, poll error, nonzero exit, timeout, supervisor loss, and terminate/kill failure all fail before collection/workload and still attempt provider cleanup | A local process stop that cannot be confirmed still requires reconciliation |
 | Interactive I/O | `tests/test_interactive_workload.py`, `tests/test_interactive_ssh.py`, `tests/test_binary_process.py`: bounded sessions and process I/O | No consumer protocol or scientific-equivalence proof |
 | Packaging | Candidate wheel and sdist install outside checkout; the wheel suite passes from site-packages; detached supervisor/collector import policy-bound consumer factories; archive contents were reviewed | Temporary candidates are not release assets; supported-host, ACL, and live provider qualification remain open |
-| Consumers | Isolated opt-in adapters in Hybrid, MIAP, and Partition pass focused offline acceptance against the installed current sdist; MIAP's fake batch, promotion and finalizer path, and Partition's CPU proxy/archive slice are covered | No active entrypoint or dependency pin adopts the engine; MIAP restart reconciliation/credential mapping, Hybrid phase mapping, Partition supervised worker launch/progress parity, and parallel M10 parity remain open |
+| Consumers | Isolated opt-in adapters in Hybrid, MIAP, and Partition pass focused offline acceptance against installed artifacts; MIAP's synthetic batch exercises the real verifier/config/absence code, and Partition's CPU proxy/archive slice is covered | No active entrypoint or dependency pin adopts the engine; MIAP restart reconciliation/credential mapping, Hybrid phase mapping, Partition supervised worker launch/progress parity, and parallel M10 parity remain open |
 
 The earlier candidate passed 226 tests with one Windows directory-symlink
 capability skip. It also passed the focused MIAP, Partition, and Hybrid slices
@@ -268,14 +268,18 @@ for additive offline acceptance in the isolated preview branches:
 - **MIAP:** all five adapter tests pass. The new fixture serially admits five
   CPU-only synthetic attempts under one hash-bound upload manifest. A
   read-only recovery view maps only shared `terminated` attempts into MIAP's
-  pending/billed vocabulary, then exercises MIAP's promotion and atomic
-  finalizer path. The test supplies synthetic watchdog identity and matching
-  hashes; worker-output verification and provider-absence callbacks are
-  stubbed, as are analysis and frozen-config validation, because the preview
-  environment lacks NumPy. This does not validate science or provider state.
-  Unresolved-attempt restart reconciliation and private model-token delivery
-  remain open. The active text job remains GPU-required (48 GB and CUDA 12.8
-  floors); the CPU fixture does not classify that workload as CPU-capable.
+  pending/billed vocabulary and exercises promotion/finalization. Deterministic
+  FakeBackend output passes MIAP's actual strict block verifier, worker-summary
+  validator, frozen config validator and two-observation absence routine; the
+  latter sees only fake empty inventories and exact-ID 404s. Analysis remains
+  stubbed because NumPy is unavailable, and synthetic watchdog/provider
+  evidence does not validate science or live provider state. The updated five
+  tests pass against a local installed wheel (`3851dbb`, SHA-256
+  `21d124523312c788b9d297828614ee21a6b597f3cec8ef9f573ea8efac6f4964`); its
+  package code matches the earlier sdist candidate. Unresolved-attempt restart
+  reconciliation and private model-token delivery remain open. The active text
+  job remains GPU-required (48 GB and CUDA 12.8 floors); the CPU fixture does
+  not classify that workload as CPU-capable.
 - **Partition:** five adapter tests plus four archive and five proxy regressions
   pass (14 total). The new serial fixture matches P028's CPU3c shape, verifies
   framed proxy chunks and archive/per-file hashes, then confirms exact cleanup.
