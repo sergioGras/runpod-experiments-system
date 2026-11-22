@@ -265,8 +265,9 @@ for additive offline acceptance in the isolated preview branches:
   setup, transport and cleanup. HYB-005's actual capture phase needs GPU while
   its encrypted-compute phase is CPU; it needs separate single-kind plans. The
   preview has not mapped those phases into one approved workflow.
-- **MIAP:** all five adapter tests pass. The new fixture serially admits five
-  CPU-only synthetic attempts under one hash-bound upload manifest. A
+- **MIAP:** all seven adapter tests pass on the latest installed-wheel run.
+  The fixture serially admits five CPU-only synthetic attempts under one
+  hash-bound upload manifest. A
   read-only recovery view maps only shared `terminated` attempts into MIAP's
   pending/billed vocabulary and exercises promotion/finalization. Deterministic
   FakeBackend output passes MIAP's actual strict block verifier, worker-summary
@@ -291,7 +292,10 @@ for additive offline acceptance in the isolated preview branches:
   execute within the worker. Their legacy controller launches a detached
   bootstrap and polls status/progress. Shared proxy upload and archive collection
   are covered, but the shared engine's supervised workload-launch/progress path
-  is not. P020's separate two-Pod dispatcher and M10 caps are also not covered.
+  is not. Four legacy P014 progress regressions also pass for identity,
+  retrieval, success forwarding and timeout child reaping (with a NumPy import
+  placeholder only); they do not test shared-engine parity. P020's separate
+  two-Pod dispatcher and M10 caps are also not covered.
 
 This confirms useful compatibility seams, not production plan/approval mapping.
 Each project must bind its own workload requirement and finite approval into
