@@ -116,6 +116,13 @@ The extension remains an internal preview, not a qualified consumer integration.
 
 Upload, bounded remote launch, and result collection now also accept an `ExecutionStore` attempt. Those call paths verify the event chain, exact project/Pod identity, selected CPU/GPU shape and selected endpoint before opening SSH; direct remains the default, while upload and collection can select the proxy PTY route. A detached store-backed collector reopens only the configured project store and its bound attempt, including the explicit route and the plan's per-file and aggregate result limits.
 
+Store-backed upload waits for the selected SSH endpoint of the same owned
+Pod within the upload timeout. It checks attempt health between polls and
+fails on a stopped Pod, a malformed endpoint, or an ownership mismatch.
+SSH still authenticates with the caller's pinned host key. Interactive
+binary processes expose `poll()` so the serial engine can observe exits
+through the same process interface it uses for other workloads.
+
 `serial_engine.SerialExecutionEngine` is an internal preview coordinator. `run_attempt` accepts one new, already reserved immutable attempt, starts the independent supervisor, uses the guarded one-shot create, performs hash-checked upload, collects allowlisted results, runs either a bounded direct workload process or a consumer-supplied `InteractiveDriver` over a direct binary SSH session, and requests cleanup. Interactive drivers declare message-size and per-I/O time limits; the engine checks supervisor and collector health around each stream operation. Consumer protocol logic and its local computation remain caller-owned and must be finite. Proxy workloads still require a workload-specific process launcher. `run_job` applies only the plan's finite retry policy and calls a consumer-supplied reservation callback for each fresh quote and immutable attempt; it retries only an allowed typed failure after the previous attempt is terminal and cleanup is confirmed. `recover_attempt` closes interrupted stage records without replaying workload code and asks the surviving collector and supervisor to finish cleanup. If the supervisor is stale or cleanup cannot be confirmed, the result remains in reconciliation. The attempt outcome deliberately leaves the scientific verdict `NOT_EVALUATED`. This is not yet a stable consumer API or production engine: scientific output verification and consumer approval adapters are open. GPU access requires the detached supervisor's attempt-bound runtime evidence before upload or SSH and remains unqualified against a live provider.
 
 `parallel_engine.ParallelExecutionEngine` is an internal M10 preview. Its

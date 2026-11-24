@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import struct
+import sys
 import tempfile
 import threading
 import time
@@ -458,6 +459,82 @@ class StoreCreateControllerTests(unittest.TestCase):
                 timeout_seconds=600, deadline_epoch=NOW + 7, clock=lambda: NOW)
         self.assertEqual(errors, {})
         self.assertEqual(operation_timeouts, [7])
+
+    def test_store_upload_waits_for_endpoint_under_the_same_timeout(self):
+        receipt = self.create()
+        self.set_live_cpu_detail(receipt)
+        endpoint = self.client.detail["ssh"].pop("direct")
+        (self.root / "worker.py").write_bytes(b"fixture")
+        known_hosts = self.root / "known_hosts"
+        known_hosts.write_text("fixture\n", encoding="utf-8")
+        options = (self.client, self.store, self.attempt["attempt_id"], self.project.project_id,
+                   self.root, {"worker.py": sha256_bytes(b"fixture")}, self.key_path,
+                   known_hosts, "/tmp/nebula")
+        elapsed = 0
+
+        def sleep(seconds):
+            nonlocal elapsed
+            elapsed += seconds
+            self.client.detail["ssh"]["direct"] = endpoint
+
+        with patch("runpod_experiments.upload.time.monotonic", side_effect=lambda: elapsed), \
+             patch("runpod_experiments.upload.time.sleep", side_effect=sleep) as wait, \
+             patch("runpod_experiments.upload.subprocess.run") as ssh:
+            self.assertEqual(upload_bundle(*options, timeout_seconds=4), 1)
+            wait.assert_called_once_with(1)
+            ssh.assert_called_once()
+            self.assertIn("StrictHostKeyChecking=yes", ssh.call_args.args[0])
+            self.assertEqual(ssh.call_args.kwargs["input"], b"fixture")
+            self.assertEqual(ssh.call_args.kwargs["timeout"], 3)
+        self.assertEqual(len(self.client.create_calls), 1)
+
+    def test_store_upload_does_not_retry_after_health_loss_or_use_invalid_endpoint(self):
+        receipt = self.create()
+        self.set_live_cpu_detail(receipt)
+        (self.root / "worker.py").write_bytes(b"fixture")
+        known_hosts = self.root / "known_hosts"
+        known_hosts.write_text("fixture\n", encoding="utf-8")
+        options = (self.client, self.store, self.attempt["attempt_id"], self.project.project_id,
+                   self.root, {"worker.py": sha256_bytes(b"fixture")}, self.key_path,
+                   known_hosts, "/tmp/nebula")
+        elapsed = 0
+
+        def sleep(seconds):
+            nonlocal elapsed
+            elapsed += seconds
+
+        def check_health():
+            if elapsed:
+                raise ExecutionError(FailureCategory.RECONCILIATION_REQUIRED, "supervisor_lost")
+
+        with patch("runpod_experiments.upload.time.monotonic", side_effect=lambda: elapsed), \
+             patch("runpod_experiments.upload.time.sleep", side_effect=sleep) as wait, \
+             patch("runpod_experiments.upload.subprocess.run") as ssh:
+            with self.subTest("malformed endpoint"):
+                self.client.detail["ssh"]["direct"] = "not an endpoint"
+                with self.assertRaisesRegex(ExecutionError, "direct_ssh_endpoint_invalid"):
+                    upload_bundle(*options, timeout_seconds=2)
+                wait.assert_not_called()
+
+            with self.subTest("terminated Pod"):
+                self.client.detail["status"] = "TERMINATED"
+                with self.assertRaisesRegex(ExecutionError, "attempt_pod_stopped"):
+                    upload_bundle(*options, timeout_seconds=2)
+                wait.assert_not_called()
+
+            self.client.detail["status"] = "RUNNING"
+            self.client.detail["ssh"].clear()
+            with self.subTest("lost supervision"):
+                with self.assertRaisesRegex(ExecutionError, "supervisor_lost"):
+                    upload_bundle(*options, timeout_seconds=2, transfer_check=check_health)
+                wait.assert_called_once_with(1)
+
+            wait.reset_mock()
+            with self.subTest("readiness expires"):
+                with self.assertRaisesRegex(ExecutionError, "ssh_endpoint_timeout"):
+                    upload_bundle(*options, timeout_seconds=2)
+                self.assertEqual(wait.call_count, 2)
+            ssh.assert_not_called()
 
     def test_chunked_direct_upload_stops_when_transfer_health_check_fails(self):
         receipt = self.create()
@@ -1454,42 +1531,28 @@ class StoreCreateControllerTests(unittest.TestCase):
             def wait(self, timeout=None):
                 return 0
 
-        class InteractiveProcess:
-            def __init__(self):
-                self.returncode = None
-                self.sent = []
+        def launch_interactive(*args, **kwargs):
+            def local_subprocess(argv, **process_options):
+                self.assertIn("StrictHostKeyChecking=yes", argv)
+                helper = (
+                    "import sys; "
+                    "assert sys.stdin.buffer.read(7) == b'request'; "
+                    "sys.stdout.buffer.write(b'ack'); sys.stdout.buffer.flush(); "
+                    "sys.stdin.buffer.read()"
+                )
+                return subprocess.Popen([sys.executable, "-c", helper], **process_options)
 
-            def send(self, data, timeout):
-                self.sent.append(data)
+            process = SSHInteractiveProcess(*args, **kwargs, popen=local_subprocess)
+            self.addCleanup(process.terminate)
+            return process
 
-            def receive(self, size, timeout):
-                if size != 3:
-                    raise AssertionError("driver requested an unexpected frame size")
-                return b"ack"
-
-            def poll(self):
-                return self.returncode
-
-            def close_stdin(self):
-                self.returncode = 0
-
-            def terminate(self):
-                self.returncode = -15
-
-            def wait(self, timeout=None):
-                return self.returncode
-
-            def kill(self):
-                self.returncode = -9
-
-        interactive_process = InteractiveProcess()
         engine = SerialExecutionEngine(
             self.client, self.store, self.state_config,
             supervisor_launcher=supervisor_launcher,
             collector_launcher=lambda *_args, **_kwargs: Collector(),
             uploader=lambda *_args, **_kwargs: 1,
-            interactive_process_factory=lambda *_args, **_kwargs: interactive_process,
-            clock=lambda: self.now, sleep=lambda _duration: None)
+            interactive_process_factory=launch_interactive,
+            clock=lambda: self.now)
         workload = AttemptWorkload(
             source_root, self.root / "id_ed25519", self.root / "known_hosts",
             "/tmp/nebula", "worker.py", (), 30, ("results.json",),
@@ -1510,10 +1573,11 @@ class StoreCreateControllerTests(unittest.TestCase):
             interactive_driver=InteractiveDriver(drive, 64, 10),
             cleanup_timeout_seconds=3)
 
-        self.assertEqual(interactive_process.sent, [b"request"])
+        self.assertEqual(result.outcome.operational_status.value, "succeeded",
+                         [(event.stage, event.error_code) for event in result.stage_events
+                          if event.status is StageStatus.FAILED])
         self.assertEqual(received["response"], b"ack")
         self.assertEqual(self.store.get_attempt(attempt_id)["state"], "terminated")
-        self.assertEqual(result.outcome.operational_status.value, "succeeded")
         self.assertEqual(result.outcome.cleanup_status.value, "confirmed")
         self.assertTrue(self.store.verify_attempt_lifecycle_projection(attempt_id))
 

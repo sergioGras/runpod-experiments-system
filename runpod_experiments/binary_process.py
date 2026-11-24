@@ -147,6 +147,10 @@ class BinaryProcess:
         if self.process.stdin and not self.process.stdin.closed:
             self.process.stdin.close()
 
+    def poll(self) -> int | None:
+        """Return the child exit code, or None while the child is running."""
+        return self.process.poll()
+
     def wait(self, timeout=None):
         result = self.process.wait(timeout=timeout)
         self._timer.cancel()

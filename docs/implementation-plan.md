@@ -830,3 +830,21 @@ contract tests and 68 full-suite tests pass; no provider access or paid resource
 was used. The source checkout fix is commit `54aedf4`; the M1 contracts and
 offline harness are in commit `b399a2a`. The main shared-package checkout remains
 pinned and unchanged.
+
+### Store-backed SSH readiness and process compatibility
+
+Local consumer qualification exposed two gaps in the default serial path.
+Upload assumed the provider returned a usable endpoint immediately after
+create, and the default binary SSH process lacked `poll()`. Store-backed
+upload now waits for the selected route on the bound Pod within its upload
+timeout, checking attempt health before each read and before transfer.
+Missing endpoints and a Pod still starting are distinct from stopped Pods
+and invalid endpoints. The wait does not repeat create or replay an upload.
+The binary process delegates `poll()` to the child process.
+
+The changes apply to store-backed consumers without a schema migration or
+an additional package dependency. Hybrid is the initial preview consumer.
+MIAP and Partition's active paths remain on their existing pins, and can
+adopt these changes during their own acceptance. Live CPU and GPU checks
+remain separate: the GPU path additionally requires an explicit GPU plan
+and its attempt-bound runtime attestation before workload transfer.

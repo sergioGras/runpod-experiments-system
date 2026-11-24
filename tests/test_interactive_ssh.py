@@ -18,8 +18,9 @@ class Process:
         return self.code
 
     def wait(self, timeout=None):
-        self.code = 0
-        return 0
+        if self.code is None:
+            self.code = 0
+        return self.code
 
     def terminate(self):
         self.code = -15
@@ -73,6 +74,7 @@ class InteractiveSSHTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             session, seen = self.setup_session(directory)
             process = seen["process"]
+            self.assertIsNone(session.poll())
             self.assertEqual(session.receive(8, 1), b"response")
             session.send(b"\x00\xffbinary")
             self.assertEqual(process.stdin.getvalue(), b"\x00\xffbinary")
@@ -82,6 +84,7 @@ class InteractiveSSHTests(unittest.TestCase):
             self.assertIs(process.kwargs["stdout"], -1)
             self.assertNotEqual(process.kwargs["stderr"], process.kwargs["stdout"])
             session.terminate()
+            self.assertEqual(session.poll(), -15)
 
     def test_wrong_pod_identity_and_unsafe_commands_do_not_launch(self):
         with tempfile.TemporaryDirectory() as directory:

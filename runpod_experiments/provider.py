@@ -223,27 +223,18 @@ class ProviderAdapter:
         raw, observation = self._read_attempt_detail(
             pod_id, pod_name, policy, resource_profile=resource_profile,
             selected_region=selected_region)
+        self._require_running_ssh_pod(observation)
+        return self._endpoint_from_raw(raw, route, expected_ports)
+
+    @staticmethod
+    def _require_running_ssh_pod(observation: PodObservation) -> None:
+        if observation.status in ("EXITED", "TERMINATED"):
+            raise ExecutionError(FailureCategory.TRANSPORT_FAILURE, "attempt_pod_stopped")
         if observation.status != "RUNNING":
             raise ExecutionError(FailureCategory.TRANSIENT_READ, "attempt_pod_not_running")
         if observation.resource_violation is not None:
             raise ExecutionError(FailureCategory.RESOURCE_MISMATCH,
                                  "attempt_resource_shape_unverified")
-        ports = raw.get("ports")
-        if (not isinstance(ports, list) or any(not isinstance(port, str) for port in ports) or
-                len(ports) != len(set(ports)) or set(ports) != set(expected_ports)):
-            raise ExecutionError(FailureCategory.RESOURCE_MISMATCH,
-                                 "attempt_ports_unverified")
-        ssh = raw.get("ssh")
-        selected = ssh.get(route) if isinstance(ssh, dict) else None
-        if not isinstance(selected, dict):
-            raise ExecutionError(FailureCategory.TRANSPORT_FAILURE,
-                                 f"{route}_ssh_endpoint_unavailable")
-        try:
-            return SSHRouteEndpoint(selected.get("host"), selected.get("port"),
-                                    selected.get("username"), route)
-        except ContractError:
-            raise ExecutionError(FailureCategory.RESOURCE_MISMATCH,
-                                 f"{route}_ssh_endpoint_invalid") from None
 
     @staticmethod
     def _endpoint_from_raw(raw: dict, route: str,
@@ -259,7 +250,11 @@ class ProviderAdapter:
                                  "attempt_ports_unverified")
         ssh = raw.get("ssh")
         selected = ssh.get(route) if isinstance(ssh, dict) else None
-        if not isinstance(selected, dict):
+        if (ssh is not None and not isinstance(ssh, dict)) or (
+                selected is not None and not isinstance(selected, dict)):
+            raise ExecutionError(FailureCategory.RESOURCE_MISMATCH,
+                                 f"{route}_ssh_endpoint_invalid")
+        if selected is None:
             raise ExecutionError(FailureCategory.TRANSPORT_FAILURE,
                                  f"{route}_ssh_endpoint_unavailable")
         try:
@@ -281,11 +276,7 @@ class ProviderAdapter:
         raw, observation = self._read_attempt_detail(
             pod_id, pod_name, policy, resource_profile=resource_profile,
             selected_region=selected_region, gpu_probe_only=True)
-        if observation.status != "RUNNING":
-            raise ExecutionError(FailureCategory.TRANSIENT_READ, "attempt_pod_not_running")
-        if observation.resource_violation is not None:
-            raise ExecutionError(FailureCategory.RESOURCE_MISMATCH,
-                                 "attempt_resource_shape_unverified")
+        self._require_running_ssh_pod(observation)
         return self._endpoint_from_raw(raw, "direct", expected_ports)
 
     def _get_attempt_ssh_endpoint_after_gpu_attestation(
@@ -305,11 +296,7 @@ class ProviderAdapter:
         raw, observation = self._read_attempt_detail(
             pod_id, pod_name, policy, resource_profile=resource_profile,
             selected_region=selected_region, gpu_probe_only=True)
-        if observation.status != "RUNNING":
-            raise ExecutionError(FailureCategory.TRANSIENT_READ, "attempt_pod_not_running")
-        if observation.resource_violation is not None:
-            raise ExecutionError(FailureCategory.RESOURCE_MISMATCH,
-                                 "attempt_resource_shape_unverified")
+        self._require_running_ssh_pod(observation)
         return self._endpoint_from_raw(raw, route, expected_ports)
 
     def quote_cpu(self, resource_id: str, vcpu_count: int, *, observed_epoch: int,

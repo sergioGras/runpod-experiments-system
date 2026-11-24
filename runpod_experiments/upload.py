@@ -10,6 +10,8 @@ import uuid
 from pathlib import Path, PurePosixPath
 
 from runpod_experiments.attempts import AttemptError
+from runpod_experiments.contracts import FailureCategory
+from runpod_experiments.errors import ExecutionError
 from runpod_experiments.execution_store import ExecutionStore
 from runpod_experiments.proxy_ssh import SSHProxySession, _run_bounded
 from runpod_experiments.ssh import SSHFetcher
@@ -79,19 +81,52 @@ def _upload_direct_chunks(fetcher, source, destination, expected_sha256, size,
     return size
 
 
+def _wait_for_store_ssh_context(client, ledger, attempt_id, project_id, route,
+                                known_hosts, deadline, transfer_check):
+    pending = {(FailureCategory.TRANSIENT_READ, "attempt_pod_not_running"),
+               (FailureCategory.TRANSPORT_FAILURE, f"{route}_ssh_endpoint_unavailable")}
+    while True:
+        transfer_check()
+        if time.monotonic() >= deadline:
+            break
+        try:
+            target = resolve_store_ssh_context(
+                client, ledger, attempt_id, project_id, route=route, known_hosts=known_hosts)
+        except ExecutionError as error:
+            if (error.category, error.code) not in pending:
+                raise
+            time.sleep(max(0, min(1, deadline - time.monotonic())))
+        else:
+            transfer_check()
+            if time.monotonic() < deadline:
+                return target
+            break
+    raise ExecutionError(FailureCategory.TRANSPORT_FAILURE, "ssh_endpoint_timeout")
+
+
 def upload_bundle(client, ledger, attempt_id, project_id, source_root, manifest, key_file,
                   known_hosts, remote_root, *, max_file_bytes=10_000_000,
                   max_total_bytes=None, ssh_route="direct", runner=None,
                   transfer_check=lambda: None,
                   timeout_seconds=DEFAULT_UPLOAD_TIMEOUT_SECONDS,
                   chunk_bytes=DEFAULT_TRANSFER_CHUNK_BYTES):
-    """Caller must approve the exact bundle and destination before invoking."""
+    """Upload a reviewed bundle within one timeout, including endpoint readiness."""
     validate_timeout_seconds(timeout_seconds, "upload_timeout_seconds")
     validate_chunk_bytes(chunk_bytes, "upload_chunk_bytes")
+    if not callable(transfer_check):
+        raise ValueError("Invalid transfer monitor")
+    transfer_deadline = time.monotonic() + timeout_seconds
+
+    def remaining_transfer_seconds():
+        remaining = transfer_deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("SSH upload exceeded its finite transfer window")
+        return remaining
+
     if isinstance(ledger, ExecutionStore):
-        target = resolve_store_ssh_context(
-            client, ledger, attempt_id, project_id, route=ssh_route,
-            known_hosts=known_hosts)
+        target = _wait_for_store_ssh_context(
+            client, ledger, attempt_id, project_id, ssh_route, known_hosts,
+            transfer_deadline, transfer_check)
         endpoint = target.endpoint
         host, port, username = endpoint.host, endpoint.port, endpoint.username
     else:
@@ -118,9 +153,8 @@ def upload_bundle(client, ledger, attempt_id, project_id, source_root, manifest,
     if (not isinstance(remote_root, str) or not remote_root.startswith("/") or
             "\x00" in remote_root or "\\" in remote_root or
             ".." in PurePosixPath(remote_root).parts or
-            PurePosixPath(remote_root).as_posix() != remote_root or
-            not callable(transfer_check)):
-        raise ValueError("Invalid remote root or transfer monitor")
+            PurePosixPath(remote_root).as_posix() != remote_root):
+        raise ValueError("Invalid remote root")
     if (type(max_file_bytes) is not int or max_file_bytes <= 0 or
             (max_total_bytes is not None and
              (type(max_total_bytes) is not int or max_total_bytes <= 0))):
@@ -145,6 +179,7 @@ def upload_bundle(client, ledger, attempt_id, project_id, source_root, manifest,
             before = os.fstat(stream.fileno())
             while True:
                 transfer_check()
+                remaining_transfer_seconds()
                 block = stream.read(1_000_000)
                 if not block:
                     break
@@ -162,14 +197,6 @@ def upload_bundle(client, ledger, attempt_id, project_id, source_root, manifest,
         if total_limit is not None and total_bytes > total_limit:
             raise ValueError("Reviewed bundle exceeds the total upload byte limit")
         reviewed.append((name, path, size))
-    transfer_deadline = time.monotonic() + timeout_seconds
-
-    def remaining_transfer_seconds():
-        remaining = transfer_deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("SSH upload exceeded its finite transfer window")
-        return remaining
-
     if isinstance(ledger, ExecutionStore) and endpoint.route == "proxy":
         proxy = SSHProxySession(endpoint, key_file, known_hosts, runner=runner)
         effective_chunk_bytes = min(chunk_bytes, proxy.chunk_bytes)
