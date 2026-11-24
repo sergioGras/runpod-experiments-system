@@ -147,13 +147,21 @@ class BinaryProcess:
         if self.process.stdin and not self.process.stdin.closed:
             self.process.stdin.close()
 
+    def _release_exit_resources(self) -> None:
+        self._timer.cancel()
+        if self._stderr is not None:
+            self._stderr.close()
+
     def poll(self) -> int | None:
-        """Return the child exit code, or None while the child is running."""
-        return self.process.poll()
+        """Return exit status and release the log once the child has exited."""
+        result = self.process.poll()
+        if result is not None:
+            self._release_exit_resources()
+        return result
 
     def wait(self, timeout=None):
         result = self.process.wait(timeout=timeout)
-        self._timer.cancel()
+        self._release_exit_resources()
         return result
 
     def terminate(self, timeout=5):

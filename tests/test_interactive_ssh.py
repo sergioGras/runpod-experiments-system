@@ -114,6 +114,19 @@ class InteractiveSSHTests(unittest.TestCase):
                 session.receive(8, 1)
             session.terminate()
 
+    def test_exit_releases_log_without_discarding_buffered_stdout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session, seen = self.setup_session(directory)
+            process = seen["process"]
+            try:
+                self.assertFalse(process.kwargs["stderr"].closed)
+                process.code = 0
+                self.assertEqual(session.poll(), 0)
+                self.assertTrue(process.kwargs["stderr"].closed)
+                self.assertEqual(session.receive(8, 1), b"response")
+            finally:
+                session.terminate()
+
 
 if __name__ == "__main__":
     unittest.main()
