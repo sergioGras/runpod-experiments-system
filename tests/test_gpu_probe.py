@@ -1,6 +1,7 @@
 import hashlib
 import io
 from pathlib import Path
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -13,7 +14,7 @@ from runpod_experiments.provider import SSHRouteEndpoint
 
 FRAME = (
     b"__RPE_DRIVER_BEGIN__\n"
-    b"NVIDIA-SMI 550.54.14 Driver Version: 550.54.14 CUDA Version: 12.8\n"
+    b"| NVIDIA-SMI 570.172.08 Driver Version: 570.172.08 CUDA Version: 12.8     |\n"
     b"__RPE_GPU_BEGIN__\n"
     b"GPU-a1,NVIDIA A40,46068\n"
 )
@@ -49,6 +50,9 @@ class GPUProbeTests(unittest.TestCase):
         self.assertIn("ProxyCommand=none", argv)
         self.assertIn("ForwardAgent=no", argv)
         self.assertIn("nvidia-smi --query-gpu=uuid,name,memory.total", argv[-1])
+        remote = shlex.split(argv[-1])[-1]
+        self.assertIn("nvidia-smi | grep -m1 'NVIDIA-SMI'", remote)
+        self.assertNotIn("nvidia-smi | head -n 1", remote)
         self.assertNotIn("nvidia-smi -q", argv[-1])
         self.assertEqual(captured["kwargs"]["timeout_seconds"], 20)
         self.assertEqual(captured["kwargs"]["max_output_bytes"], 32_768)

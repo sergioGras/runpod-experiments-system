@@ -32,7 +32,7 @@ Never use a real account to prove that an unapproved create guard rejects a call
 | Ownership | Sibling and unknown resources, name/ID mismatch, duplicate names, renamed Pod, corrupted registry, exact-run mutation and scoped inventory |
 | Provider | Malformed/repeated pagination, bounded error bodies, redaction, wrong rate/shape/region/image/mounts, changed quotes and rejected capacity |
 | Resource selection | One resource kind per plan; CPU-only plans cannot select GPU profiles, and GPU plans retain VRAM/CUDA/runtime-attestation checks |
-| GPU runtime evidence | Malformed/oversized `nvidia-smi` output, duplicate cards, per-card VRAM/count floors, driver CUDA UMD floor and attempt/Pod/profile/host-key binding; synthetic bytes only |
+| GPU runtime evidence | Timestamped/default `nvidia-smi` output with bordered version banner, bounded banner-line selection, malformed/oversized results, duplicate cards, per-card VRAM/count floors, driver CUDA UMD floor and attempt/Pod/profile/host-key binding; synthetic bytes only |
 | Create preflight | Current quote and region, registered-key fingerprint, project inventory, supervisor readiness/heartbeat, one durable claim, post-claim supervisor change, ambiguous response with no retry and held exposure |
 | Admission | Independent-process races for the last serial/group slot and budget, two-slot profile, one-use child binding, full child ceiling committed once, parent/child hourly and total caps, deadline continuity, previous unresolved attempts, v4 migration preservation/refusal |
 | Persistence | Crash/reopen at reservation, claim, response, candidate binding, cleanup and settlement; duplicate events; schema mismatch and failed writes |

@@ -38,8 +38,9 @@ class GPURuntimeEvidenceTests(unittest.TestCase):
 
     def test_parses_nvidia_smi_summary_header(self):
         value = self.observation(
-            driver=b"NVIDIA-SMI 550.54.14 Driver Version: 550.54.14 CUDA Version: 12.8\n")
-        self.assertEqual((value.driver_version, value.cuda_umd_version), ("550.54.14", "12.8"))
+            driver=(b"| NVIDIA-SMI 570.172.08 Driver Version: 570.172.08 "
+                    b"CUDA Version: 12.8     |\n"))
+        self.assertEqual((value.driver_version, value.cuda_umd_version), ("570.172.08", "12.8"))
 
     def test_accepts_nominal_48_decimal_gb_card_reported_in_mib(self):
         value = self.observation()

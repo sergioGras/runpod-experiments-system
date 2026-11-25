@@ -32,7 +32,9 @@ _SAFE_LABEL = re.compile(r"[^\x00-\x1f\x7f]{1,128}\Z")
 # documented memory-field units. No caller-supplied shell fragments are used.
 GPU_QUERY_FIELDS = "uuid,name,memory.total"
 GPU_QUERY_FORMAT = "csv,noheader,nounits"
-GPU_DRIVER_QUERY = "nvidia-smi | head -n 1"
+# The default nvidia-smi output begins with a timestamp and borders before its
+# version banner. Select the banner line rather than assuming it is line one.
+GPU_DRIVER_QUERY = "nvidia-smi | grep -m1 'NVIDIA-SMI'"
 GPU_REMOTE_QUERY = (
     "printf '%s\\n' '__RPE_DRIVER_BEGIN__'; " + GPU_DRIVER_QUERY +
     "; printf '%s\\n' '__RPE_GPU_BEGIN__'; "
@@ -221,8 +223,8 @@ def parse_nvidia_smi(gpu_csv: bytes, driver_report: bytes, *,
         raise
 
     header = re.findall(
-        r"^\s*NVIDIA-SMI\s+[^\s]+\s+Driver Version:\s*([^\s]+)\s+"
-        r"CUDA Version:\s*([0-9]{1,3}\.[0-9]{1,3})\s*$",
+        r"^\s*\|?\s*NVIDIA-SMI\s+[^\s]+\s+Driver Version:\s*([^\s]+)\s+"
+        r"CUDA Version:\s*([0-9]{1,3}\.[0-9]{1,3})\s*\|?\s*$",
         driver_text, flags=re.MULTILINE)
     version_fields = {}
     for label, value in re.findall(

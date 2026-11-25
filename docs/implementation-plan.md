@@ -475,6 +475,19 @@ outside the checkout; the installed supervisor CLI displayed its options. Wheel
 SHA-256: `8082e431168b76709884c38063bdac02ddc74dbb3e6da4e962c56071e9dc15ed`.
 These checks validate only local package contents and synthetic behavior.
 
+M6.3 probe correction (2026-11-25): the fixed driver query now selects the
+first `nvidia-smi` output line containing `NVIDIA-SMI`. NVIDIA's documented
+default output begins with a timestamp and renders the version banner inside
+table borders, so selecting line one can yield no driver/CUDA versions. The
+parser accepts those borders and a synthetic regression covers the documented
+format. This changes `GPU_PROBE_SPEC_SHA256`; plans and attestations created
+with the prior probe specification remain bound to that earlier package and
+must not be resumed after a pin change. Focused probe/runtime/supervision tests
+pass (23 tests), followed by the full offline suite (250 passed, 1 platform
+skip). The built wheel was installed into a fresh environment and its bordered
+banner parser check passed. Consumer adoption still requires a newly pinned
+artifact and its own conformance checks.
+
 M6 fault-matrix review (2026-11-13): upload health-check abort, supervisor exit
 during upload, collector exit during workload, and remaining-time clamping now
 have regression coverage. An uploader returning after its attempt deadline is
